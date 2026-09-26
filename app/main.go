@@ -47,6 +47,8 @@ type config struct {
 	memMiB                      int
 	displays                    int
 	displayWidth, displayHeight int
+	displaySizes                []guestDisplaySize
+	displayRefreshMilliHz       int
 	// kernel-irqchip=off keeps WHPX from requesting nested virtualization,
 	// which some hosts advertise and then refuse (issue #19). Set by the
 	// startup retry, never by a flag.
@@ -733,13 +735,17 @@ func main() {
 	// Launch-UX contract (NOTES.md): guest console sized to the window it will
 	// actually get, so the picture fills it from the first frame.
 	conW, conH := screenSize(cfg.fullscreen)
-	if !cfg.fullscreen {
-		if p := rememberedWindow(cfg.dir); p != nil && !p.Maximized {
-			conW, conH = p.consoleSize()
+	if modes := launchDisplayModes(cfg.dir, cfg.fullscreen, cfg.displays); len(modes) > 0 {
+		conW, conH = modes[0].Width, modes[0].Height
+		cfg.displayRefreshMilliHz = modes[0].RefreshMilliHz
+		cfg.displaySizes = make([]guestDisplaySize, len(modes))
+		for i, mode := range modes {
+			cfg.displaySizes[i] = guestDisplaySize{Width: mode.Width, Height: mode.Height}
 		}
 	}
 	cfg.displayWidth, cfg.displayHeight = conW, conH
 	cmdline += fmt.Sprintf(" video=%dx%d", conW, conH)
+	logf("display: guest %dx%d; Windows monitor refresh %d mHz; fullscreen=%t", conW, conH, cfg.displayRefreshMilliHz, cfg.fullscreen)
 
 	reclaimDir.Store(&cfg.dir)
 	reclaimSupported.Store(cfg.diskFormat == "raw")

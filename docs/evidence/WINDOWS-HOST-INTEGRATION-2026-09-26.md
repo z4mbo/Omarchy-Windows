@@ -68,6 +68,29 @@ on the NVMe drive; its sparse Linux disk has a 200 GiB virtual capacity.
 - A controlled native Win32 Edit test delivered text to a child control
   without changing the Windows foreground app. This verifies the new routing
   for that control type; modern Notepad and game input remain unverified.
+- A live Computer Use pass opened Character Map from the guest and showed it
+  as a separate tiled Hyprland window. The Select button accepted a mouse
+  click, but selecting the visually indicated B cell repeatedly appended an
+  exclamation mark in the copied-characters field. Windows accessibility
+  reported `Selected Character: U+0021: Exclamation Mark` and field value
+  `!!` after two attempts. This is an end-to-end
+  input mismatch; its cause (bridge input, window scaling, or the test input
+  layer) is not isolated yet. The preview cannot be claimed dependable for
+  arbitrary applications on this evidence.
+- With the VM temporarily in a 722×432 host window, `hyprctl monitors -j`
+  reported a 720×400 guest mode at about 360 Hz. When the VM was maximized,
+  the guest had previously reported 2560×1417 at 360 Hz, matching the host
+  work area height rather than its full 2560×1440 panel. This prompted the
+  full-display install default and refresh-rate work.
+- The rebuilt launcher was installed over the existing launcher after a clean
+  guest shutdown, with the personalized disk retained. Its QEMU command line
+  included `video=2560x1440`, `-full-screen`, and the bundled runtime's
+  `refresh-rate=360000` option. The running guest then reported
+  `Virtual-1` at 2560×1440 and 360.039 Hz through `hyprctl monitors -j`;
+  the Windows primary monitor reported 2560×1440 at 360 Hz. Computer Use
+  showed the Omarchy desktop filling the monitor. This verifies the primary
+  monitor on this installed PC; mixed-refresh secondary outputs remain a
+  documented limitation.
 - A temporary Windows Forms app opened a borderless 2560x1440 host window. The
   bridge identified it as fullscreen and the guest presenter filled the
   2560x1417 Omarchy output in a compositor screenshot. The test app closed

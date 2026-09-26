@@ -17,7 +17,7 @@ import urllib.request
 BASE_URL = "http://10.0.2.2:4457"
 TOKEN_FILE = Path("/run/try-omarchy/seamless-token")
 MAX_JSON = 1024 * 1024
-MAX_PNG = 16 * 1024 * 1024
+MAX_PNG = 64 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 8192
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -122,7 +122,7 @@ class Bridge:
         return [validate_window(item) for item in raw]
 
     def frame(self, ident: str) -> tuple[bytes, tuple[int, int]]:
-        image = self.request(self.window_path(ident) + "/frame", limit=MAX_PNG, timeout=2)
+        image = self.request(self.window_path(ident) + "/frame", limit=MAX_PNG, timeout=6)
         return image, validate_png(image)
 
     def input(self, ident: str, payload: dict) -> None:

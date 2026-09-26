@@ -34,6 +34,8 @@ type config struct {
 	memMiB                      int
 	displays                    int
 	displayWidth, displayHeight int
+	displaySizes                []guestDisplaySize
+	displayRefreshMilliHz       int
 	forwards                    []portForward
 	sshKey                      string
 	// Guest RAM chosen by the user (settings.json or -memory); 0 = automatic.

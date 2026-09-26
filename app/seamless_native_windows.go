@@ -225,6 +225,9 @@ func (nativeSeamlessWindows) frame(window seamlessWindow) ([]byte, error) {
 	if width < 1 || height < 1 || width > 4096 || height > 4096 || int64(width)*int64(height) > 12_000_000 {
 		return nil, errSeamlessCapture
 	}
+	if frame, err := seamlessWGCFrame(window); err == nil {
+		return frame, nil
+	}
 	dc, _, _ := seamlessCreateDC.Call(0)
 	if dc == 0 {
 		return nil, errSeamlessCapture

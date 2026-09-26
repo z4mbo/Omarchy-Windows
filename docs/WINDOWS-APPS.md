@@ -33,15 +33,20 @@ rendered in separate non-floating Hyprland windows and tiled side by side on
 workspace 1. The guest received their frames through the authenticated bridge.
 The idle League client also rendered as a separate guest window; match capture
 and input remain untested. Modern Notepad ignored a posted text event, so this
-preview is not yet a dependable way to control every Windows app. See the
+preview is not yet a dependable way to control every Windows app. In a live
+Character Map test, clicking the visible B cell inside Omarchy left Windows'
+selected character at U+0021 (exclamation mark); pressing Select appended
+that wrong character. See the
 [host test notes](evidence/WINDOWS-HOST-INTEGRATION-2026-09-26.md).
 
-The current capture uses Windows `PrintWindow` and a PNG-over-HTTP transport.
-That is suitable for testing ordinary desktop apps. It is not yet a high-frame
-rate game capture path. Some apps ignore posted input, and the bridge does not
+The default capture uses Windows `PrintWindow` and a PNG-over-HTTP transport.
+An opt-in Windows Graphics Capture prototype (`OMARCHY_SEAMLESS_WGC=1`) captured
+one Character Map window on the test host and falls back to `PrintWindow` if
+it cannot capture a window. The PNG transport remains preview speed and has
+not been tested with a live game. Some apps ignore posted input, and the bridge does not
 move focus to a host window or resize it: the host app and Omarchy share one
 Windows desktop, so either action can cover or unfocus Omarchy. A Windows
-Graphics Capture and input-isolation path needs further work and physical
+input-isolation and game transport path needs further work and physical
 validation.
 
 The presenter records an app group's Hyprland workspace. When a new fullscreen

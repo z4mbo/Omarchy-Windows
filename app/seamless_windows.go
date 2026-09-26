@@ -154,6 +154,7 @@ func runSeamlessWindowBridge() (string, func(), error) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_ = server.Shutdown(ctx)
+		stopSeamlessWGC()
 		_ = os.Remove(path)
 	}, nil
 }

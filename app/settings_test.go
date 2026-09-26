@@ -9,8 +9,19 @@ import (
 
 func TestLoadSettingsMissingFileIsDefaults(t *testing.T) {
 	s, err := loadSettings(filepath.Join(t.TempDir(), settingsFileName))
-	if err != nil || s.SchemaVersion != 0 || s.Fullscreen || s.MemoryMiB != 0 || s.Share != "" || len(s.Forwards) != 0 || s.SSHKey != "" {
+	if err != nil || s.SchemaVersion != 0 || !s.Fullscreen || s.MemoryMiB != 0 || s.Share != "" || len(s.Forwards) != 0 || s.SSHKey != "" {
 		t.Fatalf("missing file: %+v %v", s, err)
+	}
+}
+
+func TestExistingWindowedSettingSurvivesImmersiveDefault(t *testing.T) {
+	path := settingsPath(t.TempDir())
+	if err := saveSettings(path, settings{Fullscreen: false}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := loadSettings(path)
+	if err != nil || s.Fullscreen {
+		t.Fatalf("existing windowed choice changed: %+v %v", s, err)
 	}
 }
 

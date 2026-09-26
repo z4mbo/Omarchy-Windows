@@ -51,6 +51,12 @@ func buildQemuArgs(cfg *config, cmdline string) []string {
 	if cfg.irqchipOff {
 		machine += ",kernel-irqchip=off"
 	}
+	// The Windows fallback QEMU lacks WINQ-EMU's refresh-rate option. Keep its
+	// original display arguments rather than making CPU fallback fail to boot.
+	refreshMilliHz := cfg.displayRefreshMilliHz
+	if cfg.runtimeID == "" {
+		refreshMilliHz = 0
+	}
 	if cfg.useGpu {
 		args = append(args,
 			"-machine", machine, "-cpu", "host", "-smp", smp, "-m", mem,
@@ -61,7 +67,7 @@ func buildQemuArgs(cfg *config, cmdline string) []string {
 			// window-close=off: the X must not hard-kill a running OS; the
 			// close guard intercepts the click and confirms + shuts down
 			// gracefully instead (closeguard.go).
-			"-display", sdlDisplay(true, cfg.hostCursor),
+			"-display", sdlDisplayWithRefresh(true, cfg.hostCursor, refreshMilliHz),
 			"-serial", "file:"+filepath.Join(vm, "serial-gpu.log"),
 		)
 	} else {
@@ -69,7 +75,7 @@ func buildQemuArgs(cfg *config, cmdline string) []string {
 			"-machine", machine, "-cpu", "qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt,+aes",
 			"-smp", smp, "-m", mem,
 			"-vga", "none", "-device", displayDevice(cfg, hostmem),
-			"-display", sdlDisplay(false, cfg.hostCursor),
+			"-display", sdlDisplayWithRefresh(false, cfg.hostCursor, refreshMilliHz),
 			"-serial", "file:"+filepath.Join(vm, "serial.log"),
 		)
 	}
@@ -190,6 +196,18 @@ func sdlDisplay(gpu, hostCursor bool) string {
 		cursor = "on"
 	}
 	return "sdl,gl=" + gl + ",show-cursor=" + cursor + ",window-close=off"
+}
+
+// WINQ-EMU's DisplayOptions.refresh-rate is millihertz and controls the
+// virtio-gpu EDID mode advertised to Hyprland. It is global to the display
+// backend, so secondary virtual displays cannot have distinct rates yet.
+// If Windows cannot report a plausible current rate, let SDL detect it.
+func sdlDisplayWithRefresh(gpu, hostCursor bool, rateMilliHz int) string {
+	options := sdlDisplay(gpu, hostCursor)
+	if rateMilliHz >= 24000 && rateMilliHz <= 1000000 {
+		options += ",refresh-rate=" + fmt.Sprint(rateMilliHz)
+	}
+	return options
 }
 
 // prepareDisk gives the guest its writable disk: a sparse copy of the factory
