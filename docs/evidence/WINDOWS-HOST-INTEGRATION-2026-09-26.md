@@ -131,6 +131,13 @@ on the NVMe drive; its sparse Linux disk has a 200 GiB virtual capacity.
   tested.
 - The Go module passed `go test ./... -count=1`; guest shell scripts passed
   `bash -n`; and `git diff --check` found no whitespace errors.
+- After the existing Omarchy VM exited through its confirmed close dialog, the
+  latest source-built launcher replaced `C:\Omarchy\TryOmarchy\TryOmarchy.exe`.
+  Its SHA-256 is `c179baf2f5fd8b1b51d9c4188de2df61d65d4ca87a47869680ff36b322140f0a`;
+  the previous executable was copied to
+  `launcher-backup-20260926-before-latest`. The existing guest disk and current
+  settings were retained. The replacement was not launched for another
+  graphical acceptance test after the user stopped Computer Use.
 
 ## Limits of this check
 
