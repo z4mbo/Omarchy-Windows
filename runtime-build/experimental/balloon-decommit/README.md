@@ -3,7 +3,8 @@
 This recipe produces a **separate, unshipped QEMU runtime** from the pinned
 WINQ-EMU source and the production patch set, then adds
 `0001-windows-recommit-discarded-anonymous-ram.patch` and
-`0002-report-balloon-reclaim-state.patch`. It does not change the
+`0002-report-balloon-reclaim-state.patch` plus
+`0003-skip-unsupported-windows-balloon-deflate-hint.patch`. It does not change the
 production source lock or installed runtime. The archives are named
 `winq-emu-alpha10-balloon-experimental-*.zip` and include the experimental
 patch in their source provenance.
@@ -27,20 +28,21 @@ On Windows, the lightweight API fixture can be run before a full build:
 python runtime-build/experimental/balloon-decommit/test_win32_ram_discard.py
 ```
 
-The patched runtime behaves exactly like the production runtime unless its
-process environment contains `OMARCHY_QEMU_BALLOON_DECOMMIT=1`. Opting in
-skips WHPX guest RAM pinning and discards QEMU-owned anonymous guest RAM via
+The patched runtime only enables RAM discard when its process environment
+contains `OMARCHY_QEMU_BALLOON_DECOMMIT=1`. The unsupported Windows deflate
+hint is skipped in this isolated runtime even without that opt-in. Opting in
+also skips WHPX guest RAM pinning and discards QEMU-owned anonymous guest RAM via
 `VirtualFree(MEM_DECOMMIT)` followed by same-address
 `VirtualAlloc(MEM_COMMIT)`. File-backed, shared, and caller-owned blocks stay
 on the existing path. Recommit failure stops QEMU because the guest RAM range
 would otherwise be inaccessible. Use only with a disposable VM and backup.
 
 The second patch adds a read-only QOM property to the virtio-balloon device.
-For a device at `/machine/peripheral/experimental-balloon`, query it through
-QMP after QEMU starts:
+For a PCI balloon at `/machine/peripheral/experimental-balloon`, query its
+`virtio-backend` child through QMP after QEMU starts:
 
 ```json
-{"execute":"qom-get","arguments":{"path":"/machine/peripheral/experimental-balloon","property":"x-omarchy-balloon-reclaim-active"}}
+{"execute":"qom-get","arguments":{"path":"/machine/peripheral/experimental-balloon/virtio-backend","property":"x-omarchy-balloon-reclaim-active"}}
 ```
 
 `true` means that this running Windows QEMU process selected WHPX and its

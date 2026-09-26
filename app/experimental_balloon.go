@@ -131,8 +131,10 @@ type experimentalBalloonController struct {
 
 func (c *experimentalBalloonController) ensureReclaimActive(ctx context.Context) error {
 	var active bool
+	// virtio-balloon-pci forwards its standard statistics properties, but QOM
+	// keeps this experimental property on the virtio-balloon-device child.
 	if err := c.qmp.Call(ctx, "qom-get", map[string]any{
-		"path": c.balloonPath, "property": balloonReclaimCapabilityProperty,
+		"path": c.balloonPath + "/virtio-backend", "property": balloonReclaimCapabilityProperty,
 	}, &active); err != nil {
 		return fmt.Errorf("experimental QEMU cannot attest RAM reclaim: %w", err)
 	}

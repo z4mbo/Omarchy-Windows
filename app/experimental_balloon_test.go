@@ -119,6 +119,9 @@ func (f *fakeExperimentalBalloonQMP) Call(_ context.Context, command string, arg
 	case "qom-get":
 		property := args.(map[string]any)["property"]
 		if property == balloonReclaimCapabilityProperty {
+			if args.(map[string]any)["path"] != "/machine/peripheral/experimental-balloon/virtio-backend" {
+				return fmt.Errorf("attestation queried the PCI wrapper instead of the virtio backend")
+			}
 			if f.capabilityMissing {
 				return fmt.Errorf("PropertyNotFound")
 			}

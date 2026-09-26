@@ -14,6 +14,7 @@ EXPERIMENTAL_NAME = "winq-emu-alpha10-balloon-experimental"
 PATCHES = (
     ("0001-windows-recommit-discarded-anonymous-ram.patch", "0013-windows-recommit-discarded-anonymous-ram.patch"),
     ("0002-report-balloon-reclaim-state.patch", "0014-report-balloon-reclaim-state.patch"),
+    ("0003-skip-unsupported-windows-balloon-deflate-hint.patch", "0015-skip-unsupported-windows-balloon-deflate-hint.patch"),
 )
 
 

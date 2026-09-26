@@ -320,9 +320,11 @@ print('yes')
     ]
 
     if args.displays:
-        device = {"driver": "virtio-gpu-pci", "max_outputs": args.displays,
-                  "outputs": [{"name": f"Omarchy {index + 1}", "xres": 1280, "yres": 720} for index in range(args.displays)]}
-        command.extend(["-device", json.dumps(device)])
+        # The smoke runner uses distro QEMU, which supports the standard
+        # virtio-gpu properties but not WINQ-EMU's custom outputs list.
+        # Output names and per-head geometry are exercised separately by the
+        # bundled runtime; this test checks that the factory desktop boots.
+        command.extend(["-device", f"virtio-gpu-pci,max_outputs={args.displays},xres=1280,yres=720"])
     if args.compat_revision >= 32:
         command.extend(["-fw_cfg", "name=opt/omarchy/seamless-token,string=" + WINDOWS_APPS_TEST_TOKEN])
 
