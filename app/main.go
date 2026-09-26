@@ -62,6 +62,7 @@ type config struct {
 	cpuOverride  int
 	cpus         int
 	hostTotalMiB int
+	adaptiveCPU  bool
 	// Rendering decision inputs, see render_probe.go.
 	renderMode    string
 	runtimeID     string
@@ -723,6 +724,7 @@ func main() {
 		fatal("Cannot allocate resources: %v", err)
 	}
 	cfg.cpus, cfg.memMiB, cfg.hostTotalMiB = allocation.CPUs, allocation.MemoryMiB, host.TotalMiB
+	cfg.adaptiveCPU = profile != resourceManual
 	logf("resources: profile=%s, %d of %d logical processors, %d MiB guest RAM; Windows available=%d MiB, CPU sample known=%t busy=%.1f%%",
 		profile, cfg.cpus, host.LogicalCPUs, cfg.memMiB, host.AvailableMiB, host.CPUKnown, host.CPUBusy*100)
 	getUI().setStatus("Starting Omarchy...")
@@ -826,14 +828,19 @@ func supervise(cfg *config, cmdline string) bool {
 			fatal("QEMU failed to start: %v", err)
 		}
 		qemuPid.Store(uint32(proc.Process.Pid))
+		stopCPUScheduling := func() {}
+		if cfg.adaptiveCPU {
+			stopCPUScheduling = startAdaptiveCPUScheduling(uint32(proc.Process.Pid))
+		}
 		exited := make(chan error, 1)
-		go func() {
-			err := proc.Wait()
+		go func(child *exec.Cmd, stopCPU func()) {
+			err := child.Wait()
+			stopCPU()
 			if err != nil {
 				logf("QEMU process exited with error: %v", err)
 			}
 			exited <- err
-		}()
+		}(proc, stopCPUScheduling)
 
 		// Do NOT touch QMP during early guest boot: a monitor connection in
 		// the first seconds reliably wedges QEMU's main loop under WHPX (the

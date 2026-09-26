@@ -561,8 +561,9 @@ func runSettingsDialog(path, dataDir string, portable bool) (saved bool) {
 			if profile == resourceMaximum {
 				help += " Measures Windows usage again at launch and leaves extra headroom."
 			}
+			help += " CPU scheduling favors active Windows apps when busy."
 		}
-		help += fmt.Sprintf("\nPC: %d logical CPUs, %.1f GiB RAM; %.1f GiB available when Settings opened. Applies next boot; no live resizing.", hostSnapshot.LogicalCPUs, float64(hostSnapshot.TotalMiB)/1024, float64(hostSnapshot.AvailableMiB)/1024)
+		help += fmt.Sprintf("\nPC: %d CPUs, %.1f GiB RAM; %.1f GiB available. CPU count and RAM changes need a restart.", hostSnapshot.LogicalCPUs, float64(hostSnapshot.TotalMiB)/1024, float64(hostSnapshot.AvailableMiB)/1024)
 		setText(hResourceHelp, help)
 	}
 	updateResourceControls()

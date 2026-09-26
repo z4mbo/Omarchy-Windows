@@ -83,6 +83,10 @@ Windows VM tests unless noted in the release checklist):
   launcher commits a guest-image update. Its explicit integration revision is
   bumped whenever those files must be reapplied without a kernel version change
 
+Patch 0085 bumps that integration revision to 33. It embeds the bounded input
+worker and frame-validity checks for Windows app previews in fresh images and
+copies the helper onto older guest disks during their normal image update.
+
 Patch 0047 supplies the upstream lock PAM profile in fresh images and repairs
 only missing profiles on older guests. Existing administrator policies remain
 intact, including during runtime package upgrades.

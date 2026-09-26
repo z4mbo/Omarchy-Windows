@@ -15,6 +15,7 @@ install -m 0755 -- "$script_dir/omarchy-windows-app" "$bin_dir/omarchy-windows-a
 install -m 0755 -- "$script_dir/omarchy-windows-present" "$bin_dir/omarchy-windows-present"
 install -m 0755 -- "$script_dir/omarchy-windows-open" "$bin_dir/omarchy-windows-open"
 install -m 0644 -- "$script_dir/omarchy_windows_protocol.py" "$bin_dir/omarchy_windows_protocol.py"
+install -m 0644 -- "$script_dir/omarchy_windows_presenter_input.py" "$bin_dir/omarchy_windows_presenter_input.py"
 
 if ! command -v sudo >/dev/null 2>&1; then
   printf 'The Windows window preview needs sudo once to install its boot-time token service.\n' >&2

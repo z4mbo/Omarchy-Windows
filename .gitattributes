@@ -7,3 +7,4 @@ scripts/gpu/blender/*.patch text eol=lf whitespace=-blank-at-eol
 scripts/windows-apps/* text eol=lf
 guest-build/*.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof
 runtime-build/experimental/**/*.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof
+docs/evidence/balloon-auto-20260926-*.json* text eol=lf

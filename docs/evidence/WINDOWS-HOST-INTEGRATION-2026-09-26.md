@@ -118,6 +118,17 @@ on the NVMe drive; its sparse Linux disk has a 200 GiB virtual capacity.
   made no visual click or password entry. The isolated bridge B selection
   above remains the latest positive input result; the in-Omarchy presenter
   click has not passed.
+- Source revision `64a8ad8` and the follow-up guest-image patch separate input
+  delivery from PNG capture, coalesce pointer motion, and require a matching
+  captured frame after a window resize. A capture failure hides its stale
+  frame, blocks new mouse and key presses, and shows a status window until a
+  fresh frame arrives. Releases for already forwarded buttons and keys remain
+  allowed. A 256-event input backlog or an ambiguous bridge POST failure stops
+  the preview and shows a visible error; queued clicks are not replayed.
+  Twelve presenter/protocol tests pass with recorded Character Map dimensions.
+  These are code and contract checks. The earlier wrong-character GTK click
+  has not been retested. An app may retain its own pressed state if a release
+  POST fails.
 - Two initial direct WGC probes of PowerShell-launched Character Map windows
   timed out. A Character Map window launched through Computer Use yielded a
   487×435 WGC frame in under one second, including while occluded by QEMU.

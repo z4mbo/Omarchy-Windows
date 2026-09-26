@@ -19,14 +19,14 @@ The Omarchy mark in the app icon is sourced from the
 [official Omarchy brand kit](https://omarchy.org/brand/) and remains subject to
 Omarchy's trademark rights.
 
-The [upstream v0.0.20 preview](https://github.com/omacom/try-omarchy-windows/releases/tag/v0.0.20-preview) does **not** contain this fork's Windows window preview or resource-profile changes. This fork does not yet publish a complete one-click installer. Its [candidate guest image was built and booted in CI](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36253111377), with the Windows-app menu and per-boot bridge token present. The complete image also [booted headlessly on a physical Windows WHPX host](docs/evidence/FRESH-GUEST-CANDIDATE-2026-09-26.md). A physical one-click installer and graphical fresh-guest test remain open. Public release also needs an independent update-signing key and Azure Artifact Signing configured for this repository. The existing-guest setup below works for development and testing.
+The [upstream v0.0.20 preview](https://github.com/omacom/try-omarchy-windows/releases/tag/v0.0.20-preview) does **not** contain this fork's Windows window preview or resource-profile changes. This fork does not yet publish a complete one-click installer. Its [candidate guest image was built and booted in CI](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36253111377), with the Windows-app menu and per-boot bridge token present. The complete image also [booted headlessly on a physical Windows WHPX host](docs/evidence/FRESH-GUEST-CANDIDATE-2026-09-26.md), where isolated portable and standard first-install setup tests passed. A physical one-click installer and graphical fresh-guest test remain open. Public release also needs an independent update-signing key and Azure Artifact Signing configured for this repository. The existing-guest setup below works for development and testing.
 
 ## Current capabilities and limits
 
 - **Omarchy desktop**: Hyprland, themes, tray, clipboard, audio, shared folders, file drops, and guest lifecycle are available through one Windows launcher. New or reset guests use the image version bundled with the selected release.
 - **GPU translation**: Hyprland and tested OpenGL programs use the Windows GPU through VirGL. On the RTX 5080 host, Blender 5.2.2 viewport, Workbench and conservative Eevee scenes, Godot Compatibility mode, and SuperTuxKart ran. Blender Cycles used CPU. Native NVIDIA CUDA/OptiX, PCI GPU passthrough, and reliable Vulkan gaming are not available in this VM configuration; see [compatibility](docs/COMPATIBILITY.md).
 - **Display matching**: a new settings file defaults to Immersive fullscreen. The launcher reads Windows monitor modes at launch; the installed bundled runtime advertised 2560×1440 at 360 Hz to Hyprland on the tested primary monitor. Existing windowed choices remain saved. Windowed mode follows the window's client size, and mixed-refresh displays and live monitor changes have [limits](docs/DISPLAY-MATCHING.md).
-- **Host-aware boot resources**: Balanced and Maximum Performance profiles size vCPUs and RAM from Windows' current load. Maximum Performance now keeps at least one third of total RAM available for later Windows activity. Windows schedules CPU time between host and guest. Guest vCPU count and RAM do not resize while running with the installed runtime. A [separate experimental RAM-return runtime](docs/evidence/BALLOON-EXPERIMENT-2026-09-26.md) returned resident memory to Windows through two physical 4→2→4 GiB cycles with 120 guest integrity checks. It remains opt-in and disconnected from normal launches pending longer gaming and graphics stability checks.
+- **Host-aware resources**: Balanced and Maximum Performance profiles size vCPUs and RAM from Windows' current load. Maximum Performance keeps at least one third of total RAM available for later Windows activity. Automatic profiles also lower QEMU's CPU scheduling priority while another Windows app is active and the CPU stays busy, then restore it when Omarchy is active or load drops. [Native scheduling tests passed](docs/evidence/ADAPTIVE-CPU-2026-09-26.md); simultaneous game performance remains unmeasured. Guest vCPU count and RAM do not resize while running with the installed runtime. A [separate experimental RAM-return runtime](docs/evidence/BALLOON-EXPERIMENT-2026-09-26.md) returned resident memory to Windows through two physical 4→2→4 GiB cycles with 120 guest integrity checks. It remains opt-in and disconnected from normal launches pending longer gaming and graphics stability checks.
 - **Separate Windows app windows in Omarchy**: the opt-in preview mirrors host-granted top-level Windows windows into individual GTK4/Hyprland surfaces. Notepad and File Explorer tiled side by side in a physical test; Character Map did too after the grant gate was installed. Existing Windows windows require selection from the Omarchy tray on Windows. The host still runs the app, so it keeps its Windows files and drivers. Default capture uses `PrintWindow` and PNG; an opt-in Windows Graphics Capture prototype delivered Character Map frames through the guest bridge. A later isolated guest-to-host B-click test passed after frame alignment, but the earlier visible GTK presenter click failed and has not been retested successfully. The transport is not yet suitable for gameplay.
 - **Fullscreen preview**: a synthetic borderless Windows test window was detected as fullscreen and filled the Omarchy output. The League client-to-match transition, actual match frames, controls, and same-workspace behavior remain unverified.
 - **Single visible Windows app**: installed shortcuts and Apps registration say Omarchy; Settings lives in its tray. The launcher keeps the existing `TryOmarchy.exe` filename so current installations update without deleting their Linux disk.
@@ -190,11 +190,30 @@ not pin cores or guarantee an FPS increase. Save, shut down, and relaunch to
 apply a profile change. Windows must retain headroom for new applications,
 QEMU, and graphics resources.
 
-Windows schedules CPU time between its apps and Omarchy as their workloads
-change. The current bundled Windows QEMU runtime does not return ballooned
+Balanced and Maximum performance also adjust QEMU's CPU scheduling priority
+while the VM runs. If another Windows app is active and overall CPU use stays
+at or above 70% for six seconds, the launcher switches QEMU from Normal to Below
+Normal priority. Returning to Omarchy restores Normal at the next two-second
+sample; CPU use at or below 50% for ten seconds also restores it. This gives active
+Windows apps scheduling preference while the guest can still use spare CPU
+time. It does not cap CPU usage or promise a game FPS improvement. Manual mode,
+hosts with more than 64 logical processors, and a detected manual process
+priority change leave scheduling to Windows. Unknown samples restore Normal.
+The native Windows test verifies priority changes and manual-override handling
+on a disposable process; a simultaneous Windows-game/guest workload remains
+an acceptance check.
+
+The current bundled Windows QEMU runtime does not return ballooned
 guest pages to Windows physical memory, so guest RAM cannot safely resize live.
 Resource profiles measure Windows load at launch and choose the VM's boot-time
 capacity. The VM must restart to change guest RAM or vCPU count.
+
+An isolated automatic RAM-controller test also completed a 4→3.5→4 GiB
+cycle with 120 successful guest integrity checks and a clean shutdown. It used
+real Windows memory readings and 768 MiB of temporary host pressure, with
+test-only reserve thresholds to avoid exhausting host RAM. This verifies the
+controller's decisions in that setup, not production gaming performance or
+equivalent physical RAM return. See the [experiment record](docs/evidence/BALLOON-EXPERIMENT-2026-09-26.md).
 
 If CPU measurement fails, or the PC has more than 64 logical processors,
 Maximum performance uses the Balanced CPU count. An unavailable memory query

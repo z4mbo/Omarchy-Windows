@@ -186,6 +186,13 @@ def main() -> None:
             "test -r /run/try-omarchy/seamless-token && echo yes || echo no"
         )
         EXPECTED_FACTS["windows-apps-token"] = "yes"
+    if args.compat_revision >= 33:
+        FACT_CHECKS["windows-apps-input-helper"] = (
+            "test -f /usr/local/bin/omarchy_windows_presenter_input.py && "
+            "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/usr/local/bin "
+            "python3 -c 'import omarchy_windows_presenter_input' >/dev/null 2>&1 && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-apps-input-helper"] = "yes"
 
     login_delay = args.login_delay if args.login_delay is not None else (60 if args.accel == "tcg" else 0)
     if login_delay < 0:

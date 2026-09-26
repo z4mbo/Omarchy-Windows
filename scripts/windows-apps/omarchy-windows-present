@@ -12,13 +12,13 @@ import hashlib
 import argparse
 import json
 import os
-import queue
 import subprocess
 import sys
 import threading
 import time
 
 from omarchy_windows_protocol import Bridge, BridgeError, load_token
+from omarchy_windows_presenter_input import InputMailbox, InputMailboxClosed, frame_matches_window, image_point, run_input_worker, should_forward_key
 
 try:
     import gi
@@ -111,6 +111,9 @@ class HostWindow:
         self.marker = marker_for(self.ident)
         self.metadata = metadata
         self.frame_size = (metadata["width"], metadata["height"])
+        self.frame_ready = False
+        self.pressed_buttons: set[int] = set()
+        self.forwarded_keys: set[int] = set()
         self.pending_workspace = workspace
         self.move_attempts = 0
         self.fullscreen_requested = False
@@ -144,20 +147,30 @@ class HostWindow:
             GLib.timeout_add(150, self.move_to_inherited_workspace)
 
     def image_point(self, x: float, y: float) -> tuple[int, int]:
-        width = max(1, self.picture.get_width())
-        height = max(1, self.picture.get_height())
-        frame_width, frame_height = self.frame_size
-        return (
-            min(frame_width - 1, max(0, round(x * frame_width / width))),
-            min(frame_height - 1, max(0, round(y * frame_height / height))),
-        )
+        return image_point(x, y, (self.picture.get_width(), self.picture.get_height()), self.frame_size)
 
     def pointer(self, x: float, y: float, button: int | None = None, down: bool | None = None) -> None:
-        px, py = self.image_point(x, y)
+        releasing = button is not None and down is False and button in self.pressed_buttons
+        if button is not None and down is False and not releasing:
+            return
+        if not self.frame_ready and not releasing:
+            return
+        try:
+            px, py = self.image_point(x, y)
+        except ValueError:
+            if not releasing:
+                return
+            px, py = 0, 0
+        px = min(px, self.metadata["width"] - 1)
+        py = min(py, self.metadata["height"] - 1)
         packet: dict[str, object] = {"type": "pointer", "x": px, "y": py}
         if button is not None:
             packet.update(button=button, down=down)
-        self.app.send_input(self.ident, packet)
+        if self.app.send_input(self.ident, packet) and button is not None:
+            if down:
+                self.pressed_buttons.add(button)
+            else:
+                self.pressed_buttons.discard(button)
 
     def on_pressed(self, gesture: Gtk.GestureClick, _count: int, x: float, y: float) -> None:
         self.pointer(x, y, gesture.get_current_button(), True)
@@ -175,19 +188,31 @@ class HostWindow:
         vk = key_to_vk(keyval)
         if vk is None:
             return False
-        self.app.send_input(self.ident, {"type": "key", "vk": vk, "down": True})
+        if should_forward_key(True, self.frame_ready, vk in self.forwarded_keys):
+            if self.app.send_input(self.ident, {"type": "key", "vk": vk, "down": True}):
+                self.forwarded_keys.add(vk)
         return True
 
     def on_key_released(self, _controller: Gtk.EventControllerKey, keyval: int, _keycode: int, _state: Gdk.ModifierType) -> None:
         vk = key_to_vk(keyval)
-        if vk is not None:
-            self.app.send_input(self.ident, {"type": "key", "vk": vk, "down": False})
+        if vk is not None and should_forward_key(False, self.frame_ready, vk in self.forwarded_keys):
+            if self.app.send_input(self.ident, {"type": "key", "vk": vk, "down": False}):
+                self.forwarded_keys.discard(vk)
 
     def on_close(self, _window: Gtk.ApplicationWindow) -> bool:
         if not self.retiring:
             self.app.dismissed.add(self.ident)
             self.app.send_close(self.ident)
+            if self.app.input_failed:
+                return False
             self.app.windows.pop(self.ident, None)
+            self.app.capture_failed.discard(self.ident)
+            if self.app.status is not None and not self.app.capture_failed:
+                if self.app.windows:
+                    self.app.status.hide()
+                else:
+                    self.app.message.set_text("The selected Windows app has no visible windows. Close this preview or open the app again from the Omarchy menu.")
+                    self.app.status.present()
         return False
 
     def move_to_inherited_workspace(self) -> bool:
@@ -228,16 +253,28 @@ class HostWindow:
     def update(self, metadata: dict) -> None:
         self.metadata = metadata
         self.window.set_title((metadata["title"] or metadata["process"] or "Windows app")[:160] + self.marker)
+        if not frame_matches_window(self.frame_size, metadata):
+            self.invalidate_frame()
         if not self.pending_workspace:
             self.set_fullscreen(metadata["fullscreen"])
 
-    def update_frame(self, data: bytes, size: tuple[int, int]) -> None:
-        self.frame_size = size
+    def invalidate_frame(self) -> None:
+        self.frame_ready = False
+        self.picture.set_paintable(None)
+
+    def update_frame(self, data: bytes, size: tuple[int, int]) -> bool:
+        if not frame_matches_window(size, self.metadata):
+            self.invalidate_frame()
+            return False
         try:
             texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
             self.picture.set_paintable(texture)
+            self.frame_size = size
+            self.frame_ready = True
+            return True
         except GLib.Error:
-            pass
+            self.invalidate_frame()
+            return False
 
     def retire(self) -> None:
         self.retiring = True
@@ -248,17 +285,20 @@ class Presenter(Gtk.Application):
     def __init__(self, bridge: Bridge, selected_id: str, group: str):
         super().__init__(application_id="org.omarchy.WindowsPresent", flags=Gio.ApplicationFlags.NON_UNIQUE)
         self.bridge = bridge
+        self.input_bridge = Bridge(bridge.token, bridge.base_url)
         self.selected_id = selected_id
         self.group = group
         self.windows: dict[str, HostWindow] = {}
         self.dismissed: set[str] = set()
-        self.commands: queue.Queue[tuple[str, str, dict | None]] = queue.Queue(maxsize=128)
+        self.commands = InputMailbox()
         self.stop = threading.Event()
         self.status: Gtk.ApplicationWindow | None = None
         self.last_error = ""
         self.workspace_history: dict[str, str] = {}
         self.pending_frames: set[str] = set()
         self.pending_lock = threading.Lock()
+        self.input_failed = False
+        self.capture_failed: set[str] = set()
 
     def do_activate(self) -> None:
         self.hold()
@@ -275,6 +315,8 @@ class Presenter(Gtk.Application):
         self.status.connect("close-request", self.on_status_close)
         self.status.present()
         threading.Thread(target=self.worker, daemon=True).start()
+        threading.Thread(target=run_input_worker,
+                         args=(self.commands, self.input_bridge, self.stop, self.report_input_error), daemon=True).start()
 
     def on_status_close(self, _window: Gtk.ApplicationWindow) -> bool:
         self.quit()
@@ -292,34 +334,41 @@ class Presenter(Gtk.Application):
         except OSError:
             pass
 
-    def send_input(self, ident: str, payload: dict) -> None:
+    def send_input(self, ident: str, payload: dict) -> bool:
         try:
-            self.commands.put_nowait(("input", ident, payload))
-        except queue.Full:
-            pass
+            self.commands.put("input", ident, payload)
+            return True
+        except InputMailboxClosed:
+            self.fail_input()
+            return False
 
     def send_close(self, ident: str) -> None:
         try:
-            self.commands.put_nowait(("close", ident, None))
-        except queue.Full:
-            pass
+            self.commands.put("close", ident)
+        except InputMailboxClosed:
+            self.fail_input()
+
+    def report_input_error(self, _error: BridgeError) -> None:
+        GLib.idle_add(self.fail_input, "Windows app input stopped because the Windows bridge failed. Close this preview and open it again.")
+
+    def fail_input(self, message: str = "Windows app input stopped because the Windows bridge did not keep up. Close this preview and open it again.") -> bool:
+        if self.input_failed:
+            return False
+        self.input_failed = True
+        self.stop.set()
+        self.commands.close()
+        for view in list(self.windows.values()):
+            view.retire()
+        self.windows.clear()
+        if self.status is not None:
+            self.message.set_text(message)
+            self.status.present()
+        return False
 
     def worker(self) -> None:
         catalog: list[dict] = []
         next_catalog = 0.0
         while not self.stop.is_set():
-            try:
-                for _ in range(24):
-                    command, ident, payload = self.commands.get_nowait()
-                    try:
-                        if command == "close":
-                            self.bridge.close(ident)
-                        elif payload is not None:
-                            self.bridge.input(ident, payload)
-                    except BridgeError:
-                        pass
-            except queue.Empty:
-                pass
             now = time.monotonic()
             if now >= next_catalog:
                 next_catalog = now + POLL_SECONDS
@@ -349,16 +398,31 @@ class Presenter(Gtk.Application):
                 try:
                     data, dimensions = self.bridge.frame(metadata["id"])
                     GLib.idle_add(self.apply_frame, metadata["id"], data, dimensions)
-                except BridgeError:
+                except BridgeError as exc:
                     with self.pending_lock:
                         self.pending_frames.discard(metadata["id"])
+                    GLib.idle_add(self.frame_failed, metadata["id"], str(exc))
                     continue
             self.stop.wait(FRAME_INTERVAL)
 
     def show_status(self, message: str) -> bool:
         if self.status is not None:
             self.message.set_text(message)
-            if not self.windows:
+            for view in self.windows.values():
+                view.invalidate_frame()
+                self.capture_failed.add(view.ident)
+            self.status.present()
+        return False
+
+    def frame_failed(self, ident: str, _reason: str) -> bool:
+        view = self.windows.get(ident)
+        if view is None:
+            return False
+        view.invalidate_frame()
+        if ident not in self.capture_failed:
+            self.capture_failed.add(ident)
+            if self.status is not None:
+                self.message.set_text("A Windows app frame could not be captured. The preview will resume when a fresh frame arrives.")
                 self.status.present()
         return False
 
@@ -373,6 +437,8 @@ class Presenter(Gtk.Application):
         return self.workspace_history.get(group)
 
     def apply_catalog(self, catalog: list[dict]) -> bool:
+        if self.input_failed:
+            return False
         allowed = [w for w in catalog if presentable(w) and
                    (w["id"] == self.selected_id or w["appGroup"] == self.group)]
         allowed.sort(key=lambda w: (not w["fullscreen"], w["id"] != self.selected_id))
@@ -388,6 +454,7 @@ class Presenter(Gtk.Application):
         for ident in list(self.windows):
             if ident not in live:
                 self.windows.pop(ident).retire()
+                self.capture_failed.discard(ident)
         for metadata in allowed:
             ident = metadata["id"]
             if ident in self.dismissed:
@@ -398,9 +465,9 @@ class Presenter(Gtk.Application):
                 workspace = self.inherited_workspace(metadata["appGroup"]) if metadata["fullscreen"] else None
                 self.windows[ident] = HostWindow(self, metadata, workspace)
         if self.status is not None:
-            if self.windows:
+            if self.windows and not self.capture_failed:
                 self.status.hide()
-            else:
+            elif not self.windows:
                 self.message.set_text("The selected Windows app has no visible windows. Close this preview or open the app again from the Omarchy menu.")
                 if had_windows:
                     self.status.present()
@@ -410,7 +477,12 @@ class Presenter(Gtk.Application):
         try:
             view = self.windows.get(ident)
             if view is not None:
-                view.update_frame(data, dimensions)
+                if view.update_frame(data, dimensions):
+                    self.capture_failed.discard(ident)
+                    if not self.capture_failed and self.status is not None:
+                        self.status.hide()
+                else:
+                    self.frame_failed(ident, "frame dimensions changed")
         finally:
             with self.pending_lock:
                 self.pending_frames.discard(ident)
