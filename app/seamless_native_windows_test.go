@@ -3,12 +3,63 @@
 package main
 
 import (
+	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"runtime"
 	"syscall"
 	"testing"
 	"unsafe"
 )
+
+func TestSeamlessAlignWGCFramePreservesWindowCoordinates(t *testing.T) {
+	source := image.NewRGBA(image.Rect(0, 0, 4, 3))
+	source.Set(0, 0, color.RGBA{R: 255, A: 255})
+	source.Set(3, 2, color.RGBA{B: 255, A: 255})
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, source); err != nil {
+		t.Fatal(err)
+	}
+	outer := seamlessRect{left: 100, top: 200, right: 107, bottom: 205}
+	visible := seamlessRect{left: 102, top: 201, right: 106, bottom: 204}
+	output, err := seamlessAlignWGCFrame(encoded.Bytes(), outer, visible)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aligned, err := png.Decode(bytes.NewReader(output))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := aligned.Bounds().Size(); got.X != 7 || got.Y != 5 {
+		t.Fatalf("aligned size = %v, want 7x5", got)
+	}
+	if got := color.RGBAModel.Convert(aligned.At(2, 1)); got != (color.RGBA{R: 255, A: 255}) {
+		t.Fatalf("visible top-left pixel = %v", got)
+	}
+	if got := color.RGBAModel.Convert(aligned.At(5, 3)); got != (color.RGBA{B: 255, A: 255}) {
+		t.Fatalf("visible bottom-right pixel = %v", got)
+	}
+	if _, _, _, alpha := aligned.At(0, 0).RGBA(); alpha != 0 {
+		t.Fatal("omitted resize border should be transparent")
+	}
+	centered, err := seamlessAlignWGCFrame(encoded.Bytes(), outer, seamlessRect{left: 101, top: 201, right: 106, bottom: 204})
+	if err != nil {
+		t.Fatalf("small composited rim should align: %v", err)
+	}
+	centeredImage, err := png.Decode(bytes.NewReader(centered))
+	if err != nil || color.RGBAModel.Convert(centeredImage.At(1, 1)) != (color.RGBA{R: 255, A: 255}) {
+		t.Fatalf("composited rim was not centered: %v", err)
+	}
+	if _, err := seamlessAlignWGCFrame(encoded.Bytes(), seamlessRect{right: 20, bottom: 20}, visible); err == nil {
+		t.Fatal("large capture geometry mismatch must fail closed")
+	}
+	unchanged, err := seamlessAlignWGCFrame(encoded.Bytes(), seamlessRect{left: 0, top: 0, right: 4, bottom: 3}, visible)
+	if err != nil || !bytes.Equal(unchanged, encoded.Bytes()) {
+		t.Fatalf("full-window capture changed: %v", err)
+	}
+}
 
 func TestSeamlessNativeInputTargetsChildWithoutHostFocus(t *testing.T) {
 	if os.Getenv("TRYOMARCHY_NATIVE_UI_TEST") != "1" {

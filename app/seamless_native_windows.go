@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	"image/draw"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -226,7 +227,12 @@ func (nativeSeamlessWindows) frame(window seamlessWindow) ([]byte, error) {
 		return nil, errSeamlessCapture
 	}
 	if frame, err := seamlessWGCFrame(window); err == nil {
-		return frame, nil
+		var visible seamlessRect
+		if seamlessVisibleRect(window.handle, &visible) {
+			if aligned, err := seamlessAlignWGCFrame(frame, rect, visible); err == nil {
+				return aligned, nil
+			}
+		}
 	}
 	dc, _, _ := seamlessCreateDC.Call(0)
 	if dc == 0 {
@@ -259,6 +265,52 @@ func (nativeSeamlessWindows) frame(window seamlessWindow) ([]byte, error) {
 	encoder := png.Encoder{CompressionLevel: png.BestSpeed}
 	if err := encoder.Encode(&output, frame); err != nil {
 		return nil, err
+	}
+	return output.Bytes(), nil
+}
+
+// WGC can omit part of the invisible resize border in GetWindowRect. The guest
+// sends pointer coordinates in PNG pixels; pad the captured frame so every
+// pixel uses the same window-relative origin as the input route. Unknown
+// geometry falls back to PrintWindow instead of silently moving clicks.
+func seamlessAlignWGCFrame(frame []byte, outer, visible seamlessRect) ([]byte, error) {
+	outerWidth, outerHeight := int(outer.right-outer.left), int(outer.bottom-outer.top)
+	if outerWidth <= 0 || outerHeight <= 0 || outerWidth > 4096 || outerHeight > 4096 ||
+		int64(outerWidth)*int64(outerHeight) > 12_000_000 {
+		return nil, errSeamlessCapture
+	}
+	config, err := png.DecodeConfig(bytes.NewReader(frame))
+	if err != nil {
+		return nil, errSeamlessCapture
+	}
+	if config.Width == outerWidth && config.Height == outerHeight {
+		return frame, nil
+	}
+	left, top := 0, 0
+	if visible.left >= outer.left && visible.top >= outer.top && visible.right <= outer.right && visible.bottom <= outer.bottom &&
+		config.Width == int(visible.right-visible.left) && config.Height == int(visible.bottom-visible.top) {
+		left, top = int(visible.left-outer.left), int(visible.top-outer.top)
+	} else {
+		// On some HWNDs the WGC item includes a narrow composited rim that
+		// DWM's extended frame bounds exclude. It is centered within the
+		// outer rectangle. Limit this case to a few pixels so a resized or
+		// unrelated frame cannot silently move clicks across controls.
+		dx, dy := outerWidth-config.Width, outerHeight-config.Height
+		if dx < 0 || dy < 0 || dx > 8 || dy > 8 {
+			return nil, errSeamlessCapture
+		}
+		left, top = dx/2, dy/2
+	}
+	source, err := png.Decode(bytes.NewReader(frame))
+	if err != nil {
+		return nil, errSeamlessCapture
+	}
+	aligned := image.NewRGBA(image.Rect(0, 0, outerWidth, outerHeight))
+	draw.Draw(aligned, image.Rect(left, top, left+config.Width, top+config.Height), source, source.Bounds().Min, draw.Src)
+	var output bytes.Buffer
+	encoder := png.Encoder{CompressionLevel: png.BestSpeed}
+	if err := encoder.Encode(&output, aligned); err != nil {
+		return nil, errSeamlessCapture
 	}
 	return output.Bytes(), nil
 }

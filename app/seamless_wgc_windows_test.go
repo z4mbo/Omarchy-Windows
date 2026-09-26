@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func TestSeamlessWSD1FullFrameDecodesToPNG(t *testing.T) {
@@ -102,6 +103,7 @@ func TestSeamlessWGCPhysicalCharacterMap(t *testing.T) {
 	if os.Getenv("OMARCHY_TEST_WGC_CHARMAP") != "1" {
 		t.Skip("set OMARCHY_TEST_WGC_CHARMAP=1 for a local Character Map capture check")
 	}
+	t.Setenv(seamlessWGCEnv, "1")
 	var matches []seamlessWindow
 	for _, window := range (nativeSeamlessWindows{}).windows() {
 		if strings.EqualFold(window.Process, "charmap.exe") && window.Title == "Character Map" {
@@ -113,6 +115,14 @@ func TestSeamlessWGCPhysicalCharacterMap(t *testing.T) {
 	}
 	t.Logf("target pid=%d hwnd=%s size=%dx%d", matches[0].PID, matches[0].HWND, matches[0].Width, matches[0].Height)
 	defer stopSeamlessWGC()
+	prewarmSeamlessWGC()
+	deadline := time.Now().Add(10 * time.Second)
+	for seamlessWGC.prewarming.Load() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if seamlessWGC.prewarming.Load() {
+		t.Fatal("WGC helper did not finish preparing")
+	}
 	data, err := seamlessWGC.capture(matches[0])
 	if err != nil {
 		t.Fatalf("WGC capture of Character Map failed: %v", err)
@@ -122,6 +132,18 @@ func TestSeamlessWGCPhysicalCharacterMap(t *testing.T) {
 		t.Fatalf("invalid Character Map PNG: %v", err)
 	}
 	t.Logf("Character Map WGC frame: %dx%d, %d PNG bytes, pid=%d, hwnd=%s", config.Width, config.Height, len(data), matches[0].PID, matches[0].HWND)
+	var outer, visible seamlessRect
+	if ok, _, _ := seamlessGetRect.Call(matches[0].handle, uintptr(unsafe.Pointer(&outer))); ok == 0 || !seamlessVisibleRect(matches[0].handle, &visible) {
+		t.Fatal("could not read Character Map window bounds")
+	}
+	aligned, err := seamlessAlignWGCFrame(data, outer, visible)
+	if err != nil {
+		t.Fatalf("WGC frame could not be mapped to window coordinates: %v", err)
+	}
+	alignedConfig, err := png.DecodeConfig(bytes.NewReader(aligned))
+	if err != nil || alignedConfig.Width != int(outer.right-outer.left) || alignedConfig.Height != int(outer.bottom-outer.top) {
+		t.Fatalf("aligned frame does not match window bounds: %dx%d, %v", alignedConfig.Width, alignedConfig.Height, err)
+	}
 	if seconds, _ := strconv.Atoi(os.Getenv("OMARCHY_TEST_WGC_HOLD_SECONDS")); seconds > 0 && seconds <= 30 {
 		t.Logf("holding capture session for %d seconds to inspect Windows capture indicator", seconds)
 		time.Sleep(time.Duration(seconds) * time.Second)
