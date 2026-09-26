@@ -16,6 +16,8 @@ Download, boot, Hyprland.
 
 **Architecture being revised for performance.** The target is Omarchy inside Windows with native-speed Windows apps. Direct Windows rendering inside Omarchy-assigned tiles is now explicitly accepted: Hyprland controls the layout, while Windows retains the real application window and its GPU/input path. An opt-in prototype is being built; it is not yet the installed or verified default. See [the current scope](docs/FORK-GOAL-STATUS.md) and [the native-window plan](docs/NATIVE-WINDOW-PRESENTATION.md). Identical-to-native performance and broad game compatibility remain unproven.
 
+**Updates are part of the goal.** Future Omarchy releases must pass compatibility, upgrade, and recovery checks before automatic rollout. The Windows integration must preserve user files and settings, negotiate supported features across host/guest versions, and keep a working recovery path. Unknown future releases cannot be certified in advance; see the [installation and update gates](docs/evidence/NATIVE-INSTALL-GATES-2026-09-26.md).
+
 This fork builds on [Try Omarchy for Windows](https://github.com/omacom/try-omarchy-windows) by [Omacom](https://github.com/omacom).
 The Omarchy mark in the app icon is sourced from the
 [official Omarchy brand kit](https://omarchy.org/brand/) and remains subject to

@@ -188,6 +188,10 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		mode := "capture"
 		if b.projection != nil {
 			mode = "native"
+			seamlessJSON(w, http.StatusOK, map[string]any{"mode": mode, "protocol": 1,
+				"capabilities": map[string]any{"occlusions": map[string]any{
+					"maxRectsPerWindow": nativeMaxOcclusions, "coordinates": "tile"}}})
+			return
 		}
 		seamlessJSON(w, http.StatusOK, map[string]any{"mode": mode, "protocol": 1})
 		return
@@ -197,7 +201,8 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			seamlessJSONError(w, http.StatusConflict, "native_presentation_disabled")
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		// Eight tiles with up to sixteen optional occlusion rectangles each.
+		r.Body = http.MaxBytesReader(w, r.Body, 16384)
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
 		var layout nativeLayout

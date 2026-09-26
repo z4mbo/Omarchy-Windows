@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 )
 
 const nativeProjectionLease = 3 * time.Second
+const nativeMaxOcclusions = 16
 
 type nativeLayout struct {
 	Sequence int64 `json:"sequence"`
@@ -27,12 +29,21 @@ type nativeLayout struct {
 }
 
 type nativeTile struct {
-	ID      string `json:"id"`
-	X       int    `json:"x"`
-	Y       int    `json:"y"`
-	Width   int    `json:"width"`
-	Height  int    `json:"height"`
-	Visible bool   `json:"visible"`
+	ID         string            `json:"id"`
+	X          int               `json:"x"`
+	Y          int               `json:"y"`
+	Width      int               `json:"width"`
+	Height     int               `json:"height"`
+	Visible    bool              `json:"visible"`
+	Occlusions []nativeOcclusion `json:"occlusions,omitempty"`
+}
+
+// Occlusions are tile-local guest pixels. They are optional in protocol 1.
+type nativeOcclusion struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
 }
 
 func validateNativeLayout(l nativeLayout) error {
@@ -47,6 +58,16 @@ func validateNativeLayout(l nativeLayout) error {
 			tile.X > l.Output.Width || tile.Y > l.Output.Height ||
 			tile.Width > l.Output.Width-tile.X || tile.Height > l.Output.Height-tile.Y {
 			return errors.New("invalid native window tile")
+		}
+		if len(tile.Occlusions) > nativeMaxOcclusions || (!tile.Visible && len(tile.Occlusions) != 0) {
+			return errors.New("invalid native window occlusions")
+		}
+		for _, clip := range tile.Occlusions {
+			if clip.X < 0 || clip.Y < 0 || clip.Width < 1 || clip.Height < 1 ||
+				clip.X >= tile.Width || clip.Y >= tile.Height ||
+				clip.Width > tile.Width-clip.X || clip.Height > tile.Height-clip.Y {
+				return errors.New("invalid native window occlusion")
+			}
 		}
 		seen[tile.ID] = true
 	}
@@ -93,10 +114,14 @@ type nativeProjectedWindow struct {
 	applied           bool
 	pendingRestore    bool
 	restoreAttempts   int
+	nextRestore       time.Time
 	restoreStarted    bool
 	restoreRect       seamlessRect
 	restoreShown      bool
 	uncertainMutation bool
+	// SetWindowRgn transfers ownership of the region. We retain our own copy
+	// to detect a later application-owned region change before restoring NULL.
+	lastRegion uintptr
 }
 
 var (
@@ -106,6 +131,13 @@ var (
 	nativeGetProcessTimes     = kernel32.NewProc("GetProcessTimes")
 	nativeGetWindowLongPtr    = user32.NewProc("GetWindowLongPtrW")
 	nativeGetWindow           = user32.NewProc("GetWindow")
+	nativeGetWindowRgn        = user32.NewProc("GetWindowRgn")
+	nativeSetWindowRgn        = user32.NewProc("SetWindowRgn")
+	nativeGDI32               = syscall.NewLazyDLL("gdi32.dll")
+	nativeCreateRectRgn       = nativeGDI32.NewProc("CreateRectRgn")
+	nativeCombineRgn          = nativeGDI32.NewProc("CombineRgn")
+	nativeEqualRgn            = nativeGDI32.NewProc("EqualRgn")
+	nativeDeleteObject        = nativeGDI32.NewProc("DeleteObject")
 	nativeSetThreadDPI        = user32.NewProc("SetThreadDpiAwarenessContext")
 	nativeQemuEnumMu          sync.Mutex
 	nativeQemuEnumPID         uint32
@@ -200,6 +232,9 @@ func (p *nativeProjection) Close() {
 		p.foreground.Store(nil)
 		p.markAllRestoreLocked()
 		for i := 0; i < 3 && len(p.tracked) > 0; i++ {
+			for _, state := range p.tracked {
+				state.nextRestore = time.Time{}
+			}
 			p.retryRestoreLocked()
 			if len(p.tracked) > 0 {
 				time.Sleep(100 * time.Millisecond)
@@ -225,6 +260,7 @@ func (p *nativeProjection) Release(window seamlessWindow) {
 	if state := p.tracked[key]; state != nil {
 		state.pendingRestore = true
 		state.restoreAttempts = 0
+		state.nextRestore = time.Time{}
 		if p.releaseLocked(state) {
 			delete(p.tracked, key)
 		}
@@ -256,6 +292,7 @@ func (p *nativeProjection) HiddenWindows(visible []seamlessWindow) []seamlessWin
 			continue
 		}
 		if !nativeIdentityMatches(state) {
+			nativeFreeRegion(state)
 			delete(p.tracked, key)
 			continue
 		}
@@ -387,6 +424,251 @@ func nativeScaleTile(tile nativeTile, outputWidth, outputHeight int, client seam
 	return seamlessRect{x0, y0, x1, y1}
 }
 
+func nativeScaleOcclusions(tile nativeTile, outputWidth, outputHeight int, client, window seamlessRect) []seamlessRect {
+	clips := make([]seamlessRect, 0, len(tile.Occlusions))
+	for _, clip := range tile.Occlusions {
+		mapped := nativeScaleTile(nativeTile{X: tile.X + clip.X, Y: tile.Y + clip.Y,
+			Width: clip.Width, Height: clip.Height}, outputWidth, outputHeight, client)
+		mapped.left -= window.left
+		mapped.right -= window.left
+		mapped.top -= window.top
+		mapped.bottom -= window.top
+		if mapped.right > mapped.left && mapped.bottom > mapped.top {
+			clips = append(clips, mapped)
+		}
+	}
+	return clips
+}
+
+// The host hides a fully covered HWND instead of leaving an invisible but
+// technically shown window eligible for foreground keyboard routing.
+func nativeOcclusionsCoverTile(tile nativeTile) bool {
+	if len(tile.Occlusions) == 0 {
+		return false
+	}
+	xs, ys := []int{0, tile.Width}, []int{0, tile.Height}
+	for _, clip := range tile.Occlusions {
+		xs = append(xs, clip.X, clip.X+clip.Width)
+		ys = append(ys, clip.Y, clip.Y+clip.Height)
+	}
+	sort.Ints(xs)
+	sort.Ints(ys)
+	for xi := 1; xi < len(xs); xi++ {
+		if xs[xi] == xs[xi-1] {
+			continue
+		}
+		for yi := 1; yi < len(ys); yi++ {
+			if ys[yi] == ys[yi-1] {
+				continue
+			}
+			covered := false
+			for _, clip := range tile.Occlusions {
+				if clip.X <= xs[xi-1] && clip.X+clip.Width >= xs[xi] &&
+					clip.Y <= ys[yi-1] && clip.Y+clip.Height >= ys[yi] {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func nativeFreeRegion(state *nativeProjectedWindow) {
+	if state.lastRegion != 0 {
+		nativeDeleteObject.Call(state.lastRegion)
+		state.lastRegion = 0
+	}
+}
+
+func nativeRegionMatches(hwnd, expected uintptr) (bool, error) {
+	actual, _, _ := nativeCreateRectRgn.Call(0, 0, 0, 0)
+	if actual == 0 {
+		return false, errors.New("cannot query window region")
+	}
+	defer nativeDeleteObject.Call(actual)
+	kind, _, _ := nativeGetWindowRgn.Call(hwnd, actual)
+	if kind == 0 { // ERROR: no region, or an application-owned reset.
+		return false, nil
+	}
+	equal, _, _ := nativeEqualRgn.Call(actual, expected)
+	return equal == 1, nil
+}
+
+func nativeRestoreRegion(state *nativeProjectedWindow) bool {
+	if state.lastRegion == 0 {
+		return true
+	}
+	if !nativeIdentityMatches(state) {
+		nativeFreeRegion(state)
+		return true
+	}
+	hwnd := state.window.handle
+	matches, err := nativeRegionMatches(hwnd, state.lastRegion)
+	if err != nil {
+		return false
+	}
+	if !matches {
+		// The application replaced the region. Leave its new shape alone.
+		nativeFreeRegion(state)
+		return true
+	}
+	if !nativeIdentityMatches(state) {
+		nativeFreeRegion(state)
+		return true
+	}
+	if ok, _, _ := nativeSetWindowRgn.Call(hwnd, 0, 1); ok == 0 {
+		return false
+	}
+	nativeFreeRegion(state)
+	return true
+}
+
+func nativeApplyRegion(state *nativeProjectedWindow, clips []seamlessRect, window seamlessRect) error {
+	if len(clips) == 0 {
+		if !nativeRestoreRegion(state) {
+			return errors.New("window region restore failed")
+		}
+		return nil
+	}
+	if !nativeRegionTargetMatches(state, window) {
+		return errors.New("window changed before region update")
+	}
+	if state.lastRegion != 0 {
+		matches, err := nativeRegionMatches(state.window.handle, state.lastRegion)
+		if err != nil {
+			return err
+		}
+		if !matches {
+			nativeFreeRegion(state)
+			return errors.New("application changed its window region")
+		}
+	} else {
+		// A pre-existing custom region can contain holes or other app-owned
+		// geometry. Do not replace it in this initial opt-in backend.
+		current, _, _ := nativeCreateRectRgn.Call(0, 0, 0, 0)
+		if current == 0 {
+			return errors.New("cannot query window region")
+		}
+		kind, _, _ := nativeGetWindowRgn.Call(state.window.handle, current)
+		nativeDeleteObject.Call(current)
+		if kind != 0 {
+			return errors.New("application custom window region is unsupported")
+		}
+	}
+	width, height := window.right-window.left, window.bottom-window.top
+	if width < 1 || height < 1 {
+		return errors.New("window region dimensions invalid")
+	}
+	region, _, _ := nativeCreateRectRgn.Call(0, 0, uintptr(width), uintptr(height))
+	if region == 0 {
+		return errors.New("cannot create window region")
+	}
+	for _, clip := range clips {
+		cut, _, _ := nativeCreateRectRgn.Call(uintptr(clip.left), uintptr(clip.top), uintptr(clip.right), uintptr(clip.bottom))
+		if cut == 0 {
+			nativeDeleteObject.Call(region)
+			return errors.New("cannot create occlusion region")
+		}
+		kind, _, _ := nativeCombineRgn.Call(region, region, cut, 4) // RGN_DIFF; overlap becomes one bounded union.
+		nativeDeleteObject.Call(cut)
+		if kind == 0 {
+			nativeDeleteObject.Call(region)
+			return errors.New("cannot subtract occlusion region")
+		}
+	}
+	if state.lastRegion != 0 {
+		equal, _, _ := nativeEqualRgn.Call(region, state.lastRegion)
+		if equal == 1 {
+			nativeDeleteObject.Call(region)
+			if !nativeRegionTargetMatches(state, window) {
+				return errors.New("window changed during region update")
+			}
+			return nil
+		}
+	}
+	copy, _, _ := nativeCreateRectRgn.Call(0, 0, 0, 0)
+	if copy == 0 {
+		nativeDeleteObject.Call(region)
+		return errors.New("cannot copy window region")
+	}
+	if kind, _, _ := nativeCombineRgn.Call(copy, region, 0, 5); kind == 0 { // RGN_COPY
+		nativeDeleteObject.Call(copy)
+		nativeDeleteObject.Call(region)
+		return errors.New("cannot copy window region")
+	}
+	if !nativeRegionTargetMatches(state, window) {
+		nativeDeleteObject.Call(copy)
+		nativeDeleteObject.Call(region)
+		return errors.New("window changed before region mutation")
+	}
+	if ok, _, _ := nativeSetWindowRgn.Call(state.window.handle, region, 1); ok == 0 {
+		nativeDeleteObject.Call(copy)
+		nativeDeleteObject.Call(region) // Windows owns it only after success.
+		return errors.New("window region update failed")
+	}
+	nativeFreeRegion(state)
+	state.lastRegion = copy
+	return nil
+}
+
+func nativeRegionTargetMatches(state *nativeProjectedWindow, window seamlessRect) bool {
+	if !nativeIdentityMatches(state) {
+		return false
+	}
+	style, _, _ := nativeGetWindowLongPtr.Call(state.window.handle, ^uintptr(19)) // GWL_EXSTYLE
+	if !nativeRegionStyleSupported(style) {                                       // WS_EX_LAYOUTRTL uses upper-right region coordinates.
+		return false
+	}
+	var actual seamlessRect
+	if ok, _, _ := seamlessGetRect.Call(state.window.handle, uintptr(unsafe.Pointer(&actual))); ok == 0 {
+		return false
+	}
+	shown, _, _ := procIsWindowVisible.Call(state.window.handle)
+	return shown != 0 && actual == window
+}
+
+func nativePreflightRegion(state *nativeProjectedWindow) error {
+	if !nativeIdentityMatches(state) {
+		return errors.New("window identity changed before region preflight")
+	}
+	style, _, _ := nativeGetWindowLongPtr.Call(state.window.handle, ^uintptr(19)) // GWL_EXSTYLE
+	if !nativeRegionStyleSupported(style) {                                       // WS_EX_LAYOUTRTL
+		return errors.New("right-to-left window regions are unsupported")
+	}
+	if state.lastRegion != 0 {
+		matches, err := nativeRegionMatches(state.window.handle, state.lastRegion)
+		if err != nil {
+			return err
+		}
+		if !matches {
+			return errors.New("application changed its window region")
+		}
+		return nil
+	}
+	current, _, _ := nativeCreateRectRgn.Call(0, 0, 0, 0)
+	if current == 0 {
+		return errors.New("cannot query window region")
+	}
+	kind, _, _ := nativeGetWindowRgn.Call(state.window.handle, current)
+	nativeDeleteObject.Call(current)
+	if kind != 0 {
+		return errors.New("application custom window region is unsupported")
+	}
+	return nil
+}
+
+func nativeRegionStyleSupported(exStyle uintptr) bool {
+	return exStyle&0x00400000 == 0 // WS_EX_LAYOUTRTL
+}
+
+func nativeOcclusionGeometryReady(tile nativeTile, expected, actual seamlessRect, shown bool) bool {
+	return tile.Visible && shown && actual == expected
+}
+
 func nativeAspectMatches(outputWidth, outputHeight int, client seamlessRect) bool {
 	cw, ch := int64(client.right-client.left), int64(client.bottom-client.top)
 	a, b := cw*int64(outputHeight), ch*int64(outputWidth)
@@ -447,6 +729,7 @@ func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
 			if !state.pendingRestore {
 				state.pendingRestore = true
 				state.restoreAttempts = 0
+				state.nextRestore = time.Time{}
 			}
 			if p.releaseLocked(state) {
 				delete(p.tracked, key)
@@ -482,12 +765,25 @@ func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
 	if clientErr == nil && !active {
 		suspended = "host_inactive"
 	}
+	if clientErr == nil && active {
+		for key, tile := range requested {
+			if tile.Visible && len(tile.Occlusions) != 0 && !nativeOcclusionsCoverTile(tile) {
+				if err := nativePreflightRegion(states[key]); err != nil {
+					return "", err
+				}
+			}
+		}
+	}
 	for key, tile := range requested {
 		state := states[key]
 		if state.pendingRestore {
 			return "", errors.New("window restoration pending")
 		}
 		p.tracked[key] = state
+		if tile.Visible && nativeOcclusionsCoverTile(tile) {
+			tile.Visible = false
+			tile.Occlusions = nil
+		}
 		if clientErr != nil || !active {
 			tile.Visible = false
 		}
@@ -496,6 +792,26 @@ func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
 			rect = nativeScaleTile(tile, l.Output.Width, l.Output.Height, client)
 		}
 		if err := p.placeLocked(state, tile, rect); err != nil {
+			p.markAllRestoreLocked()
+			p.retryRestoreLocked()
+			p.foreground.Store(nil)
+			return "", err
+		}
+		var clips []seamlessRect
+		if tile.Visible && len(tile.Occlusions) != 0 {
+			var actual seamlessRect
+			if ok, _, _ := seamlessGetRect.Call(state.window.handle, uintptr(unsafe.Pointer(&actual))); ok == 0 {
+				p.markAllRestoreLocked()
+				p.retryRestoreLocked()
+				p.foreground.Store(nil)
+				return "", errors.New("window rectangle unavailable for occlusion")
+			}
+			shown, _, _ := procIsWindowVisible.Call(state.window.handle)
+			if nativeOcclusionGeometryReady(tile, rect, actual, shown != 0) {
+				clips = nativeScaleOcclusions(tile, l.Output.Width, l.Output.Height, client, actual)
+			}
+		}
+		if err := nativeApplyRegion(state, clips, state.lastRect); err != nil {
 			p.markAllRestoreLocked()
 			p.retryRestoreLocked()
 			p.foreground.Store(nil)
@@ -687,7 +1003,14 @@ func nativeRecordAppliedState(state *nativeProjectedWindow) {
 // A false result retains the snapshot for a later retry. Destroyed/reused
 // HWNDs and user-changed HWNDs are deliberately dropped without mutation.
 func (p *nativeProjection) releaseLocked(state *nativeProjectedWindow) bool {
-	if !state.applied || !nativeIdentityMatches(state) {
+	if !nativeIdentityMatches(state) {
+		nativeFreeRegion(state)
+		return true
+	}
+	if !nativeRestoreRegion(state) {
+		return false
+	}
+	if !state.applied {
 		return true
 	}
 	var rect seamlessRect
@@ -737,6 +1060,7 @@ func (p *nativeProjection) markAllRestoreLocked() {
 	for _, state := range p.tracked {
 		state.pendingRestore = true
 		state.restoreAttempts = 0
+		state.nextRestore = time.Time{}
 	}
 }
 
@@ -745,8 +1069,12 @@ func (p *nativeProjection) retryRestoreLocked() {
 }
 
 func retryNativeRestores(tracked map[seamlessWindowKey]*nativeProjectedWindow, release func(*nativeProjectedWindow) bool) {
+	retryNativeRestoresAt(tracked, release, time.Now())
+}
+
+func retryNativeRestoresAt(tracked map[seamlessWindowKey]*nativeProjectedWindow, release func(*nativeProjectedWindow) bool, now time.Time) {
 	for key, state := range tracked {
-		if !state.pendingRestore || state.restoreAttempts >= 3 {
+		if !state.pendingRestore || now.Before(state.nextRestore) {
 			continue
 		}
 		if release(state) {
@@ -755,7 +1083,14 @@ func retryNativeRestores(tracked map[seamlessWindowKey]*nativeProjectedWindow, r
 		}
 		state.restoreAttempts++
 		if state.restoreAttempts == 3 {
-			logf("native window restore failed after 3 attempts (PID %d)", key.pid)
+			logf("native window restore is retrying with backoff (PID %d)", key.pid)
+		}
+		if state.restoreAttempts >= 3 {
+			shift := state.restoreAttempts - 3
+			if shift > 4 {
+				shift = 4
+			}
+			state.nextRestore = now.Add(time.Duration(1<<shift) * time.Second)
 		}
 	}
 }

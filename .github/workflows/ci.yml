@@ -37,6 +37,7 @@ jobs:
           python3 -m py_compile scripts/release/*.py runtime-build/*.py
           python3 -m unittest discover -s scripts/release -p 'test_*.py'
           python3 -m unittest discover -s scripts/gpu -p 'test_*.py'
+          python3 -m unittest discover -s scripts/perf -p 'test_*.py'
           python3 -m py_compile scripts/gpu/blender/smoke.py
           bash -n scripts/gpu/blender/build-arch.sh
           python3 runtime-build/validate-lock.py
@@ -84,9 +85,40 @@ jobs:
   guest-contract:
     name: Guest contract
     runs-on: ubuntu-latest
+    outputs:
+      image-required: ${{ steps.image-change.outputs.required }}
     steps:
       - name: Check out source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect changes requiring a fresh image
+        id: image-change
+        shell: python
+        run: |
+          import json, os, re, subprocess
+          from pathlib import Path
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          name = os.environ['GITHUB_EVENT_NAME']
+          required = False
+          if name in ('pull_request', 'push'):
+              base = event['pull_request']['base']['sha'] if name == 'pull_request' else event['before']
+              head = event['pull_request']['head']['sha'] if name == 'pull_request' else event['after']
+              if not all(re.fullmatch(r'[0-9a-f]{40}', sha) for sha in (base, head)):
+                  raise RuntimeError('Invalid event commit identity')
+              if base == '0' * 40:
+                  required = True
+              else:
+                  paths = ('guest-build', 'scripts/release/build-guest.sh',
+                           'scripts/release/smoke-guest.py', 'scripts/release/guest-upgrade',
+                           '.github/workflows/ci.yml')
+                  result = subprocess.run(['git', 'diff', '--quiet', base, head, '--', *paths])
+                  if result.returncode not in (0, 1):
+                      raise RuntimeError('Could not compare image inputs')
+                  required = result.returncode == 1
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'required={str(required).lower()}\n')
 
       - name: Apply guest patches and run contract tests
         run: scripts/release/build-guest.sh --contract-only
@@ -119,7 +151,8 @@ jobs:
 
   guest-candidate:
     name: Guest image candidate
-    if: github.event_name == 'workflow_dispatch' && inputs.build_guest
+    needs: guest-contract
+    if: (github.event_name == 'workflow_dispatch' && inputs.build_guest) || needs.guest-contract.outputs.image-required == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:

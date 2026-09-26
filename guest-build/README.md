@@ -83,7 +83,13 @@ Windows VM tests unless noted in the release checklist):
   launcher commits a guest-image update. Its explicit integration revision is
   bumped whenever those files must be reapplied without a kernel version change
 
-Patch 0086 bumps the integration revision to 34. It adds native Windows layout
+Patch 0087 bumps the integration revision to 35. It adds optional, negotiated
+clipping for floating Linux windows that overlap a native Windows tile. Older
+hosts retain the previous layout format; uncertain stacking hides the native
+windows with an explanation. Launcher layers and child popups still need a
+reliable compositor visibility interface and physical validation.
+
+Patch 0086 bumped the integration revision to 34. It adds native Windows layout
 proxies and host presentation-mode negotiation to fresh images and persistent
 guest upgrades. Native mode is an opt-in prototype: Windows renders the actual
 app while Hyprland controls its proxy tile. See the

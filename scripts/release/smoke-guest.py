@@ -11,6 +11,7 @@ import json
 import os
 import re
 import selectors
+import shlex
 import subprocess
 import sys
 import time
@@ -120,6 +121,24 @@ def parse_facts(transcript: bytes) -> dict[str, str]:
     return facts
 
 
+def add_native_guest_facts(revision: int, facts: dict[str, str], expected: dict[str, str],
+                           bin_dir: Path = Path("/usr/local/bin")) -> None:
+    """Probe revision 34's executable and its import chain in the booted image.
+
+    --help stops at argparse, before any bridge connection or GTK window, while
+    still importing the native layout and protocol modules from the image.
+    """
+    if revision < 34:
+        return
+    native = shlex.quote(str(bin_dir / "omarchy-windows-native"))
+    module_dir = shlex.quote(str(bin_dir))
+    facts["windows-apps-native"] = (
+        f"test -x {native} && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={module_dir} "
+        f"python3 {native} --help >/dev/null 2>&1 && echo yes || echo no"
+    )
+    expected["windows-apps-native"] = "yes"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("artifacts", type=Path)
@@ -193,6 +212,7 @@ def main() -> None:
             "python3 -c 'import omarchy_windows_presenter_input' >/dev/null 2>&1 && echo yes || echo no"
         )
         EXPECTED_FACTS["windows-apps-input-helper"] = "yes"
+    add_native_guest_facts(args.compat_revision, FACT_CHECKS, EXPECTED_FACTS)
 
     login_delay = args.login_delay if args.login_delay is not None else (60 if args.accel == "tcg" else 0)
     if login_delay < 0:

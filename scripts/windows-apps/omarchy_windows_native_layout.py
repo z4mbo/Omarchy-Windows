@@ -35,6 +35,24 @@ def parse_presentation(document: object) -> None:
         raise LayoutError("The host returned an unknown window presentation mode.")
 
 
+def occlusion_limit(document: object) -> int:
+    """Use clipping only when the host explicitly advertises tile coordinates."""
+    parse_presentation(document)
+    capabilities = document.get("capabilities", {})
+    if not isinstance(capabilities, dict):
+        raise LayoutError("The host returned invalid native window capabilities.")
+    occlusions = capabilities.get("occlusions")
+    if occlusions is None:
+        return 0
+    if not isinstance(occlusions, dict):
+        raise LayoutError("The host returned invalid native window occlusion support.")
+    maximum = occlusions.get("maxRectsPerWindow")
+    coordinates = occlusions.get("coordinates")
+    if not _integer(maximum) or maximum < 1 or not isinstance(coordinates, str):
+        raise LayoutError("The host returned invalid native window occlusion limits.")
+    return min(maximum, 16) if coordinates == "tile" else 0
+
+
 def parse_layout_ack(document: object) -> str:
     """Return the host suspension reason from an acknowledged full layout."""
     if not isinstance(document, dict) or document.get("accepted") is not True:
@@ -78,7 +96,8 @@ def output_state(monitors: object) -> tuple[dict, dict]:
     return {"width": width, "height": height}, monitor
 
 
-def compute_layout(windows: object, clients: object, monitors: object, locked: bool, pid: int) -> dict:
+def compute_layout(windows: object, clients: object, monitors: object, locked: bool, pid: int,
+                   *, max_occlusions: int = 0) -> dict:
     output, monitor = output_state(monitors)
     if not isinstance(locked, bool):
         raise LayoutError("The Omarchy lock state is unknown.")
@@ -88,10 +107,14 @@ def compute_layout(windows: object, clients: object, monitors: object, locked: b
         raise LayoutError("Hyprland returned an invalid client list.")
     if not _integer(pid) or pid <= 0:
         raise LayoutError("The native proxy process is unknown.")
+    if not _integer(max_occlusions) or not 0 <= max_occlusions <= 16:
+        raise LayoutError("The native window occlusion limit is unsupported.")
     ids = [item.get("id") if isinstance(item, dict) else None for item in windows]
     if len(ids) != len(set(ids)):
         raise LayoutError("The host returned duplicate native window IDs.")
     result = []
+    proxies: set[int] = set()
+    floating_proxies: dict[str, bool] = {}
     for ident in ids:
         marker = marker_for(ident)
         matches = [client for client in clients if isinstance(client, dict)
@@ -104,6 +127,11 @@ def compute_layout(windows: object, clients: object, monitors: object, locked: b
             result.append(hidden)
             continue
         client = matches[0]
+        proxies.add(id(client))
+        if max_occlusions:
+            if not isinstance(client.get("floating"), bool):
+                raise LayoutError("The native proxy stacking state is unknown.")
+            floating_proxies[ident] = client["floating"]
         workspace = client.get("workspace")
         if not isinstance(workspace, dict) or not _integer(workspace.get("id")):
             raise LayoutError("The native proxy workspace is unknown.")
@@ -133,4 +161,55 @@ def compute_layout(windows: object, clients: object, monitors: object, locked: b
             continue
         result.append({"id": ident, "x": x, "y": y, "width": width,
                        "height": height, "visible": True})
+    if max_occlusions:
+        # Hyprland layers and child popups are omitted: their bounding boxes
+        # do not prove opaque pixels and would hide native content incorrectly.
+        for tile in result:
+            if not tile["visible"]:
+                continue
+            rects = []
+            left, top = tile["x"], tile["y"]
+            right, bottom = left + tile["width"], top + tile["height"]
+            for client in clients:
+                if not isinstance(client, dict) or id(client) in proxies:
+                    continue
+                if (client.get("mapped") is False or client.get("visible") is False
+                        or client.get("hidden") is True):
+                    continue
+                if not _integer(client.get("monitor")):
+                    raise LayoutError("Hyprland returned an unknown client output.")
+                if client.get("monitor") != monitor["id"]:
+                    continue
+                workspace = client.get("workspace")
+                if not isinstance(workspace, dict) or not _integer(workspace.get("id")):
+                    raise LayoutError("Hyprland returned an unknown floating window workspace.")
+                if not isinstance(client.get("pinned"), bool):
+                    raise LayoutError("Hyprland returned an unknown floating window pin state.")
+                if workspace["id"] != monitor["activeWorkspace"]["id"] and client.get("pinned") is not True:
+                    continue
+                if (client.get("mapped") is not True or client.get("visible") is not True
+                        or client.get("hidden") is not False or not isinstance(client.get("floating"), bool)):
+                    raise LayoutError("Hyprland returned uncertain floating window visibility.")
+                if client["floating"] is False:
+                    continue
+                at, size = client.get("at"), client.get("size")
+                if not (isinstance(at, list) and isinstance(size, list) and len(at) == len(size) == 2
+                        and all(_integer(value) for value in at + size)
+                        and size[0] > 0 and size[1] > 0):
+                    raise LayoutError("Hyprland returned malformed floating window coordinates.")
+                float_left, float_top = at[0] - monitor["x"], at[1] - monitor["y"]
+                x0, y0 = max(left, float_left), max(top, float_top)
+                x1, y1 = min(right, float_left + size[0]), min(bottom, float_top + size[1])
+                if x0 >= x1 or y0 >= y1:
+                    continue
+                if floating_proxies[tile["id"]]:
+                    # hyprctl clients gives no trustworthy ordering between
+                    # floating clients. A clipped rear window would punch a
+                    # false hole into a front native proxy.
+                    raise LayoutError("Floating native and Omarchy windows overlap; stacking order is unknown.")
+                rects.append({"x": x0 - left, "y": y0 - top, "width": x1 - x0, "height": y1 - y0})
+                if len(rects) > max_occlusions:
+                    raise LayoutError("Too many floating windows overlap a native tile.")
+            if rects:
+                tile["occlusions"] = rects
     return {"output": output, "windows": result}

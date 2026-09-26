@@ -9,7 +9,7 @@ script_dir = Path(__file__).resolve().parent
 helper_dir = script_dir if (script_dir / "omarchy_windows_native_layout.py").exists() else script_dir.parent / "factory-overlay/usr/local/bin"
 sys.path.insert(0, str(helper_dir))
 
-from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, parse_layout_ack, parse_locked, parse_presentation
+from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation
 
 WINDOW_ID = "a" * 32
 PID = 4607
@@ -28,7 +28,8 @@ def state():
         "address": "0x563190857090", "mapped": True, "hidden": False,
         "visible": True, "at": [490, 260], "size": [300, 226],
         "workspace": {"id": 1, "name": "1"}, "monitor": 0,
-        "pid": PID, "pinned": False, "title": "Character Map" + marker_for(WINDOW_ID),
+        "pid": PID, "pinned": False, "floating": False,
+        "title": "Character Map" + marker_for(WINDOW_ID),
     }]
     return windows, clients, monitors
 
@@ -94,6 +95,69 @@ class NativeLayoutTest(unittest.TestCase):
         for document in (None, {}, {"locked": "false"}):
             with self.assertRaises(LayoutError):
                 parse_locked(document)
+
+    def test_occlusion_capability_is_optional_and_tile_relative_only(self):
+        self.assertEqual(occlusion_limit({"mode": "native", "protocol": 1}), 0)
+        self.assertEqual(occlusion_limit({"mode": "native", "protocol": 1, "capabilities": {
+            "occlusions": {"maxRectsPerWindow": 16, "coordinates": "tile"}}}), 16)
+        self.assertEqual(occlusion_limit({"mode": "native", "protocol": 1, "capabilities": {
+            "occlusions": {"maxRectsPerWindow": 32, "coordinates": "tile"}}}), 16)
+        self.assertEqual(occlusion_limit({"mode": "native", "protocol": 1, "capabilities": {
+            "occlusions": {"maxRectsPerWindow": 16, "coordinates": "output"}}}), 0)
+        for capabilities in ([], {"occlusions": []},
+                             {"occlusions": {"maxRectsPerWindow": True, "coordinates": "tile"}},
+                             {"occlusions": {"maxRectsPerWindow": 0, "coordinates": "tile"}}):
+            with self.subTest(capabilities=capabilities), self.assertRaises(LayoutError):
+                occlusion_limit({"mode": "native", "protocol": 1, "capabilities": capabilities})
+
+    def test_floating_overlap_clips_only_with_advertised_capability(self):
+        windows, clients, monitors = state()
+        # The proxy is at 490,260 with size 300x226. A Linux floating window
+        # overlaps its right edge, and the occlusion uses proxy-local pixels.
+        clients.append({"pid": PID + 1, "mapped": True, "visible": True, "hidden": False,
+                        "floating": True, "pinned": False, "monitor": 0,
+                        "workspace": {"id": 1, "name": "1"}, "at": [700, 300], "size": [150, 100]})
+        ordinary = compute_layout(windows, clients, monitors, False, PID)
+        self.assertNotIn("occlusions", ordinary["windows"][0])
+        clipped = compute_layout(windows, clients, monitors, False, PID, max_occlusions=16)
+        self.assertEqual(clipped["windows"][0]["occlusions"], [
+            {"x": 210, "y": 40, "width": 90, "height": 100}])
+
+    def test_hidden_off_workspace_and_proxy_clients_do_not_clip(self):
+        windows, clients, monitors = state()
+        proxy = clients[0]
+        proxy["floating"] = True
+        off_workspace = {"pid": PID + 1, "mapped": True, "visible": True,
+                         "hidden": False, "floating": True, "pinned": False,
+                         "monitor": 0, "workspace": {"id": 2, "name": "2"},
+                         "at": [500, 270], "size": [100, 100]}
+        hidden = {**off_workspace, "workspace": {"id": 1, "name": "1"}, "hidden": True}
+        clients += [off_workspace, hidden]
+        tile = compute_layout(windows, clients, monitors, False, PID, max_occlusions=16)["windows"][0]
+        self.assertNotIn("occlusions", tile)
+
+    def test_many_or_malformed_visible_float_clients_fail_closed(self):
+        windows, clients, monitors = state()
+        floating = {"pid": PID + 1, "mapped": True, "visible": True,
+                    "hidden": False, "floating": True, "pinned": False,
+                    "monitor": 0, "workspace": {"id": 1, "name": "1"},
+                    "at": [500, 270], "size": [100, 100]}
+        clients += [{**floating} for _ in range(17)]
+        with self.assertRaises(LayoutError):
+            compute_layout(windows, clients, monitors, False, PID, max_occlusions=16)
+        clients = state()[1] + [{**floating, "size": [100, False]}]
+        with self.assertRaises(LayoutError):
+            compute_layout(windows, clients, monitors, False, PID, max_occlusions=16)
+
+    def test_overlapping_floating_proxy_rejects_unknown_stacking_order(self):
+        windows, clients, monitors = state()
+        clients[0]["floating"] = True
+        clients.append({"pid": PID + 1, "mapped": True, "visible": True,
+                        "hidden": False, "floating": True, "pinned": False,
+                        "monitor": 0, "workspace": {"id": 1, "name": "1"},
+                        "at": [500, 270], "size": [100, 100]})
+        with self.assertRaisesRegex(LayoutError, "stacking order"):
+            compute_layout(windows, clients, monitors, False, PID, max_occlusions=16)
 
     def test_layout_ack_distinguishes_focus_suspension_from_display_failure(self):
         self.assertEqual(parse_layout_ack({"accepted": True}), "")

@@ -18,7 +18,7 @@ import threading
 import time
 import urllib.error
 
-from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, output_state, parse_layout_ack, parse_locked, parse_presentation
+from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked
 from omarchy_windows_protocol import Bridge, BridgeError, load_token
 
 POLL_SECONDS = 0.4
@@ -41,9 +41,9 @@ def hyprctl_json(command: str) -> object:
         raise LayoutError(f"Hyprland {command} state is unavailable.") from exc
 
 
-def presentation_probe(bridge: Bridge) -> None:
+def presentation_probe(bridge: Bridge) -> int:
     try:
-        parse_presentation(json.loads(bridge.request("/v1/presentation", timeout=1)))
+        return occlusion_limit(json.loads(bridge.request("/v1/presentation", timeout=1)))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise LayoutError("The host returned an invalid native presentation response.") from exc
 
@@ -79,7 +79,7 @@ def hidden_layout(output: dict, catalog: list[dict]) -> dict:
         for item in catalog]}
 
 
-def start_gtk(bridge: Bridge, lock_fd: int) -> int:
+def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
     try:
         import gi
         gi.require_version("Gtk", "4.0")
@@ -126,6 +126,7 @@ def start_gtk(bridge: Bridge, lock_fd: int) -> int:
         def __init__(self):
             super().__init__(application_id="dev.omarchy.WindowsNative", flags=Gio.ApplicationFlags.NON_UNIQUE)
             self.bridge = bridge
+            self.max_occlusions = max_occlusions
             self.stop = threading.Event()
             self.state_lock = threading.Lock()
             self.dismissed: set[str] = set()
@@ -265,7 +266,8 @@ def start_gtk(bridge: Bridge, lock_fd: int) -> int:
                         try:
                             clients = hyprctl_json("clients")
                             locked = parse_locked(hyprctl_json("locked"))
-                            layout = compute_layout(catalog, clients, monitors, locked, os.getpid())
+                            layout = compute_layout(catalog, clients, monitors, locked, os.getpid(),
+                                                    max_occlusions=self.max_occlusions)
                         except LayoutError as exc:
                             layout_error = True
                             layout = hidden_layout(output, catalog)
@@ -317,7 +319,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         bridge = Bridge(load_token())
-        presentation_probe(bridge)
+        max_occlusions = presentation_probe(bridge)
         catalog = eligible(bridge.windows())
         if args.id is not None and args.id not in {item["id"] for item in catalog}:
             raise LayoutError("The selected Windows window is no longer granted by the host.")
@@ -331,7 +333,7 @@ def main() -> int:
     except (BridgeError, LayoutError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    return start_gtk(bridge, lock_fd)
+    return start_gtk(bridge, lock_fd, max_occlusions)
 
 
 if __name__ == "__main__":

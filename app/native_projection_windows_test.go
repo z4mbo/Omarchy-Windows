@@ -57,6 +57,11 @@ func TestNativeLayoutRejectsUnboundedOrAmbiguousRects(t *testing.T) {
 		{"duplicate ID", func(l *nativeLayout) { l.Windows[1].ID = l.Windows[0].ID }},
 		{"uppercase ID", func(l *nativeLayout) { l.Windows[0].ID = strings.Repeat("A", 32) }},
 		{"large output", func(l *nativeLayout) { l.Output.Width = 16385 }},
+		{"occlusion negative", func(l *nativeLayout) { l.Windows[0].Occlusions = []nativeOcclusion{{X: -1, Width: 1, Height: 1}} }},
+		{"occlusion outside tile", func(l *nativeLayout) { l.Windows[0].Occlusions = []nativeOcclusion{{X: 399, Width: 2, Height: 1}} }},
+		{"occlusion zero height", func(l *nativeLayout) { l.Windows[0].Occlusions = []nativeOcclusion{{Width: 1}} }},
+		{"hidden occlusion", func(l *nativeLayout) { l.Windows[1].Occlusions = []nativeOcclusion{{Width: 1, Height: 1}} }},
+		{"too many occlusions", func(l *nativeLayout) { l.Windows[0].Occlusions = make([]nativeOcclusion, nativeMaxOcclusions+1) }},
 		{"too many", func(l *nativeLayout) {
 			for len(l.Windows) < 9 {
 				l.Windows = append(l.Windows, nativeTile{ID: strings.Repeat("c", 31) + string(rune('0'+len(l.Windows))), Width: 1, Height: 1})
@@ -71,6 +76,77 @@ func TestNativeLayoutRejectsUnboundedOrAmbiguousRects(t *testing.T) {
 				t.Fatal("accepted malformed layout")
 			}
 		})
+	}
+}
+
+func TestNativeOcclusionsScaleInTileLocalCoordinates(t *testing.T) {
+	l := nativeTestLayout()
+	tile := l.Windows[0]
+	tile.Occlusions = []nativeOcclusion{{X: 0, Y: 0, Width: 100, Height: 50},
+		{X: 50, Y: 20, Width: 100, Height: 50}} // Overlap is an intentional bounded union.
+	if err := validateNativeLayout(nativeLayout{Sequence: l.Sequence, Output: l.Output, Windows: []nativeTile{tile}}); err != nil {
+		t.Fatal(err)
+	}
+	client := seamlessRect{-1600, 40, -320, 760} // Half-scale output at a negative monitor origin.
+	window := nativeScaleTile(tile, l.Output.Width, l.Output.Height, client)
+	got := nativeScaleOcclusions(tile, l.Output.Width, l.Output.Height, client, window)
+	want := []seamlessRect{{0, 0, 50, 25}, {25, 10, 75, 35}}
+	if len(got) != len(want) {
+		t.Fatalf("scaled occlusion count: %d", len(got))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("scaled occlusion %d: %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if got := nativeScaleOcclusions(nativeTile{X: tile.X, Y: tile.Y, Width: tile.Width, Height: tile.Height,
+		Occlusions: []nativeOcclusion{{X: 1, Y: 1, Width: 1, Height: 1}}},
+		l.Output.Width, l.Output.Height, client, window); len(got) != 0 {
+		t.Fatalf("zero physical-pixel occlusion must not mutate region: %+v", got)
+	}
+}
+
+func TestNativeOcclusionUnionHidesOnlyWhenFullyCovered(t *testing.T) {
+	tile := nativeTile{Width: 100, Height: 80, Visible: true,
+		Occlusions: []nativeOcclusion{{X: 0, Y: 0, Width: 60, Height: 80},
+			{X: 50, Y: 0, Width: 50, Height: 80}}}
+	if !nativeOcclusionsCoverTile(tile) {
+		t.Fatal("overlapping rectangles whose union covers the tile were not recognized")
+	}
+	tile.Occlusions[1].Width = 49
+	if nativeOcclusionsCoverTile(tile) {
+		t.Fatal("one-pixel uncovered strip was ignored")
+	}
+	tile.Occlusions = nil
+	if nativeOcclusionsCoverTile(tile) {
+		t.Fatal("empty occlusions were treated as a hidden tile")
+	}
+}
+
+func TestNativeOcclusionNeverClipsAnAppOwnedResize(t *testing.T) {
+	tile := nativeTile{Visible: true}
+	expected := seamlessRect{100, 200, 500, 500}
+	if !nativeOcclusionGeometryReady(tile, expected, expected, true) {
+		t.Fatal("matching projected geometry was not eligible for clipping")
+	}
+	if nativeOcclusionGeometryReady(tile, expected, seamlessRect{100, 200, 900, 700}, true) {
+		t.Fatal("app-owned resize would receive stale tile clipping")
+	}
+	if nativeOcclusionGeometryReady(tile, expected, expected, false) {
+		t.Fatal("hidden app would receive stale tile clipping")
+	}
+	tile.Visible = false
+	if nativeOcclusionGeometryReady(tile, expected, expected, true) {
+		t.Fatal("guest-hidden tile would receive clipping")
+	}
+}
+
+func TestNativeRegionRejectsRTLCoordinateMode(t *testing.T) {
+	if !nativeRegionStyleSupported(0) || !nativeRegionStyleSupported(0x00040000) {
+		t.Fatal("ordinary LTR window style rejected")
+	}
+	if nativeRegionStyleSupported(0x00400000) || nativeRegionStyleSupported(0x00440000) {
+		t.Fatal("RTL window would receive left-origin region coordinates")
 	}
 }
 
@@ -111,7 +187,9 @@ func TestNativePresentationRequiresBearerAndDisablesCaptureInput(t *testing.T) {
 		t.Fatalf("layout accepted in capture mode: %d", r.Code)
 	}
 	b.projection = &nativeProjection{bridge: b, tracked: make(map[seamlessWindowKey]*nativeProjectedWindow)}
-	if r := request(http.MethodGet, "/v1/presentation", "", true); r.Code != http.StatusOK || !strings.Contains(r.Body.String(), `"mode":"native"`) {
+	if r := request(http.MethodGet, "/v1/presentation", "", true); r.Code != http.StatusOK ||
+		!strings.Contains(r.Body.String(), `"mode":"native"`) ||
+		!strings.Contains(r.Body.String(), `"occlusions":{"coordinates":"tile","maxRectsPerWindow":16}`) {
 		t.Fatalf("native mode: %d %s", r.Code, r.Body.String())
 	}
 	if !b.grantWindow(backend.items[0]) {
@@ -164,6 +242,16 @@ func TestNativeRestoreKeepsSnapshotAcrossFailures(t *testing.T) {
 	}
 	if len(tracked) != 1 || state.restoreAttempts != 3 {
 		t.Fatal("restore retry was unbounded or discarded original placement")
+	}
+	base := time.Now()
+	state.nextRestore = base.Add(time.Second)
+	retryNativeRestoresAt(tracked, func(*nativeProjectedWindow) bool {
+		t.Fatal("backoff ignored before retry time")
+		return false
+	}, base.Add(500*time.Millisecond))
+	retryNativeRestoresAt(tracked, func(*nativeProjectedWindow) bool { return true }, base.Add(time.Second))
+	if len(tracked) != 0 {
+		t.Fatal("recovered window never retried after backoff")
 	}
 }
 

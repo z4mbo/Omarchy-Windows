@@ -1,5 +1,27 @@
 # Updating an existing guest
 
+## Fork acceptance requirement
+
+For the Omarchy-for-Windows fork, future upstream updates are an explicit
+product requirement. Each supported update must retain host/guest integration,
+Windows app layout and input, graphics, display matching, resource controls,
+and the user's files and settings. This requires continuing validation; it is
+not a guarantee that an unknown future upstream change is already compatible.
+
+Before automatic rollout, require fresh-image and older-disk boots, a complete
+upgrade and reboot, mixed host/guest protocol versions, preserved configuration
+fixtures, and recovery from a failed update. New optional features must be
+capability-negotiated. Unrecognized compositor state must stop the integration
+cleanly and release host windows rather than keep moving them from stale data.
+Keep the last working image and a recoverable writable disk until acceptance
+succeeds. The existing repository publisher below does not itself roll back
+package transactions; that distinction remains a release gate.
+
+See the [current install/update audit](evidence/NATIVE-INSTALL-GATES-2026-09-26.md)
+for implemented checks and remaining work.
+
+## Current update mechanism
+
 The launcher can deliver a newer Omarchy runtime without replacing the writable
 VM disk. After updating the launcher and guest image, open **Update > Omarchy**
 inside the guest to install it. Resetting the installation is not required.

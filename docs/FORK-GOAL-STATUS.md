@@ -28,6 +28,13 @@ capture-only design is no longer the required implementation.
   Omarchy's layout. Direct Windows presentation is accepted; pixel capture
   into Linux is not required.
 - Resolution and refresh rate follow the Windows monitor automatically.
+- Future Omarchy updates are part of the product's acceptance requirements.
+  Host/guest integration must preserve compatibility, user files, and settings
+  across supported upgrades. New upstream releases need upgrade and rollback
+  validation before being offered automatically; an unverified release must not
+  silently replace the working system. Unknown future releases cannot be
+  certified in advance, so the product needs continuing compatibility checks
+  and a recoverable update path.
 - Replace the old installed app and settings with the completed version, then
   update this repository's README.
 

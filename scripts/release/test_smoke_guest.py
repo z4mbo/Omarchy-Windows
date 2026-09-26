@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -29,6 +34,59 @@ class ParseFactsTests(unittest.TestCase):
             b"TRYOMARCHY_FACT:escaped:present\\later\n"
         )
         self.assertEqual(smoke_guest.parse_facts(transcript), {"foreign": "0"})
+
+
+class NativeGuestFactsTests(unittest.TestCase):
+    def test_current_native_revision_probe_imports_packaged_native_script(self) -> None:
+        revision = smoke_guest.guest_compat_revision()
+        self.assertGreaterEqual(revision, 34)
+        source = MODULE_PATH.resolve().parents[2] / "scripts" / "windows-apps"
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            for name in ("omarchy-windows-native", "omarchy_windows_native_layout.py",
+                         "omarchy_windows_protocol.py"):
+                shutil.copy2(source / name, target / name)
+            (target / "omarchy-windows-native").chmod(0o755)
+
+            facts, expected = {}, {}
+            smoke_guest.add_native_guest_facts(revision, facts, expected, target)
+            self.assertEqual(expected["windows-apps-native"], "yes")
+
+            environment = dict(os.environ, PYTHONPATH=str(target), PYTHONDONTWRITEBYTECODE="1")
+
+            def import_probe() -> subprocess.CompletedProcess[bytes]:
+                command = ([sys.executable, str(target / "omarchy-windows-native"), "--help"]
+                           if os.name == "posix" else
+                           [sys.executable, "-c", "import omarchy_windows_native_layout, omarchy_windows_protocol"])
+                return subprocess.run(command,
+                                      env=environment, capture_output=True, check=False)
+
+            result = import_probe()
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+
+            def probe() -> str:
+                result = subprocess.run(["bash", "-c", facts["windows-apps-native"]],
+                                        text=True, capture_output=True, check=True)
+                return result.stdout.strip()
+
+            if os.name == "posix":
+                self.assertEqual(probe(), "yes")
+            (target / "omarchy_windows_native_layout.py").unlink()
+            self.assertNotEqual(import_probe().returncode, 0)
+            if os.name == "posix":
+                self.assertEqual(probe(), "no")
+            shutil.copy2(source / "omarchy_windows_native_layout.py",
+                         target / "omarchy_windows_native_layout.py")
+            (target / "omarchy_windows_protocol.py").unlink()
+            self.assertNotEqual(import_probe().returncode, 0)
+            if os.name == "posix":
+                self.assertEqual(probe(), "no")
+
+    def test_older_revision_does_not_require_native_mode(self) -> None:
+        facts, expected = {}, {}
+        smoke_guest.add_native_guest_facts(33, facts, expected)
+        self.assertNotIn("windows-apps-native", facts)
+        self.assertNotIn("windows-apps-native", expected)
 
 
 if __name__ == "__main__":
