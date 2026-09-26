@@ -26,8 +26,9 @@ uses a separate GTK window per Windows window and limits pending frames.
 On the September 26 Windows 11 test host, Notepad and File Explorer both
 rendered in separate non-floating Hyprland windows and tiled side by side on
 workspace 1. The guest received their frames through the authenticated bridge.
-Modern Notepad ignored a posted text event, so this preview is not yet a
-dependable way to control every Windows app. See the
+The idle League client also rendered as a separate guest window; match capture
+and input remain untested. Modern Notepad ignored a posted text event, so this
+preview is not yet a dependable way to control every Windows app. See the
 [host test notes](evidence/WINDOWS-HOST-INTEGRATION-2026-09-26.md).
 
 The current capture uses Windows `PrintWindow` and a PNG-over-HTTP transport.

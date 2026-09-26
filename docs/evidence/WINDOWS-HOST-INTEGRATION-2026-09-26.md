@@ -51,6 +51,10 @@ on the NVMe drive; its sparse Linux disk has a 200 GiB virtual capacity.
   Explorer side by side as separate clients on workspace 1, and a guest
   compositor screenshot showed both applications' pixels. This validates the
   per-window preview for ordinary window capture on this host.
+- The idle League client exposed a 1280x720 capturable frame and appeared as
+  its own non-floating Hyprland client on workspace 1. The preview process was
+  stopped without closing the native Windows League client. No League input or
+  live match was tested.
 - The bridge accepted a posted text event for modern Notepad, but the app still
   showed zero characters. Input acceptance at the transport layer does not
   establish app control.

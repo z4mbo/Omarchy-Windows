@@ -12,7 +12,7 @@ Download, boot, Hyprland.
 
 ![Omarchy desktop demo](docs/images/demo.gif)
 
-**Status of this fork: development preview.** On a Windows 11 Pro host with an RTX 5080, the launcher booted the existing guest, rendered Hyprland through VirGL, and presented Notepad and File Explorer as two separate tiled Omarchy windows. A temporary borderless Windows window also filled the guest workspace. This is an ordinary-window preview: modern Notepad ignored posted text input, and League gameplay, game input, fullscreen match capture, and latency are unverified. See [the host test notes](docs/evidence/WINDOWS-HOST-INTEGRATION-2026-09-26.md) and [Windows app details](docs/WINDOWS-APPS.md).
+**Status of this fork: development preview.** On a Windows 11 Pro host with an RTX 5080, the launcher booted the existing guest, rendered Hyprland through VirGL, and presented Notepad and File Explorer as two separate tiled Omarchy windows. The idle League client also rendered in its own Omarchy window. A temporary borderless Windows window filled the guest workspace. This is an ordinary-window preview: modern Notepad ignored posted text input, and League gameplay, game input, fullscreen match capture, and latency are unverified. See [the host test notes](docs/evidence/WINDOWS-HOST-INTEGRATION-2026-09-26.md) and [Windows app details](docs/WINDOWS-APPS.md).
 
 This fork builds on [Try Omarchy for Windows](https://github.com/omacom/try-omarchy-windows) by [Omacom](https://github.com/omacom).
 The Omarchy mark in the app icon is sourced from the
