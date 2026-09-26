@@ -13,11 +13,12 @@ The requested claim that *every* Windows application will behave exactly like a
 native Omarchy application is **not technically supportable**. Windows lets an
 application exclude its window from capture with
 [`WDA_EXCLUDEFROMCAPTURE`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity),
-and the desktop duplication API protects protected video content. A bridge must
-honor these boundaries, not bypass them. Apps also use different input paths,
-including raw input rather than ordinary posted window messages. The achievable
-product is broad, tested compatibility with clear per-app results and graceful
-fallbacks, not a universal guarantee. [Microsoft's desktop duplication
+and the desktop duplication API protects protected video content. Apps also use
+different input paths, including raw input rather than ordinary posted window
+messages. Broad compatibility with per-app results is a possible narrower scope,
+but the user explicitly rejected exceptions on September 26, 2026. It is **not
+the accepted completion criterion**. The universal requirement remains unmet;
+see [the requested scope](FORK-GOAL-STATUS.md). [Microsoft's desktop duplication
 documentation](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/desktop-duplication-api)
 explicitly describes protected content handling.
 
@@ -63,9 +64,11 @@ simultaneous Windows and Omarchy use. The bridge must never claim success just
 because it queued an input message. See Microsoft's
 [`SendInput` documentation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput).
 
-The Windows secure desktop is another hard boundary: UAC prompts and sign-in
-appear on the Winlogon desktop, which ordinary apps generally cannot access.
-They need a native Windows interaction path, not a spoofed guest surface.
+The Windows secure desktop is another boundary: UAC prompts and sign-in
+appear on the Winlogon desktop, which this ordinary application cannot access.
+Some privileged remote-desktop implementations can handle secure-desktop
+transitions. That does not turn them into independent windows on the ordinary
+desktop or prove that every protected surface can be presented in Hyprland.
 [Microsoft's desktop model](https://learn.microsoft.com/en-us/windows/win32/winstation/desktops)
 describes that separation.
 

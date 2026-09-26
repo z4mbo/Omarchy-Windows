@@ -1,5 +1,14 @@
 # Resume here
 
+## This fork: September 26, 2026
+
+The active repository is `z4mbo/Omarchy-Windows`, branch
+`codex/native-windows-apps`, draft [PR #1](https://github.com/z4mbo/Omarchy-Windows/pull/1).
+Read [the fork's requested scope and current blocker](FORK-GOAL-STATUS.md) first.
+The upstream history below does not describe completion or release of this fork.
+
+## Upstream history
+
 Updated September 19, 2026. PR #135 merged as `58f5b70`; PR #136 merged as
 `e1341df`. **v0.0.20-preview is published and Latest**, from source `98cce48`.
 [Release](https://github.com/omacom/try-omarchy-windows/releases/tag/v0.0.20-preview)

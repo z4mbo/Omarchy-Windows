@@ -11,7 +11,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,7 +24,7 @@ const experimentalBalloonQEMUSHA256 = "43160f86cbf28a67df6f529b104dd03f63a37ca5d
 type experimentalBalloonOptions struct {
 	QEMUPath          string
 	QEMUPID           int
-	QMPSocket         string
+	Control           *experimentalBalloonControl
 	BalloonPath       string
 	BootMiB, FloorMiB int
 }
@@ -67,19 +66,22 @@ func experimentalImagePath(path string) string {
 
 // runExperimentalBalloonOnWindows is an explicit opt-in entry point; normal
 // launch never invokes it. It requires the exact experimental executable, the
-// live PID of that image, and a private socket named for that PID. The caller
-// must create the socket in the test QEMU invocation; no production control
+// live PID of that image, and a separately created experimental endpoint. The
+// endpoint exists before Start so its path can be passed in QEMU's arguments;
+// a future child PID cannot be used to name a startup socket. No production control
 // socket is accepted. The controller additionally requires the experimental
 // QOM property to report that the running process enabled RAM reclaim.
 func runExperimentalBalloonOnWindows(ctx context.Context, o experimentalBalloonOptions) error {
 	if o.QEMUPID <= 0 || !filepath.IsAbs(o.QEMUPath) ||
 		!strings.EqualFold(filepath.Base(o.QEMUPath), "qemu-system-x86_64w.exe") ||
-		!filepath.IsAbs(o.QMPSocket) ||
-		filepath.Base(o.QMPSocket) != "experimental-balloon-"+strconv.Itoa(o.QEMUPID)+".sock" ||
 		!strings.HasPrefix(o.BalloonPath, "/machine/peripheral/") ||
 		strings.Contains(strings.TrimPrefix(o.BalloonPath, "/machine/peripheral/"), "/") ||
 		len(o.BalloonPath) <= len("/machine/peripheral/") {
 		return fmt.Errorf("invalid experimental balloon connection options")
+	}
+	socket, err := o.Control.validatedPath()
+	if err != nil {
+		return err
 	}
 	handle, err := syscall.OpenProcess(0x1000|0x100000, false, uint32(o.QEMUPID)) // QUERY_LIMITED_INFORMATION | SYNCHRONIZE
 	if err != nil {
@@ -115,7 +117,7 @@ func runExperimentalBalloonOnWindows(ctx context.Context, o experimentalBalloonO
 	if err != nil {
 		return err
 	}
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", o.QMPSocket)
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	if err != nil {
 		return fmt.Errorf("dialing experimental QMP socket: %w", err)
 	}

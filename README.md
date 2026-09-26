@@ -14,6 +14,8 @@ Download, boot, Hyprland.
 
 **Status of this fork: development preview.** On a Windows 11 Pro host with an RTX 5080, the installed launcher booted the existing guest in Immersive mode and Hyprland reported 2560×1440 at 360 Hz, matching the primary Windows monitor. Notepad, File Explorer, an idle League client, and Character Map each appeared as separate tiled Omarchy windows in preview tests. Character Map's visible in-Omarchy character-grid click selected the wrong character on Windows, and modern Notepad ignored posted text. A later isolated guest-to-host bridge test with revised frame alignment correctly selected B in Character Map, but did not repeat the GTK presenter click. A controlled classic Win32 Edit accepted text. An opt-in Windows Graphics Capture prototype delivered Character Map frames through the guest bridge after a bounded startup fallback, but gameplay, fullscreen match capture, controls, and latency remain unverified. **This bridge does not yet work reliably with every Windows app.** See [the host test notes](docs/evidence/WINDOWS-HOST-INTEGRATION-2026-09-26.md), [display matching](docs/DISPLAY-MATCHING.md), [Windows app details](docs/WINDOWS-APPS.md), and [the compatibility architecture](docs/SEAMLESS-WINDOWS-ARCHITECTURE.md).
 
+**The requested complete product is blocked by its universal Windows-surface requirement.** The requirement includes capture-excluded windows, protected content, UAC, and sign-in inside Omarchy, with no Windows-side exceptions. This per-window bridge cannot provide that guarantee. Supported capture APIs can exclude content, and the ordinary desktop bridge cannot access the secure desktop. Privileged remote-desktop software can handle some secure-desktop transitions, but that does not establish universal, independent Hyprland windows. The preview is not an accepted substitute for this requirement; see [the full requested scope and status](docs/FORK-GOAL-STATUS.md).
+
 This fork builds on [Try Omarchy for Windows](https://github.com/omacom/try-omarchy-windows) by [Omacom](https://github.com/omacom).
 The Omarchy mark in the app icon is sourced from the
 [official Omarchy brand kit](https://omarchy.org/brand/) and remains subject to
@@ -35,6 +37,8 @@ The [upstream v0.0.20 preview](https://github.com/omacom/try-omarchy-windows/rel
 - Reproducible x86_64 guest image build (containerized, package-locked, pinned Omarchy revision) and a headless QMP control plane for automated testing.
 
 See [app compatibility](docs/COMPATIBILITY.md), [Windows app integration](docs/WINDOWS-APPS.md), and the [v1 checklist](docs/V1-READINESS.md) for details.
+
+Latest isolated research: [WSL Blender window forwarding and a separate CUDA render](docs/evidence/WSL-WAYPIPE-COMPANION-2026-09-26.md), and [the Windows RAM controller with independent VM control connections](docs/evidence/BALLOON-ADAPTER-2026-09-26.md). Neither experiment is enabled by normal launches or establishes universal Windows-app support.
 
 | First run | Screensaver |
 |---|---|

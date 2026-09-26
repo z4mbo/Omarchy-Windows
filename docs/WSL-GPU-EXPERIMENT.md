@@ -5,6 +5,17 @@ NVIDIA CUDA. It is a candidate for GPU application support, **not a working
 replacement for the complete Omarchy guest**. There is no WSL backend in the
 launcher in this branch. No physical GPU passthrough is implemented.
 
+## Follow-up: individual WSL windows in QEMU Omarchy
+
+A [September 26 disposable test](evidence/WSL-WAYPIPE-COMPANION-2026-09-26.md)
+forwarded Zenity and Blender from the WSL lab through Waypipe to QEMU's Hyprland.
+Blender registered as a tiled native Wayland client. A separate WSL Blender
+process completed a tiny CUDA-only render while that GUI remained mapped.
+This establishes window registration and independent CUDA compute, with no
+interactive input, viewport, latency, refresh-rate, or Windows-game validation.
+It is not integrated into the launcher and does not resolve Windows-surface
+compatibility. The report records cleanup and the retained inactive test disk.
+
 ## Measured on 2026-09-20
 
 Windows 11 Pro 26200; i9-14900KF; RTX 5080; NVIDIA Windows driver 616.92.
