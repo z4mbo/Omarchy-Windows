@@ -29,6 +29,9 @@ var (
 	seamlessGetClass     = user32.NewProc("GetClassNameW")
 	seamlessGetRect      = user32.NewProc("GetWindowRect")
 	seamlessScreenClient = user32.NewProc("ScreenToClient")
+	seamlessIsChild      = user32.NewProc("IsChild")
+	seamlessIsEnabled    = user32.NewProc("IsWindowEnabled")
+	seamlessGUIThread    = user32.NewProc("GetGUIThreadInfo")
 	seamlessPost         = user32.NewProc("PostMessageW")
 	seamlessPrint        = user32.NewProc("PrintWindow")
 	seamlessMonitor      = user32.NewProc("MonitorFromWindow")
@@ -42,9 +45,23 @@ var (
 	seamlessSelectObject = seamlessGdi.NewProc("SelectObject")
 	seamlessDeleteObject = seamlessGdi.NewProc("DeleteObject")
 	seamlessDeleteDC     = seamlessGdi.NewProc("DeleteDC")
+	seamlessInputMu      sync.Mutex
+	seamlessSelected     = make(map[uintptr]seamlessControlSelection)
 )
 
 type seamlessRect struct{ left, top, right, bottom int32 }
+type seamlessPoint struct{ x, y int32 }
+type seamlessControlSelection struct {
+	pid    uint32
+	target uintptr
+	button int
+}
+type seamlessGUIThreadInfo struct {
+	size                       uint32
+	active, focus, capture     uintptr
+	menuOwner, moveSize, caret uintptr
+	caretRect                  seamlessRect
+}
 type seamlessMonitorInfoStruct struct {
 	size    uint32
 	monitor seamlessRect
@@ -243,6 +260,105 @@ func (nativeSeamlessWindows) frame(window seamlessWindow) ([]byte, error) {
 	return output.Bytes(), nil
 }
 
+// A target must remain inside the selected top-level window and its process.
+// Child HWNDs can disappear or be reused between the hit test and input.
+func seamlessValidInputTarget(window seamlessWindow, target uintptr) bool {
+	if target == 0 {
+		return false
+	}
+	if ok, _, _ := seamlessIsWindow.Call(target); ok == 0 {
+		return false
+	}
+	var pid uint32
+	procGetWindowThreadProcessId.Call(target, uintptr(unsafe.Pointer(&pid)))
+	if pid != window.PID {
+		return false
+	}
+	if target == window.handle {
+		return true
+	}
+	ok, _, _ := seamlessIsChild.Call(window.handle, target)
+	return ok != 0
+}
+
+func seamlessClientPoint(hwnd uintptr, screen seamlessPoint) (seamlessPoint, bool) {
+	point := screen
+	ok, _, _ := seamlessScreenClient.Call(hwnd, uintptr(unsafe.Pointer(&point)))
+	return point, ok != 0
+}
+
+// Walk visible, enabled children in Z order. Both depth and sibling work are
+// bounded because an application can create an arbitrary number of HWNDs.
+func seamlessPointerTarget(window seamlessWindow, screen seamlessPoint) uintptr {
+	parent := window.handle
+	remaining := 256
+	for depth := 0; depth < 16 && remaining > 0; depth++ {
+		child, _, _ := seamlessGetWindow.Call(parent, 5) // GW_CHILD
+		var hit uintptr
+		for child != 0 && remaining > 0 {
+			remaining--
+			if seamlessValidInputTarget(window, child) {
+				visible, _, _ := procIsWindowVisible.Call(child)
+				enabled, _, _ := seamlessIsEnabled.Call(child)
+				var rect seamlessRect
+				if visible != 0 && enabled != 0 {
+					if ok, _, _ := seamlessGetRect.Call(child, uintptr(unsafe.Pointer(&rect))); ok != 0 &&
+						screen.x >= rect.left && screen.x < rect.right && screen.y >= rect.top && screen.y < rect.bottom {
+						hit = child
+						break
+					}
+				}
+			}
+			child, _, _ = seamlessGetWindow.Call(child, 2) // GW_HWNDNEXT
+		}
+		if hit == 0 {
+			break
+		}
+		parent = hit
+	}
+	return parent
+}
+
+func seamlessRememberPointer(window seamlessWindow, target uintptr, button int, down bool) {
+	seamlessInputMu.Lock()
+	defer seamlessInputMu.Unlock()
+	if len(seamlessSelected) >= 128 {
+		clear(seamlessSelected)
+	}
+	if down {
+		seamlessSelected[window.handle] = seamlessControlSelection{pid: window.PID, target: target, button: button}
+	} else if selection, ok := seamlessSelected[window.handle]; ok && selection.pid == window.PID && selection.button == button {
+		selection.button = 0
+		seamlessSelected[window.handle] = selection
+	}
+}
+
+func seamlessSelectedTarget(window seamlessWindow) seamlessControlSelection {
+	seamlessInputMu.Lock()
+	selection := seamlessSelected[window.handle]
+	seamlessInputMu.Unlock()
+	if selection.pid != window.PID || !seamlessValidInputTarget(window, selection.target) {
+		return seamlessControlSelection{}
+	}
+	return selection
+}
+
+func seamlessKeyboardTarget(window seamlessWindow) uintptr {
+	// A posted click does not necessarily change the host thread's foreground
+	// focus, so prefer the last clicked child in this guest surface.
+	if selected := seamlessSelectedTarget(window); selected.target != 0 {
+		return selected.target
+	}
+	thread, _, _ := procGetWindowThreadProcessId.Call(window.handle, 0)
+	if thread != 0 {
+		info := seamlessGUIThreadInfo{size: uint32(unsafe.Sizeof(seamlessGUIThreadInfo{}))}
+		if ok, _, _ := seamlessGUIThread.Call(thread, uintptr(unsafe.Pointer(&info))); ok != 0 && seamlessValidInputTarget(window, info.focus) {
+			return info.focus
+		}
+	}
+	return window.handle
+}
+
 func (nativeSeamlessWindows) input(window seamlessWindow, input seamlessInput) error {
 	if !seamlessWindowStillMatches(window) {
 		return errSeamlessGone
@@ -251,8 +367,21 @@ func (nativeSeamlessWindows) input(window seamlessWindow, input seamlessInput) e
 	case "pointer":
 		// The guest supplies frame-local coordinates. Convert to the HWND's
 		// client coordinate system without moving the real host pointer.
-		point := struct{ x, y int32 }{window.X + input.X, window.Y + input.Y}
-		if ok, _, _ := seamlessScreenClient.Call(window.handle, uintptr(unsafe.Pointer(&point))); ok == 0 {
+		x, y := int64(window.X)+int64(input.X), int64(window.Y)+int64(input.Y)
+		if x < -1<<31 || x > 1<<31-1 || y < -1<<31 || y > 1<<31-1 {
+			return errSeamlessInput
+		}
+		screen := seamlessPoint{int32(x), int32(y)}
+		target := seamlessPointerTarget(window, screen)
+		selected := seamlessSelectedTarget(window)
+		if selected.button != 0 && (input.Button == 0 || input.Button == selected.button && !input.Down) {
+			target = selected.target // Keep mouse-up and drag on the pressed control.
+		}
+		if !seamlessValidInputTarget(window, target) {
+			return errSeamlessInput
+		}
+		point, ok := seamlessClientPoint(target, screen)
+		if !ok {
 			return errSeamlessInput
 		}
 		message, state := uintptr(0x0200), uintptr(0) // WM_MOUSEMOVE
@@ -279,25 +408,46 @@ func (nativeSeamlessWindows) input(window seamlessWindow, input seamlessInput) e
 				message = 0x0208
 			}
 		}
-		if !input.Down {
+		if input.Button == 0 && selected.button != 0 {
+			switch selected.button {
+			case 1:
+				state = 1
+			case 3:
+				state = 2
+			case 2:
+				state = 16
+			}
+		}
+		if input.Button != 0 && !input.Down {
 			state = 0
 		}
 		packed := uintptr(uint16(point.x)) | uintptr(uint16(point.y))<<16
-		if ok, _, _ := seamlessPost.Call(window.handle, message, state, packed); ok == 0 {
+		if ok, _, _ := seamlessPost.Call(target, message, state, packed); ok == 0 {
 			return errSeamlessInput
+		}
+		if input.Button != 0 {
+			seamlessRememberPointer(window, target, input.Button, input.Down)
 		}
 	case "key":
 		message := uintptr(0x0101) // WM_KEYUP
 		if input.Down {
 			message = 0x0100
 		} // WM_KEYDOWN
-		if ok, _, _ := seamlessPost.Call(window.handle, message, uintptr(input.VK), 0); ok == 0 {
+		target := seamlessKeyboardTarget(window)
+		if !seamlessValidInputTarget(window, target) {
+			return errSeamlessInput
+		}
+		if ok, _, _ := seamlessPost.Call(target, message, uintptr(input.VK), 0); ok == 0 {
 			return errSeamlessInput
 		}
 	case "text":
 		units := syscall.StringToUTF16(input.Text)
+		target := seamlessKeyboardTarget(window)
 		for _, unit := range units[:len(units)-1] {
-			if ok, _, _ := seamlessPost.Call(window.handle, 0x0102, uintptr(unit), 0); ok == 0 { // WM_CHAR
+			if !seamlessValidInputTarget(window, target) {
+				return errSeamlessInput
+			}
+			if ok, _, _ := seamlessPost.Call(target, 0x0102, uintptr(unit), 0); ok == 0 { // WM_CHAR
 				return errSeamlessInput
 			}
 		}

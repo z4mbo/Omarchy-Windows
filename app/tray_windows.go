@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -46,6 +47,8 @@ const (
 	trayCommandDevices        = 3010
 	trayCommandTransfers      = 3011
 	trayCommandWindowsDesktop = 3012
+	trayShareWindowBase       = 4000
+	trayStopWindowBase        = 4100
 
 	nimAdd                = 0
 	nimDelete             = 2
@@ -56,6 +59,7 @@ const (
 	nifShowTip            = 0x80
 	notifyVersion         = 4
 	mfString              = 0
+	mfPopup               = 0x10
 	mfGray                = 0x1
 	mfSeparator           = 0x800
 	tpmRightButton        = 0x2
@@ -241,10 +245,11 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 			return
 		}
 		defer procDestroyMenu.Call(menu)
-		appendItem := func(flags, id uintptr, label string) {
+		appendTo := func(target, flags, id uintptr, label string) {
 			text, _ := syscall.UTF16PtrFromString(label)
-			procAppendMenuW.Call(menu, flags, id, uintptr(unsafe.Pointer(text)))
+			procAppendMenuW.Call(target, flags, id, uintptr(unsafe.Pointer(text)))
 		}
+		appendItem := func(flags, id uintptr, label string) { appendTo(menu, flags, id, label) }
 		appendItem(mfString, trayCommandShow, "Open Omarchy")
 		shareFlags := uintptr(mfString)
 		if cfg.share == "" {
@@ -256,6 +261,50 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		appendItem(mfString, trayCommandCameraStatus, "Camera status...")
 		appendItem(mfString, trayCommandDevices, "USB devices...")
 		appendItem(mfString, trayCommandWindowsDesktop, "Windows desktop in Omarchy...")
+		var shareChoices, stopChoices []seamlessWindow
+		bridge := activeSeamlessBridge.Load()
+		if bridge != nil {
+			windows := bridge.backend.windows()
+			shared := bridge.sharedWindows(windows, time.Now())
+			sharedKeys := make(map[seamlessWindowKey]bool, len(shared))
+			for _, window := range shared {
+				sharedKeys[seamlessKey(window)] = true
+			}
+			shareMenu, _, _ := procCreatePopupMenu.Call()
+			stopMenu, _, _ := procCreatePopupMenu.Call()
+			if shareMenu != 0 && stopMenu != 0 {
+				for _, window := range windows {
+					label := fmt.Sprintf("%s — %s (PID %d)", window.Title, window.Process, window.PID)
+					if len([]rune(label)) > 90 {
+						label = string([]rune(label)[:87]) + "..."
+					}
+					if sharedKeys[seamlessKey(window)] {
+						if len(stopChoices) < 64 {
+							appendTo(stopMenu, mfString, trayStopWindowBase+uintptr(len(stopChoices)), label)
+							stopChoices = append(stopChoices, window)
+						}
+					} else if len(shareChoices) < 64 {
+						appendTo(shareMenu, mfString, trayShareWindowBase+uintptr(len(shareChoices)), label)
+						shareChoices = append(shareChoices, window)
+					}
+				}
+				if len(shareChoices) == 0 {
+					appendTo(shareMenu, mfString|mfGray, 0, "No windows available")
+				}
+				if len(stopChoices) == 0 {
+					appendTo(stopMenu, mfString|mfGray, 0, "No shared windows")
+				}
+				appendItem(mfPopup, shareMenu, "Show Windows app in Omarchy...")
+				appendItem(mfPopup, stopMenu, "Stop showing Windows app")
+			} else {
+				if shareMenu != 0 {
+					procDestroyMenu.Call(shareMenu)
+				}
+				if stopMenu != 0 {
+					procDestroyMenu.Call(stopMenu)
+				}
+			}
+		}
 		appendItem(mfString, trayCommandTransfers, "File transfers…")
 		appendItem(mfString, trayCommandDiagnose, "Create diagnostics...")
 		reclaimFlags := uintptr(mfString)
@@ -276,6 +325,18 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		command, _, _ := procTrackPopupMenu.Call(menu, tpmRightButton|tpmReturnCmd,
 			uintptr(point.x), uintptr(point.y), 0, hwnd, 0)
 		procPostMessageW.Call(hwnd, wmNull, 0, 0)
+		if command >= trayShareWindowBase && command < trayShareWindowBase+uintptr(len(shareChoices)) {
+			if bridge != nil && !bridge.grantWindow(shareChoices[command-trayShareWindowBase]) {
+				infoBox("That Windows window has closed. Open the tray menu to choose another.")
+			}
+			return
+		}
+		if command >= trayStopWindowBase && command < trayStopWindowBase+uintptr(len(stopChoices)) {
+			if bridge != nil {
+				bridge.revokeWindow(stopChoices[command-trayStopWindowBase])
+			}
+			return
+		}
 		switch command {
 		case trayCommandShow:
 			if qemuWindow := qemuHwnd.Load(); qemuWindow != 0 {

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeSeamlessBackend struct {
@@ -33,6 +34,9 @@ func (f *fakeSeamlessBackend) close(seamlessWindow) error                { f.clo
 func TestSeamlessWindowBridgeRequiresTokenAndStableIdentity(t *testing.T) {
 	backend := &fakeSeamlessBackend{items: []seamlessWindow{{PID: 123, HWND: "aabb", Title: "Editor", Process: "editor.exe", Width: 800, Height: 600, handle: 0xaabb}}}
 	bridge := &seamlessWindowBridge{token: strings.Repeat("a", 64), backend: backend, frames: make(chan struct{}, 2)}
+	if !bridge.grantWindow(backend.items[0]) {
+		t.Fatal("host grant failed")
+	}
 	request := httptest.NewRequest(http.MethodGet, "/v1/windows", nil)
 	response := httptest.NewRecorder()
 	bridge.ServeHTTP(response, request)
@@ -79,6 +83,9 @@ func TestSeamlessWindowBridgeRequiresTokenAndStableIdentity(t *testing.T) {
 func TestSeamlessWindowBridgeBoundsInputAndRejectsHostFocus(t *testing.T) {
 	backend := &fakeSeamlessBackend{items: []seamlessWindow{{PID: 1, HWND: "2", Width: 320, Height: 240, handle: 2}}}
 	bridge := &seamlessWindowBridge{token: strings.Repeat("b", 64), backend: backend, frames: make(chan struct{}, 2)}
+	if !bridge.grantWindow(backend.items[0]) {
+		t.Fatal("host grant failed")
+	}
 	id := bridge.catalogue()[0].ID
 	post := func(action, body string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/v1/windows/"+id+"/"+action, strings.NewReader(body))
@@ -101,6 +108,80 @@ func TestSeamlessWindowBridgeBoundsInputAndRejectsHostFocus(t *testing.T) {
 	}
 	if response := post("close", `{}`); response.Code != http.StatusOK || backend.closeCount != 1 {
 		t.Fatalf("close request rejected: %d", response.Code)
+	}
+}
+
+func TestSeamlessBridgeDeniesEveryOperationOnUngrantedWindow(t *testing.T) {
+	backend := &fakeSeamlessBackend{items: []seamlessWindow{
+		{PID: 7, HWND: "7a", Title: "Shared", Class: "Editor", Width: 320, Height: 240, handle: 0x7a},
+		{PID: 8, HWND: "8b", Title: "Private", Class: "Editor", Width: 320, Height: 240, handle: 0x8b},
+	}}
+	bridge := &seamlessWindowBridge{token: strings.Repeat("c", 64), backend: backend, frames: make(chan struct{}, 2)}
+	privateID := bridge.windowID(backend.items[1])
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+bridge.token)
+		w := httptest.NewRecorder()
+		bridge.ServeHTTP(w, r)
+		return w
+	}
+	if response := request(http.MethodGet, "/v1/windows", ""); response.Code != http.StatusOK || strings.Contains(response.Body.String(), "Private") || strings.Contains(response.Body.String(), "Shared") {
+		t.Fatalf("ungranted catalogue: %d %s", response.Code, response.Body.String())
+	}
+	if !bridge.grantWindow(backend.items[0]) {
+		t.Fatal("host grant failed")
+	}
+	if response := request(http.MethodGet, "/v1/windows", ""); !strings.Contains(response.Body.String(), "Shared") || strings.Contains(response.Body.String(), "Private") {
+		t.Fatalf("grant leaked private window: %s", response.Body.String())
+	}
+	for _, operation := range []struct{ method, action, body string }{
+		{http.MethodGet, "frame", ""},
+		{http.MethodPost, "input", `{"type":"text","text":"hello"}`},
+		{http.MethodPost, "close", "{}"},
+	} {
+		response := request(operation.method, "/v1/windows/"+privateID+"/"+operation.action, operation.body)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("ungranted %s: %d %s", operation.action, response.Code, response.Body.String())
+		}
+	}
+	if backend.inputCount != 0 || backend.closeCount != 0 {
+		t.Fatalf("ungranted operations reached backend: input=%d close=%d", backend.inputCount, backend.closeCount)
+	}
+	bridge.revokeWindow(backend.items[0])
+	if response := request(http.MethodGet, "/v1/windows", ""); strings.Contains(response.Body.String(), "Shared") {
+		t.Fatalf("revoked window remained visible: %s", response.Body.String())
+	}
+}
+
+func TestSeamlessLaunchGrantIsOneFreshWindowAndRevokesOnClose(t *testing.T) {
+	before := seamlessWindow{PID: 42, HWND: "11", Class: "App", handle: 0x11}
+	newWindow := seamlessWindow{PID: 43, HWND: "22", Class: "App", handle: 0x22}
+	sibling := seamlessWindow{PID: 43, HWND: "23", Class: "App", handle: 0x23}
+	unrelated := seamlessWindow{PID: 44, HWND: "33", Class: "App", handle: 0x33}
+	backend := &fakeSeamlessBackend{items: []seamlessWindow{before}}
+	bridge := &seamlessWindowBridge{token: strings.Repeat("d", 64), backend: backend}
+	now := time.Now()
+	bridge.noteLaunch(before.PID, backend.items, now)
+	backend.items = []seamlessWindow{before, newWindow, sibling, unrelated}
+	if got := bridge.sharedWindows(backend.items, now); len(got) != 0 {
+		t.Fatalf("existing process auto-granted: %+v", got)
+	}
+	bridge.noteLaunch(newWindow.PID, []seamlessWindow{before}, now)
+	if got := bridge.sharedWindows(backend.items, now); len(got) != 1 || seamlessKey(got[0]) != seamlessKey(newWindow) {
+		t.Fatalf("launch granted unrelated window: %+v", got)
+	}
+	backend.items = []seamlessWindow{before, unrelated}
+	if got := bridge.sharedWindows(backend.items, now.Add(time.Second)); len(got) != 0 {
+		t.Fatalf("closed window still granted: %+v", got)
+	}
+	backend.items = []seamlessWindow{before, unrelated, newWindow}
+	if got := bridge.sharedWindows(backend.items, now.Add(2*time.Second)); len(got) != 0 {
+		t.Fatalf("reappeared HWND regained grant: %+v", got)
+	}
+	bridge.noteLaunch(55, []seamlessWindow{before}, now)
+	backend.items = append(backend.items, seamlessWindow{PID: 55, HWND: "55", Class: "App", handle: 0x55})
+	if got := bridge.sharedWindows(backend.items, now.Add(13*time.Second)); len(got) != 0 {
+		t.Fatalf("expired launch granted window: %+v", got)
 	}
 }
 

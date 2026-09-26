@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Launch a native Windows app on the host. Its window remains on Windows.
+# Launch a native Windows app on the host, with an optional window preview.
 set -euo pipefail
+
+launch_verb=open
+[[ ${OMARCHY_WINDOW_PREVIEW:-} == 1 ]] && launch_verb=preview
 
 usage() {
   printf 'Usage: omarchy-windows-app explorer|league|pick|list|open SHORTCUT_ID\n' >&2
@@ -8,11 +11,11 @@ usage() {
 }
 
 case "${1:-}" in
-  explorer|league) [[ $# == 1 ]] || usage; request="open $1" ;;
+  explorer|league) [[ $# == 1 ]] || usage; request="$launch_verb $1" ;;
   list|pick) [[ $# == 1 ]] || usage; request=list ;;
   open)
     [[ $# == 2 && $2 =~ ^shortcut-[[:xdigit:]]{32}$ ]] || usage
-    request="open $2"
+    request="$launch_verb $2"
     ;;
   *) usage ;;
 esac
@@ -54,7 +57,7 @@ if [[ $request == list && $reply == \[* ]]; then
       exit 0
     }
   [[ $selected =~ ^(explorer|league|shortcut-[[:xdigit:]]{32})$ ]] || fail 'The picker returned an invalid app.'
-  reply=$(send_request "open $selected")
+  reply=$(send_request "$launch_verb $selected")
 fi
 
 case "$reply" in

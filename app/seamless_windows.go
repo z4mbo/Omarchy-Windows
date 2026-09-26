@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +27,8 @@ const seamlessWindowPort = 4457
 var errSeamlessCapture = errors.New("window capture unavailable")
 var errSeamlessInput = errors.New("window input unavailable")
 var errSeamlessGone = errors.New("window gone")
+
+var activeSeamlessBridge atomic.Pointer[seamlessWindowBridge]
 
 // This is a deliberately small, local-only prototype. Each Windows HWND is
 // enumerated and captured separately so the guest can create one Wayland
@@ -36,6 +40,20 @@ type seamlessWindowBridge struct {
 	token   string
 	backend seamlessWindowBackend
 	frames  chan struct{}
+	mu      sync.Mutex
+	grants  map[seamlessWindowKey]string
+	pending []seamlessLaunch
+}
+
+type seamlessWindowKey struct {
+	pid    uint32
+	handle uintptr
+}
+
+type seamlessLaunch struct {
+	pid      uint32
+	until    time.Time
+	previous map[seamlessWindowKey]bool
 }
 
 type seamlessWindowBackend interface {
@@ -117,6 +135,7 @@ func runSeamlessWindowBridge() (string, func(), error) {
 		return "", nil, fmt.Errorf("protect bearer token: %w", err)
 	}
 	bridge := &seamlessWindowBridge{token: token, backend: nativeSeamlessWindows{}, frames: make(chan struct{}, 2)}
+	activeSeamlessBridge.Store(bridge)
 	server := &http.Server{
 		Handler:           bridge,
 		ReadHeaderTimeout: 2 * time.Second,
@@ -131,6 +150,7 @@ func runSeamlessWindowBridge() (string, func(), error) {
 		}
 	}()
 	return path, func() {
+		activeSeamlessBridge.CompareAndSwap(bridge, nil)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_ = server.Shutdown(ctx)
@@ -233,14 +253,109 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 }
 
 func (b *seamlessWindowBridge) catalogue() []seamlessWindow {
-	windows := b.backend.windows()
+	windows := b.sharedWindows(b.backend.windows(), time.Now())
 	for i := range windows {
-		identity := fmt.Sprintf("%x:%x", windows[i].PID, windows[i].handle)
-		mac := hmac.New(sha256.New, []byte(b.token))
-		_, _ = mac.Write([]byte(identity))
-		windows[i].ID = hex.EncodeToString(mac.Sum(nil)[:16])
+		windows[i].ID = b.windowID(windows[i])
 	}
 	return windows
+}
+
+func (b *seamlessWindowBridge) windowID(window seamlessWindow) string {
+	identity := fmt.Sprintf("%x:%x", window.PID, window.handle)
+	mac := hmac.New(sha256.New, []byte(b.token))
+	_, _ = mac.Write([]byte(identity))
+	return hex.EncodeToString(mac.Sum(nil)[:16])
+}
+
+func seamlessKey(window seamlessWindow) seamlessWindowKey {
+	return seamlessWindowKey{pid: window.PID, handle: window.handle}
+}
+
+// The host chooses grants. The bearer token only permits use of already
+// granted windows; it cannot nominate a host HWND or inspect other titles.
+func (b *seamlessWindowBridge) grantWindow(window seamlessWindow) bool {
+	for _, current := range b.backend.windows() {
+		if seamlessKey(current) == seamlessKey(window) && current.Class == window.Class {
+			b.mu.Lock()
+			if b.grants == nil {
+				b.grants = make(map[seamlessWindowKey]string)
+			}
+			b.grants[seamlessKey(current)] = current.Class
+			b.mu.Unlock()
+			return true
+		}
+	}
+	return false
+}
+
+func (b *seamlessWindowBridge) revokeWindow(window seamlessWindow) {
+	b.mu.Lock()
+	delete(b.grants, seamlessKey(window))
+	b.mu.Unlock()
+}
+
+// Only a window created by the fresh process returned by ShellExecuteEx may
+// be auto-granted. A single-instance app and an existing HWND need host choice.
+func (b *seamlessWindowBridge) noteLaunch(pid uint32, before []seamlessWindow, now time.Time) bool {
+	if pid == 0 {
+		return false
+	}
+	previous := make(map[seamlessWindowKey]bool, len(before))
+	for _, window := range before {
+		if window.PID == pid {
+			return false
+		}
+		previous[seamlessKey(window)] = true
+	}
+	b.mu.Lock()
+	b.pending = append(b.pending, seamlessLaunch{pid: pid, until: now.Add(12 * time.Second), previous: previous})
+	b.mu.Unlock()
+	return true
+}
+
+func (b *seamlessWindowBridge) sharedWindows(windows []seamlessWindow, now time.Time) []seamlessWindow {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	current := make(map[seamlessWindowKey]string, len(windows))
+	for _, window := range windows {
+		current[seamlessKey(window)] = window.Class
+	}
+	for key, class := range b.grants {
+		if current[key] != class {
+			delete(b.grants, key)
+		}
+	}
+	pending := b.pending[:0]
+	for _, launch := range b.pending {
+		if now.After(launch.until) {
+			logf("Windows app window was not found after launch; choose Show Windows app in Omarchy from the tray")
+			continue
+		}
+		granted := false
+		for _, window := range windows {
+			key := seamlessKey(window)
+			if window.PID != launch.pid || launch.previous[key] {
+				continue
+			}
+			if b.grants == nil {
+				b.grants = make(map[seamlessWindowKey]string)
+			}
+			b.grants[key] = window.Class
+			granted = true
+			break
+		}
+		if !granted {
+			pending = append(pending, launch)
+		}
+	}
+	b.pending = pending
+	shared := make([]seamlessWindow, 0, len(b.grants))
+	for _, window := range windows {
+		if class, ok := b.grants[seamlessKey(window)]; ok && class == window.Class {
+			shared = append(shared, window)
+		}
+	}
+	return shared
 }
 
 func validSeamlessInput(input seamlessInput, window seamlessWindow) bool {

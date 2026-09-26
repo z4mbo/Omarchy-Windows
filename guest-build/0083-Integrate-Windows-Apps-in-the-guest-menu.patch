@@ -7,7 +7,7 @@ Subject: [PATCH] Put Windows Apps in the guest menu and install Moonlight on
 ---
  .../try-omarchy-seamless-token.service        |   1 +
  .../system/try-omarchy-seamless-token.service |  11 +
- .../usr/local/bin/omarchy-windows-app         |  64 +++
+ .../usr/local/bin/omarchy-windows-app         |  67 +++
  .../usr/local/bin/omarchy-windows-desktop     |  63 +++
  .../usr/local/bin/omarchy-windows-open        | 116 +++++
  .../usr/local/bin/omarchy-windows-present     | 446 ++++++++++++++++++
@@ -20,8 +20,8 @@ Subject: [PATCH] Put Windows Apps in the guest menu and install Moonlight on
  .../applications/omarchy-windows-open.desktop |   8 +
  guest/scripts/finalize-rootfs.sh              |  16 +-
  guest/tests/test_windows_present_protocol.py  |  85 ++++
- guest/tests/verify.py                         |  55 ++-
- 16 files changed, 1057 insertions(+), 2 deletions(-)
+ guest/tests/verify.py                         |  56 ++-
+ 16 files changed, 1061 insertions(+), 2 deletions(-)
  create mode 120000 guest/factory-overlay/etc/systemd/system/multi-user.target.wants/try-omarchy-seamless-token.service
  create mode 100644 guest/factory-overlay/etc/systemd/system/try-omarchy-seamless-token.service
  create mode 100755 guest/factory-overlay/usr/local/bin/omarchy-windows-app
@@ -64,13 +64,16 @@ index 0000000..ca4cabc
 +WantedBy=multi-user.target
 diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-app b/guest/factory-overlay/usr/local/bin/omarchy-windows-app
 new file mode 100755
-index 0000000..a2f8959
+index 0000000..e77e2e6
 --- /dev/null
 +++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-app
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,67 @@
 +#!/usr/bin/env bash
-+# Launch a native Windows app on the host. Its window remains on Windows.
++# Launch a native Windows app on the host, with an optional window preview.
 +set -euo pipefail
++
++launch_verb=open
++[[ ${OMARCHY_WINDOW_PREVIEW:-} == 1 ]] && launch_verb=preview
 +
 +usage() {
 +  printf 'Usage: omarchy-windows-app explorer|league|pick|list|open SHORTCUT_ID\n' >&2
@@ -78,11 +81,11 @@ index 0000000..a2f8959
 +}
 +
 +case "${1:-}" in
-+  explorer|league) [[ $# == 1 ]] || usage; request="open $1" ;;
++  explorer|league) [[ $# == 1 ]] || usage; request="$launch_verb $1" ;;
 +  list|pick) [[ $# == 1 ]] || usage; request=list ;;
 +  open)
 +    [[ $# == 2 && $2 =~ ^shortcut-[[:xdigit:]]{32}$ ]] || usage
-+    request="open $2"
++    request="$launch_verb $2"
 +    ;;
 +  *) usage ;;
 +esac
@@ -124,7 +127,7 @@ index 0000000..a2f8959
 +      exit 0
 +    }
 +  [[ $selected =~ ^(explorer|league|shortcut-[[:xdigit:]]{32})$ ]] || fail 'The picker returned an invalid app.'
-+  reply=$(send_request "open $selected")
++  reply=$(send_request "$launch_verb $selected")
 +fi
 +
 +case "$reply" in
@@ -1157,7 +1160,7 @@ index a8bf9d4..0c92b18 100755
          and "usr/local/lib/try-omarchy/catch-up" in compat_paths
          and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
          and "etc/skel/.config/nvim/lua/plugins/theme.lua" in compat_paths
-@@ -303,6 +303,59 @@ def main() -> None:
+@@ -303,6 +303,60 @@ def main() -> None:
          and (GUEST / "factory-overlay/usr/local/bin/try-omarchy-drop").stat().st_mode & stat.S_IXUSR != 0,
          "direct file-drop delivery reaches persistent disks",
      )
@@ -1200,6 +1203,7 @@ index a8bf9d4..0c92b18 100755
 +        and "--probe" in windows_open.read_text()
 +        and "movetoworkspacesilent" in windows_present.read_text()
 +        and "10.0.2.2/4456" in windows_app.read_text()
++        and "launch_verb=preview" in windows_app.read_text()
 +        and "sha256sum --check --status" in windows_desktop.read_text()
 +        and "version=6.1.0" in windows_desktop.read_text()
 +        and "expected_sha256=0e855ffd22d407e18ab5fdb575fed5f01ca119a3f91993c5f0213f15ac80b400" in windows_desktop.read_text()

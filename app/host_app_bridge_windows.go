@@ -26,12 +26,16 @@ const hostAppPort = 4456
 
 var errLeagueNotInstalled = errors.New("League of Legends Start-menu shortcut not found")
 
+var hostAppGetProcessID = kernel32.NewProc("GetProcessId")
+var hostAppGetProcessTimes = kernel32.NewProc("GetProcessTimes")
+
 // The guest can open built-in entries or installed Start Menu shortcuts by an
 // opaque catalog ID. No path or command line is accepted over the connection.
 type hostAppBridge struct {
 	mu          sync.Mutex
 	lastRequest time.Time
 	launch      func(string) error
+	preview     func(string) error
 	now         func() time.Time
 }
 
@@ -41,7 +45,7 @@ func runHostAppBridge() {
 		logf("host app bridge: port %d unavailable: %v", hostAppPort, err)
 		return
 	}
-	b := &hostAppBridge{launch: launchHostApp, now: time.Now}
+	b := &hostAppBridge{launch: launchHostApp, preview: previewHostApp, now: time.Now}
 	go b.serve(l)
 }
 
@@ -83,24 +87,28 @@ func (b *hostAppBridge) handle(c net.Conn) {
 		_, _ = c.Write(append(payload, '\n'))
 		return
 	}
-	id, ok := strings.CutPrefix(line, "open ")
-	if !ok {
+	id, validRequest := strings.CutPrefix(line, "open ")
+	if !validRequest {
+		id, validRequest = strings.CutPrefix(line, "preview ")
+	}
+	if !validRequest {
 		_, _ = io.WriteString(c, "error invalid request\n")
 		return
 	}
+	preview := strings.HasPrefix(line, "preview ")
 	id = strings.TrimSuffix(id, "\n")
 	if id != "explorer" && id != "league" && !validShortcutID(id) {
 		_, _ = io.WriteString(c, "error unknown app\n")
 		return
 	}
-	if err := b.dispatch(id); err != nil {
+	if err := b.dispatch(id, preview); err != nil {
 		_, _ = io.WriteString(c, "error "+err.Error()+"\n")
 		return
 	}
 	_, _ = io.WriteString(c, "ok\n")
 }
 
-func (b *hostAppBridge) dispatch(id string) error {
+func (b *hostAppBridge) dispatch(id string, preview bool) error {
 	b.mu.Lock()
 	now := b.now()
 	if now.Sub(b.lastRequest) < time.Second {
@@ -109,7 +117,14 @@ func (b *hostAppBridge) dispatch(id string) error {
 	}
 	b.lastRequest = now
 	b.mu.Unlock()
-	if err := b.launch(id); err != nil {
+	launch := b.launch
+	if preview {
+		launch = b.preview
+	}
+	if launch == nil {
+		return errors.New("preview unavailable")
+	}
+	if err := launch(id); err != nil {
 		logf("host app bridge: could not launch %s: %v", id, err)
 		if errors.Is(err, errLeagueNotInstalled) {
 			return errors.New("not installed")
@@ -120,30 +135,91 @@ func (b *hostAppBridge) dispatch(id string) error {
 }
 
 func launchHostApp(id string) error {
+	path, err := hostAppPath(id)
+	if err != nil {
+		return err
+	}
+	return shellOpen(path)
+}
+
+func previewHostApp(id string) error {
+	path, err := hostAppPath(id)
+	if err != nil {
+		return err
+	}
+	return shellOpenWindowApp(path)
+}
+
+func hostAppPath(id string) (string, error) {
 	switch id {
 	case "explorer":
 		windowsDir := os.Getenv("WINDIR")
 		if windowsDir == "" {
-			return errors.New("WINDIR is not set")
+			return "", errors.New("WINDIR is not set")
 		}
-		return shellOpen(filepath.Join(windowsDir, "explorer.exe"))
+		return filepath.Join(windowsDir, "explorer.exe"), nil
 	case "league":
 		shortcut, err := findLeagueShortcut()
 		if err != nil {
-			return err
+			return "", err
 		}
-		return shellOpen(shortcut)
+		return shortcut, nil
 	default:
 		if !validShortcutID(id) {
-			return errors.New("unknown app")
+			return "", errors.New("unknown app")
 		}
 		for _, app := range listHostApps() {
 			if app.ID == id && app.path != "" {
-				return shellOpen(app.path)
+				return app.path, nil
 			}
 		}
-		return errors.New("unknown app")
+		return "", errors.New("unknown app")
 	}
+}
+
+// ShellExecuteEx supplies a process handle when it starts a new process. We
+// only auto-share a window if that process was created for this request; DDE
+// and single-instance handoffs remain visible solely to the Windows user.
+func shellOpenWindowApp(path string) error {
+	bridge := activeSeamlessBridge.Load()
+	var before []seamlessWindow
+	if bridge != nil {
+		before = bridge.backend.windows()
+	}
+	started := time.Now()
+	verb, _ := syscall.UTF16PtrFromString("open")
+	file, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	si := shellExecuteInfo{fMask: seeMaskNoCloseProcess, lpVerb: verb, lpFile: file, nShow: 1}
+	si.cbSize = uint32(unsafe.Sizeof(si))
+	result, _, callErr := procShellExecuteExW.Call(uintptr(unsafe.Pointer(&si)))
+	if result == 0 {
+		return fmt.Errorf("ShellExecuteExW: %w", callErr)
+	}
+	if si.hProcess == 0 {
+		if bridge != nil {
+			logf("Windows app opened without a new process; choose Show Windows app in Omarchy from the tray")
+		}
+		return nil
+	}
+	defer procCloseHandle.Call(si.hProcess)
+	if bridge == nil {
+		return nil
+	}
+	pid, _, _ := hostAppGetProcessID.Call(si.hProcess)
+	var created, exited, kernelTime, userTime syscall.Filetime
+	gotTimes, _, _ := hostAppGetProcessTimes.Call(si.hProcess,
+		uintptr(unsafe.Pointer(&created)), uintptr(unsafe.Pointer(&exited)),
+		uintptr(unsafe.Pointer(&kernelTime)), uintptr(unsafe.Pointer(&userTime)))
+	if gotTimes != 0 && pid != 0 && !time.Unix(0, created.Nanoseconds()).Before(started) {
+		if bridge.noteLaunch(uint32(pid), before, time.Now()) {
+			return nil
+		}
+	}
+	logf("Windows app launch could not be tied to a new process; choose Show Windows app in Omarchy from the tray")
+	return nil
 }
 
 type hostAppItem struct {

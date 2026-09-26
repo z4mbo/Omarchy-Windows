@@ -68,10 +68,12 @@ func TestHostAppCatalogUsesOpaqueStartMenuIDs(t *testing.T) {
 
 func TestHostAppBridgeProtocol(t *testing.T) {
 	var launched []string
+	var previewed []string
 	now := time.Now()
 	b := &hostAppBridge{
-		launch: func(id string) error { launched = append(launched, id); return nil },
-		now:    func() time.Time { return now },
+		launch:  func(id string) error { launched = append(launched, id); return nil },
+		preview: func(id string) error { previewed = append(previewed, id); return nil },
+		now:     func() time.Time { return now },
 	}
 	request := func(line string) string {
 		t.Helper()
@@ -96,6 +98,10 @@ func TestHostAppBridgeProtocol(t *testing.T) {
 	if got := request("open league\n"); got != "ok\n" {
 		t.Fatalf("league: %q", got)
 	}
+	now = now.Add(2 * time.Second)
+	if got := request("preview explorer\n"); got != "ok\n" {
+		t.Fatalf("preview explorer: %q", got)
+	}
 	if got := request("open cmd.exe\n"); got != "error unknown app\n" {
 		t.Fatalf("allowlist: %q", got)
 	}
@@ -113,6 +119,9 @@ func TestHostAppBridgeProtocol(t *testing.T) {
 	}
 	if len(launched) != 2 || launched[0] != "explorer" || launched[1] != "league" {
 		t.Fatalf("launched unexpected apps: %v", launched)
+	}
+	if len(previewed) != 1 || previewed[0] != "explorer" {
+		t.Fatalf("preview routes: %v", previewed)
 	}
 }
 

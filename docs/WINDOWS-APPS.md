@@ -11,15 +11,20 @@ completed gaming feature.
 **Windows Apps in Omarchy (Preview)** opens a Windows Start Menu app through
 the Windows host, then creates a separate GTK4 window inside Omarchy for the
 selected Windows window. Hyprland can tile and move that GTK window like other
-Omarchy apps. Only the selected app group is presented; unrelated host windows
-are not mirrored by default. The app itself still runs on Windows with its
-installed driver and files.
+Omarchy apps. The Windows launcher grants access only to a new window tied to
+the freshly launched process. Existing windows, including those reused by
+single-instance apps, require a choice from the Windows tray menu: **Show
+Windows app in Omarchy...** Select the specific window there. Use **Stop
+showing Windows app** in the tray to revoke it. Modern Notepad and File
+Explorer may need this one-click choice. Unrelated host windows stay private.
+The app itself still runs on Windows with its installed driver and files.
 
 The Windows launcher serves an authenticated, loopback-only window bridge at
 `10.0.2.2:4457` from the guest. A fresh bearer token is passed to that guest
 boot through QEMU `fw_cfg`; the token is not placed in the command line. The
-bridge lists top-level windows with opaque IDs, captures individual ordinary
-windows as PNG images, and accepts bounded mouse, keyboard, and close events.
+bridge lists only host-granted windows with opaque IDs, captures individual
+ordinary windows as PNG images, and accepts bounded mouse, keyboard, and close
+events for those granted windows.
 It does not expose a command or script execution endpoint. The guest presenter
 uses a separate GTK window per Windows window and limits pending frames.
 
@@ -98,3 +103,6 @@ native GPU passthrough are unavailable through this VM configuration. Windows
 and Omarchy share CPU scheduling while running; guest vCPU count and RAM size
 are chosen at boot. The current Windows QEMU runtime does not physically
 return ballooned guest RAM to Windows, so live guest RAM resizing is disabled.
+An [isolated experimental runtime](evidence/BALLOON-EXPERIMENT-2026-09-26.md)
+returned some resident RAM in a disposable guest test. It is not installed or
+enabled in the normal app.

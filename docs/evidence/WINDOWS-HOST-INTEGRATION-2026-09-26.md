@@ -55,9 +55,19 @@ on the NVMe drive; its sparse Linux disk has a 200 GiB virtual capacity.
   its own non-floating Hyprland client on workspace 1. The preview process was
   stopped without closing the native Windows League client. No League input or
   live match was tested.
+- After the host-grant bridge update, an authenticated catalogue initially
+  returned no host windows, and an unauthenticated request returned HTTP 401.
+  Launching Character Map through the guest preview command granted only its
+  new `charmap.exe` window. Its presenter appeared as a non-floating Hyprland
+  client on workspace 1. Closing that window through the authenticated bridge
+  removed it from the catalogue. Existing-window tray grant/revoke UI was not
+  exercised in this host test.
 - The bridge accepted a posted text event for modern Notepad, but the app still
   showed zero characters. Input acceptance at the transport layer does not
   establish app control.
+- A controlled native Win32 Edit test delivered text to a child control
+  without changing the Windows foreground app. This verifies the new routing
+  for that control type; modern Notepad and game input remain unverified.
 - A temporary Windows Forms app opened a borderless 2560x1440 host window. The
   bridge identified it as fullscreen and the guest presenter filled the
   2560x1417 Omarchy output in a compositor screenshot. The test app closed
