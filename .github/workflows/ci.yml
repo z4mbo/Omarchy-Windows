@@ -7,6 +7,10 @@ on:
         description: Build and boot the complete guest candidate
         type: boolean
         default: false
+      refresh_guest_lock:
+        description: Refresh guest package lock into a reviewable patch artifact
+        type: boolean
+        default: false
   pull_request:
   push:
     branches: [master]
@@ -86,6 +90,32 @@ jobs:
 
       - name: Apply guest patches and run contract tests
         run: scripts/release/build-guest.sh --contract-only
+
+  guest-lock-refresh:
+    name: Guest package lock refresh
+    if: github.event_name == 'workflow_dispatch' && inputs.refresh_guest_lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Refresh guest package lock
+        run: scripts/release/refresh-guest-lock.sh
+
+      - name: Stage only the new patch
+        run: |
+          mkdir lock-refresh
+          git ls-files --others --exclude-standard -z -- guest-build | xargs -0 -r cp -t lock-refresh --
+          test -n "$(find lock-refresh -maxdepth 1 -type f -name '*.patch' -print -quit)"
+
+      - name: Retain package lock patch
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-lock-refresh
+          path: lock-refresh/*.patch
+          retention-days: 7
+          if-no-files-found: error
 
   guest-candidate:
     name: Guest image candidate
