@@ -132,6 +132,11 @@ func buildQemuArgs(cfg *config, cmdline string) []string {
 		// Stock QEMU for Windows ships no virtio-9p. main() selects the bundled
 		// runtime when possible and otherwise tells the user before continuing.
 	}
+	if cfg.windowTokenPath != "" {
+		// QEMU exposes this per-launch bearer token only to the guest through
+		// fw_cfg. Keep the secret out of argv and the kernel command line.
+		args = append(args, "-fw_cfg", "name=opt/omarchy/seamless-token,file="+qemuOptionValue(cfg.windowTokenPath))
+	}
 	if cfg.fullscreen {
 		args = append(args, "-full-screen")
 	}

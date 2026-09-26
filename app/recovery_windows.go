@@ -164,7 +164,7 @@ func resetFromSettings(dir string) error {
 func reportRecoveryResult(err error) {
 	uiDone()
 	if err != nil && !errors.Is(err, errSetupCancelled) {
-		errorBox("Try Omarchy could not finish this operation.\n\n" + err.Error())
+		errorBox("Omarchy could not finish this operation.\n\n" + err.Error())
 	}
 }
 

@@ -20,9 +20,9 @@ func uninstallKeyName(dir, defaultDir string) string {
 
 func uninstallDisplayName(dir, defaultDir string) string {
 	if pathsEqual(dir, defaultDir) {
-		return "Try Omarchy"
+		return "Omarchy"
 	}
-	return "Try Omarchy (" + dir + ")"
+	return "Omarchy (" + dir + ")"
 }
 
 // uninstallCommand is the string Windows runs from Apps & features. Paths

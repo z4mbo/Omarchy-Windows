@@ -10,10 +10,11 @@ import (
 )
 
 func platformQMPControlDirectory() (string, error) {
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
-	}
+	// Some Windows installations allow AF_UNIX endpoints under the per-user
+	// Temp directory but reject them under LocalAppData with CreateFile errors.
+	// Temp is per-user here, and prepareQMPControl keeps the child directory
+	// private and verifies stale endpoints before removing them.
+	cache := os.TempDir()
 	if len([]byte(filepath.Join(cache, "TryOmarchyIPC", "supervisor.sock"))) > 103 {
 		name, err := syscall.UTF16PtrFromString(cache)
 		if err != nil {

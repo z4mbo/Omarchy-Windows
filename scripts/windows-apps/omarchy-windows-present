@@ -1,0 +1,446 @@
+#!/usr/bin/env python3
+"""Preview one Windows host HWND per ordinary Hyprland-managed GTK window.
+
+The bridge captures host windows; this client only presents frames and relays
+input. A new fullscreen HWND from the same app group inherits an existing
+presenter's Hyprland workspace before fullscreen is requested.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import argparse
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+
+from omarchy_windows_protocol import Bridge, BridgeError, load_token
+
+try:
+    import gi
+
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Gdk", "4.0")
+    from gi.repository import Gdk, Gio, GLib, Gtk
+except (ImportError, ValueError) as exc:
+    print(f"Windows windows preview needs GTK4 and python-gobject: {exc}", file=sys.stderr)
+    raise SystemExit(1) from exc
+
+
+MAX_PRESENTED = 8
+POLL_SECONDS = 0.7
+FRAME_INTERVAL = 0.15  # PNG-over-HTTP preview, not a game-streaming transport.
+EXCLUDED_PROCESSES = {"tryomarchy.exe", "qemu-system-x86_64.exe", "qemu-system-x86_64w.exe"}
+
+
+def presentable(metadata: dict) -> bool:
+    process = metadata["process"].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return process not in EXCLUDED_PROCESSES
+
+
+def marker_for(ident: str) -> str:
+    return f" [Omarchy Windows {hashlib.sha256(ident.encode()).hexdigest()[:12]}]"
+
+
+def hyprland_clients() -> list[dict]:
+    if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return []
+    try:
+        result = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=2, check=True)
+        clients = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return []
+    return clients if isinstance(clients, list) else []
+
+
+def workspace_for(marker: str, clients: list[dict]) -> tuple[str, str] | None:
+    for client in clients:
+        if not isinstance(client, dict) or not str(client.get("title", "")).endswith(marker):
+            continue
+        address = client.get("address")
+        workspace = client.get("workspace")
+        if not isinstance(address, str) or not isinstance(workspace, dict):
+            continue
+        name = workspace.get("name")
+        ident = workspace.get("id")
+        if isinstance(name, str) and name.startswith("special:"):
+            return name, address
+        if isinstance(ident, int) and ident > 0:
+            return str(ident), address
+        if isinstance(name, str) and name:
+            return "name:" + name, address
+    return None
+
+
+def key_to_vk(keyval: int) -> int | None:
+    # Windows virtual keys for ordinary keyboard input. IME/composition and
+    # game raw input are outside this prototype's tested surface.
+    char = Gdk.keyval_to_unicode(keyval)
+    if 0x61 <= char <= 0x7A:
+        return char - 0x20
+    if 0x41 <= char <= 0x5A or 0x30 <= char <= 0x39:
+        return char
+    name = Gdk.keyval_name(keyval) or ""
+    fixed = {
+        "Return": 0x0D, "KP_Enter": 0x0D, "BackSpace": 0x08, "Tab": 0x09,
+        "Escape": 0x1B, "space": 0x20, "Delete": 0x2E, "Insert": 0x2D,
+        "Home": 0x24, "End": 0x23, "Prior": 0x21, "Next": 0x22,
+        "Left": 0x25, "Up": 0x26, "Right": 0x27, "Down": 0x28,
+        "Shift_L": 0xA0, "Shift_R": 0xA1, "Control_L": 0xA2,
+        "Control_R": 0xA3, "Alt_L": 0xA4, "Alt_R": 0xA5,
+        "comma": 0xBC, "period": 0xBE, "slash": 0xBF,
+        "semicolon": 0xBA, "apostrophe": 0xDE, "minus": 0xBD,
+        "equal": 0xBB, "bracketleft": 0xDB, "bracketright": 0xDD,
+        "backslash": 0xDC, "grave": 0xC0,
+    }
+    if name in fixed:
+        return fixed[name]
+    if name.startswith("F") and name[1:].isdigit() and 1 <= int(name[1:]) <= 24:
+        return 0x6F + int(name[1:])
+    return None
+
+
+class HostWindow:
+    def __init__(self, app: "Presenter", metadata: dict, workspace: str | None):
+        self.app = app
+        self.ident = metadata["id"]
+        self.marker = marker_for(self.ident)
+        self.metadata = metadata
+        self.frame_size = (metadata["width"], metadata["height"])
+        self.pending_workspace = workspace
+        self.move_attempts = 0
+        self.fullscreen_requested = False
+        self.retiring = False
+        self.last_motion = 0.0
+
+        self.window = Gtk.ApplicationWindow(application=app)
+        self.window.set_default_size(min(metadata["width"], 1000), min(metadata["height"], 700))
+        self.picture = Gtk.Picture()
+        self.picture.set_can_shrink(True)
+        self.picture.set_content_fit(Gtk.ContentFit.FILL)
+        self.window.set_child(self.picture)
+        self.window.connect("close-request", self.on_close)
+
+        click = Gtk.GestureClick.new()
+        click.set_button(0)
+        click.connect("pressed", self.on_pressed)
+        click.connect("released", self.on_released)
+        self.picture.add_controller(click)
+        motion = Gtk.EventControllerMotion.new()
+        motion.connect("motion", self.on_motion)
+        self.picture.add_controller(motion)
+        keys = Gtk.EventControllerKey.new()
+        keys.connect("key-pressed", self.on_key_pressed)
+        keys.connect("key-released", self.on_key_released)
+        self.window.add_controller(keys)
+
+        self.update(metadata)
+        self.window.present()
+        if workspace:
+            GLib.timeout_add(150, self.move_to_inherited_workspace)
+
+    def image_point(self, x: float, y: float) -> tuple[int, int]:
+        width = max(1, self.picture.get_width())
+        height = max(1, self.picture.get_height())
+        frame_width, frame_height = self.frame_size
+        return (
+            min(frame_width - 1, max(0, round(x * frame_width / width))),
+            min(frame_height - 1, max(0, round(y * frame_height / height))),
+        )
+
+    def pointer(self, x: float, y: float, button: int | None = None, down: bool | None = None) -> None:
+        px, py = self.image_point(x, y)
+        packet: dict[str, object] = {"type": "pointer", "x": px, "y": py}
+        if button is not None:
+            packet.update(button=button, down=down)
+        self.app.send_input(self.ident, packet)
+
+    def on_pressed(self, gesture: Gtk.GestureClick, _count: int, x: float, y: float) -> None:
+        self.pointer(x, y, gesture.get_current_button(), True)
+
+    def on_released(self, gesture: Gtk.GestureClick, _count: int, x: float, y: float) -> None:
+        self.pointer(x, y, gesture.get_current_button(), False)
+
+    def on_motion(self, _controller: Gtk.EventControllerMotion, x: float, y: float) -> None:
+        now = time.monotonic()
+        if now - self.last_motion >= 1 / 30:
+            self.last_motion = now
+            self.pointer(x, y)
+
+    def on_key_pressed(self, _controller: Gtk.EventControllerKey, keyval: int, _keycode: int, _state: Gdk.ModifierType) -> bool:
+        vk = key_to_vk(keyval)
+        if vk is None:
+            return False
+        self.app.send_input(self.ident, {"type": "key", "vk": vk, "down": True})
+        return True
+
+    def on_key_released(self, _controller: Gtk.EventControllerKey, keyval: int, _keycode: int, _state: Gdk.ModifierType) -> None:
+        vk = key_to_vk(keyval)
+        if vk is not None:
+            self.app.send_input(self.ident, {"type": "key", "vk": vk, "down": False})
+
+    def on_close(self, _window: Gtk.ApplicationWindow) -> bool:
+        if not self.retiring:
+            self.app.dismissed.add(self.ident)
+            self.app.send_close(self.ident)
+            self.app.windows.pop(self.ident, None)
+        return False
+
+    def move_to_inherited_workspace(self) -> bool:
+        if not self.pending_workspace:
+            return False
+        found = workspace_for(self.marker, hyprland_clients())
+        if found is None:
+            self.move_attempts += 1
+            if self.move_attempts < 12:
+                return True
+            self.pending_workspace = None
+            self.app.warn_workspace("Could not place the Windows game on its client workspace. Fullscreen was requested on the current workspace.")
+            if self.metadata["fullscreen"]:
+                self.set_fullscreen(True)
+            return False
+        _, address = found
+        try:
+            subprocess.run(
+                ["hyprctl", "dispatch", "movetoworkspacesilent", f"{self.pending_workspace},address:{address}"],
+                capture_output=True, timeout=2, check=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            self.app.warn_workspace("Could not move the Windows game to its client workspace. Fullscreen was requested on the current workspace.")
+        self.pending_workspace = None
+        if self.metadata["fullscreen"]:
+            self.set_fullscreen(True)
+        return False
+
+    def set_fullscreen(self, value: bool) -> None:
+        if value == self.fullscreen_requested:
+            return
+        self.fullscreen_requested = value
+        if value:
+            self.window.fullscreen()
+        else:
+            self.window.unfullscreen()
+
+    def update(self, metadata: dict) -> None:
+        self.metadata = metadata
+        self.window.set_title((metadata["title"] or metadata["process"] or "Windows app")[:160] + self.marker)
+        if not self.pending_workspace:
+            self.set_fullscreen(metadata["fullscreen"])
+
+    def update_frame(self, data: bytes, size: tuple[int, int]) -> None:
+        self.frame_size = size
+        try:
+            texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+            self.picture.set_paintable(texture)
+        except GLib.Error:
+            pass
+
+    def retire(self) -> None:
+        self.retiring = True
+        self.window.destroy()
+
+
+class Presenter(Gtk.Application):
+    def __init__(self, bridge: Bridge, selected_id: str, group: str):
+        super().__init__(application_id="org.omarchy.WindowsPresent", flags=Gio.ApplicationFlags.NON_UNIQUE)
+        self.bridge = bridge
+        self.selected_id = selected_id
+        self.group = group
+        self.windows: dict[str, HostWindow] = {}
+        self.dismissed: set[str] = set()
+        self.commands: queue.Queue[tuple[str, str, dict | None]] = queue.Queue(maxsize=128)
+        self.stop = threading.Event()
+        self.status: Gtk.ApplicationWindow | None = None
+        self.last_error = ""
+        self.workspace_history: dict[str, str] = {}
+        self.pending_frames: set[str] = set()
+        self.pending_lock = threading.Lock()
+
+    def do_activate(self) -> None:
+        self.hold()
+        self.status = Gtk.ApplicationWindow(application=self)
+        self.status.set_title("Windows windows (Preview)")
+        self.status.set_default_size(460, 140)
+        self.message = Gtk.Label(label="Connecting to Windows window bridge…")
+        self.message.set_wrap(True)
+        self.message.set_margin_top(24)
+        self.message.set_margin_bottom(24)
+        self.message.set_margin_start(24)
+        self.message.set_margin_end(24)
+        self.status.set_child(self.message)
+        self.status.connect("close-request", self.on_status_close)
+        self.status.present()
+        threading.Thread(target=self.worker, daemon=True).start()
+
+    def on_status_close(self, _window: Gtk.ApplicationWindow) -> bool:
+        self.quit()
+        return False
+
+    def do_shutdown(self) -> None:
+        self.stop.set()
+        super().do_shutdown()
+
+    def warn_workspace(self, message: str) -> None:
+        print(message, file=sys.stderr)
+        try:
+            subprocess.Popen(["notify-send", "Windows windows (Preview)", message],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+
+    def send_input(self, ident: str, payload: dict) -> None:
+        try:
+            self.commands.put_nowait(("input", ident, payload))
+        except queue.Full:
+            pass
+
+    def send_close(self, ident: str) -> None:
+        try:
+            self.commands.put_nowait(("close", ident, None))
+        except queue.Full:
+            pass
+
+    def worker(self) -> None:
+        catalog: list[dict] = []
+        next_catalog = 0.0
+        while not self.stop.is_set():
+            try:
+                for _ in range(24):
+                    command, ident, payload = self.commands.get_nowait()
+                    try:
+                        if command == "close":
+                            self.bridge.close(ident)
+                        elif payload is not None:
+                            self.bridge.input(ident, payload)
+                    except BridgeError:
+                        pass
+            except queue.Empty:
+                pass
+            now = time.monotonic()
+            if now >= next_catalog:
+                next_catalog = now + POLL_SECONDS
+                try:
+                    catalog = self.bridge.windows()
+                    GLib.idle_add(self.apply_catalog, catalog)
+                    if self.last_error:
+                        self.last_error = ""
+                except BridgeError as exc:
+                    if str(exc) != self.last_error:
+                        self.last_error = str(exc)
+                        GLib.idle_add(self.show_status, str(exc))
+                    self.stop.wait(1)
+                    continue
+            allowed = [w for w in catalog if presentable(w) and
+                       (w["id"] == self.selected_id or w["appGroup"] == self.group)]
+            allowed.sort(key=lambda w: (not w["fullscreen"], w["id"] != self.selected_id))
+            for metadata in allowed[:MAX_PRESENTED]:
+                if self.stop.is_set():
+                    break
+                if metadata["id"] in self.dismissed:
+                    continue
+                with self.pending_lock:
+                    if metadata["id"] in self.pending_frames:
+                        continue
+                    self.pending_frames.add(metadata["id"])
+                try:
+                    data, dimensions = self.bridge.frame(metadata["id"])
+                    GLib.idle_add(self.apply_frame, metadata["id"], data, dimensions)
+                except BridgeError:
+                    with self.pending_lock:
+                        self.pending_frames.discard(metadata["id"])
+                    continue
+            self.stop.wait(FRAME_INTERVAL)
+
+    def show_status(self, message: str) -> bool:
+        if self.status is not None:
+            self.message.set_text(message)
+            if not self.windows:
+                self.status.present()
+        return False
+
+    def inherited_workspace(self, group: str) -> str | None:
+        clients = hyprland_clients()
+        for other in self.windows.values():
+            if other.metadata["appGroup"] != group:
+                continue
+            found = workspace_for(other.marker, clients)
+            if found:
+                return found[0]
+        return self.workspace_history.get(group)
+
+    def apply_catalog(self, catalog: list[dict]) -> bool:
+        allowed = [w for w in catalog if presentable(w) and
+                   (w["id"] == self.selected_id or w["appGroup"] == self.group)]
+        allowed.sort(key=lambda w: (not w["fullscreen"], w["id"] != self.selected_id))
+        allowed = allowed[:MAX_PRESENTED]
+        live = {w["id"] for w in allowed}
+        had_windows = bool(self.windows)
+        self.dismissed.intersection_update(live)
+        clients = hyprland_clients()
+        for view in self.windows.values():
+            found = workspace_for(view.marker, clients)
+            if found:
+                self.workspace_history[view.metadata["appGroup"]] = found[0]
+        for ident in list(self.windows):
+            if ident not in live:
+                self.windows.pop(ident).retire()
+        for metadata in allowed:
+            ident = metadata["id"]
+            if ident in self.dismissed:
+                continue
+            if ident in self.windows:
+                self.windows[ident].update(metadata)
+            else:
+                workspace = self.inherited_workspace(metadata["appGroup"]) if metadata["fullscreen"] else None
+                self.windows[ident] = HostWindow(self, metadata, workspace)
+        if self.status is not None:
+            if self.windows:
+                self.status.hide()
+            else:
+                self.message.set_text("The selected Windows app has no visible windows. Close this preview or open the app again from the Omarchy menu.")
+                if had_windows:
+                    self.status.present()
+        return False
+
+    def apply_frame(self, ident: str, data: bytes, dimensions: tuple[int, int]) -> bool:
+        try:
+            view = self.windows.get(ident)
+            if view is not None:
+                view.update_frame(data, dimensions)
+        finally:
+            with self.pending_lock:
+                self.pending_frames.discard(ident)
+        return False
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Preview individual Windows windows inside Omarchy")
+    parser.add_argument("--probe", action="store_true", help="check the authenticated bridge")
+    parser.add_argument("--id", help="selected Windows window ID")
+    parser.add_argument("--group", help="application group for child windows")
+    args = parser.parse_args()
+    if not args.probe and (not args.id or not args.group):
+        parser.error("--id and --group are required unless --probe is set")
+    try:
+        bridge = Bridge(load_token())
+    except BridgeError as exc:
+        print(str(exc), file=sys.stderr)
+        if os.environ.get("WAYLAND_DISPLAY") and subprocess.call(["which", "zenity"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+            subprocess.run(["zenity", "--error", "--title=Windows windows (Preview)", f"--text={exc}"], timeout=30, check=False)
+        return 1
+    if args.probe:
+        try:
+            bridge.windows()
+            return 0
+        except BridgeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    return Presenter(bridge, args.id, args.group).run([])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

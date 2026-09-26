@@ -1,0 +1,1222 @@
+From c984023c862a3fe1f76aa7eb5ecff54ec87d39c2 Mon Sep 17 00:00:00 2001
+From: Try Omarchy Integration <actions@users.noreply.github.com>
+Date: Sat, 26 Sep 2026 13:55:33 +0200
+Subject: [PATCH] Put Windows Apps in the guest menu and install Moonlight on
+ first use
+
+---
+ .../try-omarchy-seamless-token.service        |   1 +
+ .../system/try-omarchy-seamless-token.service |  11 +
+ .../usr/local/bin/omarchy-windows-app         |  64 +++
+ .../usr/local/bin/omarchy-windows-desktop     |  63 +++
+ .../usr/local/bin/omarchy-windows-open        | 116 +++++
+ .../usr/local/bin/omarchy-windows-present     | 446 ++++++++++++++++++
+ .../usr/local/bin/omarchy_windows_protocol.py | 132 ++++++
+ .../lib/try-omarchy/export-seamless-token     |  30 ++
+ .../applications/omarchy-windows-apps.desktop |   8 +
+ .../omarchy-windows-desktop.desktop           |   8 +
+ .../omarchy-windows-explorer.desktop          |   8 +
+ .../omarchy-windows-league.desktop            |   8 +
+ .../applications/omarchy-windows-open.desktop |   8 +
+ guest/scripts/finalize-rootfs.sh              |  16 +-
+ guest/tests/test_windows_present_protocol.py  |  85 ++++
+ guest/tests/verify.py                         |  55 ++-
+ 16 files changed, 1057 insertions(+), 2 deletions(-)
+ create mode 120000 guest/factory-overlay/etc/systemd/system/multi-user.target.wants/try-omarchy-seamless-token.service
+ create mode 100644 guest/factory-overlay/etc/systemd/system/try-omarchy-seamless-token.service
+ create mode 100755 guest/factory-overlay/usr/local/bin/omarchy-windows-app
+ create mode 100755 guest/factory-overlay/usr/local/bin/omarchy-windows-desktop
+ create mode 100755 guest/factory-overlay/usr/local/bin/omarchy-windows-open
+ create mode 100755 guest/factory-overlay/usr/local/bin/omarchy-windows-present
+ create mode 100644 guest/factory-overlay/usr/local/bin/omarchy_windows_protocol.py
+ create mode 100755 guest/factory-overlay/usr/local/lib/try-omarchy/export-seamless-token
+ create mode 100644 guest/factory-overlay/usr/share/applications/omarchy-windows-apps.desktop
+ create mode 100644 guest/factory-overlay/usr/share/applications/omarchy-windows-desktop.desktop
+ create mode 100644 guest/factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop
+ create mode 100644 guest/factory-overlay/usr/share/applications/omarchy-windows-league.desktop
+ create mode 100644 guest/factory-overlay/usr/share/applications/omarchy-windows-open.desktop
+ create mode 100644 guest/tests/test_windows_present_protocol.py
+
+diff --git a/guest/factory-overlay/etc/systemd/system/multi-user.target.wants/try-omarchy-seamless-token.service b/guest/factory-overlay/etc/systemd/system/multi-user.target.wants/try-omarchy-seamless-token.service
+new file mode 120000
+index 0000000..6b382f7
+--- /dev/null
++++ b/guest/factory-overlay/etc/systemd/system/multi-user.target.wants/try-omarchy-seamless-token.service
+@@ -0,0 +1 @@
++../try-omarchy-seamless-token.service
+\ No newline at end of file
+diff --git a/guest/factory-overlay/etc/systemd/system/try-omarchy-seamless-token.service b/guest/factory-overlay/etc/systemd/system/try-omarchy-seamless-token.service
+new file mode 100644
+index 0000000..ca4cabc
+--- /dev/null
++++ b/guest/factory-overlay/etc/systemd/system/try-omarchy-seamless-token.service
+@@ -0,0 +1,11 @@
++[Unit]
++Description=Make the Omarchy Windows bridge token available to the desktop user
++After=local-fs.target systemd-modules-load.service
++Before=display-manager.service
++
++[Service]
++Type=oneshot
++ExecStart=/usr/local/lib/try-omarchy/export-seamless-token
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-app b/guest/factory-overlay/usr/local/bin/omarchy-windows-app
+new file mode 100755
+index 0000000..a2f8959
+--- /dev/null
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-app
+@@ -0,0 +1,64 @@
++#!/usr/bin/env bash
++# Launch a native Windows app on the host. Its window remains on Windows.
++set -euo pipefail
++
++usage() {
++  printf 'Usage: omarchy-windows-app explorer|league|pick|list|open SHORTCUT_ID\n' >&2
++  exit 2
++}
++
++case "${1:-}" in
++  explorer|league) [[ $# == 1 ]] || usage; request="open $1" ;;
++  list|pick) [[ $# == 1 ]] || usage; request=list ;;
++  open)
++    [[ $# == 2 && $2 =~ ^shortcut-[[:xdigit:]]{32}$ ]] || usage
++    request="open $2"
++    ;;
++  *) usage ;;
++esac
++
++fail() {
++  printf 'Windows host app: %s\n' "$1" >&2
++  if [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]] && command -v notify-send >/dev/null 2>&1; then
++    notify-send 'Windows host app' "$1" || true
++  fi
++  exit 1
++}
++
++send_request() {
++  local request=$1 reply
++  # QEMU user networking exposes the Windows host loopback at 10.0.2.2.
++  exec 3<>/dev/tcp/10.0.2.2/4456 || fail 'The Try Omarchy host bridge is unavailable. Start the updated Windows launcher.'
++  printf '%s\n' "$request" >&3 || fail 'Could not send the request.'
++  IFS= read -r -t 8 reply <&3 || fail 'The Windows launcher did not answer.'
++  exec 3>&-
++  exec 3<&-
++  printf '%s\n' "$reply"
++}
++
++reply=$(send_request "$request")
++if [[ $request == list && $reply == \[* ]]; then
++  if [[ $1 == list ]]; then
++    jq -r '.[] | "\(.name)\t\(.id)"' <<<"$reply"
++    exit
++  fi
++  command -v zenity >/dev/null 2>&1 || fail 'The Windows app picker needs zenity.'
++  mapfile -t rows < <(jq -r '.[] | .name, .id' <<<"$reply")
++  [[ ${#rows[@]} -gt 0 ]] || fail 'No Windows apps were found.'
++  picker_title='Open on Windows host (Preview)'
++  [[ ${OMARCHY_WINDOW_PREVIEW:-} == 1 ]] && picker_title='Open as Omarchy window (Preview)'
++  selected=$(zenity --list --title="$picker_title" --width=480 --height=600 \
++    --column='Application' --column='ID' --hide-column=2 --print-column=2 \
++    "${rows[@]}") || {
++      [[ ${OMARCHY_WINDOW_PREVIEW:-} == 1 ]] && exit 3
++      exit 0
++    }
++  [[ $selected =~ ^(explorer|league|shortcut-[[:xdigit:]]{32})$ ]] || fail 'The picker returned an invalid app.'
++  reply=$(send_request "open $selected")
++fi
++
++case "$reply" in
++  ok) exit 0 ;;
++  error\ *) fail "${reply#error }" ;;
++  *) fail 'The Windows launcher returned an unexpected response.' ;;
++esac
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-desktop b/guest/factory-overlay/usr/local/bin/omarchy-windows-desktop
+new file mode 100755
+index 0000000..87cee16
+--- /dev/null
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-desktop
+@@ -0,0 +1,63 @@
++#!/usr/bin/env bash
++# Launch the Windows host desktop through Moonlight. The first launch installs
++# a pinned, checksum-verified Moonlight AppImage for the current guest user.
++set -euo pipefail
++
++if (( EUID == 0 )); then
++  printf 'Open Windows Desktop as your normal Omarchy user.\n' >&2
++  exit 1
++fi
++
++version=6.1.0
++expected_sha256=0e855ffd22d407e18ab5fdb575fed5f01ca119a3f91993c5f0213f15ac80b400
++base="$HOME/.local/opt/moonlight"
++appimage="$base/Moonlight-$version-x86_64.AppImage"
++appdir="$base/squashfs-root"
++
++error() {
++  printf 'Windows Desktop: %s\n' "$1" >&2
++  if command -v zenity >/dev/null 2>&1; then
++    zenity --error --title='Windows Desktop' --text="$1" --width=420 || true
++  fi
++  exit 1
++}
++
++if [[ ! -x $appdir/AppRun ]]; then
++  command -v curl >/dev/null 2>&1 || error 'Moonlight needs curl to download its first-run files.'
++  command -v zenity >/dev/null 2>&1 || error 'Moonlight needs zenity to show installation progress.'
++  mkdir -p -- "$base"
++  if [[ ! -f $appimage ]]; then
++    zenity --info --title='Windows Desktop Preview' --width=420 \
++      --text='Windows Desktop is a preview. Moonlight will be downloaded and verified on this first launch. An internet connection is required.' || exit 0
++    if ! (
++      printf '# Downloading Moonlight %s…\n' "$version"
++      curl --fail --location --retry 3 --silent --show-error \
++        "https://github.com/moonlight-stream/moonlight-qt/releases/download/v$version/Moonlight-$version-x86_64.AppImage" \
++        --output "$appimage.part"
++    ) | zenity --progress --pulsate --auto-close --no-cancel \
++        --title='Windows Desktop' --text='Downloading Moonlight…' --width=420; then
++      rm -f -- "$appimage.part"
++      error 'Moonlight could not be downloaded. Check the connection and try again.'
++    fi
++    mv -- "$appimage.part" "$appimage"
++  fi
++  if ! printf '%s  %s\n' "$expected_sha256" "$appimage" | sha256sum --check --status; then
++    rm -f -- "$appimage"
++    error 'Moonlight failed its checksum verification. Try again.'
++  fi
++  chmod 0755 -- "$appimage"
++  # The guest lacks FUSE 2, so extract to a private directory before launch.
++  extraction=$(mktemp -d "$base/.extract.XXXXXXXX") || error 'Could not prepare Moonlight installation.'
++  if ! (cd -- "$extraction" && "$appimage" --appimage-extract >/dev/null 2>&1); then
++    rm -rf -- "$extraction"
++    error 'Moonlight could not be extracted. Try again.'
++  fi
++  rm -rf -- "$appdir"
++  mv -- "$extraction/squashfs-root" "$appdir"
++  rmdir -- "$extraction"
++fi
++
++export QT_QPA_PLATFORM=xcb
++export DISPLAY="${DISPLAY:-:1}"
++export QT_QUICK_BACKEND=software
++exec "$appdir/AppRun" "$@"
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-open b/guest/factory-overlay/usr/local/bin/omarchy-windows-open
+new file mode 100755
+index 0000000..34dc857
+--- /dev/null
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-open
+@@ -0,0 +1,116 @@
++#!/usr/bin/env python3
++"""Pick a host app, then opt into presenting its window inside Omarchy."""
++
++from __future__ import annotations
++
++import os
++from pathlib import Path
++import subprocess
++import sys
++import time
++
++from omarchy_windows_protocol import Bridge, BridgeError, load_token
++
++
++def message(text: str) -> None:
++    print(text, file=sys.stderr)
++    if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
++        executable = "/usr/bin/zenity"
++        if Path(executable).exists():
++            try:
++                subprocess.run(
++                    [executable, "--error", "--title=Windows Apps in Omarchy (Preview)", f"--text={text}", "--width=460"],
++                    timeout=30,
++                    check=False,
++                )
++            except (OSError, subprocess.TimeoutExpired):
++                pass
++
++
++def choose_window(windows: list[dict]) -> dict | None:
++    if len(windows) == 1:
++        return windows[0]
++    if not windows:
++        return None
++    rows: list[str] = []
++    for window in windows:
++        rows.extend((window["title"] or window["process"] or "Windows app", window["process"], window["id"]))
++    try:
++        result = subprocess.run(
++            ["zenity", "--list", "--title=Select Windows window to show in Omarchy (Preview)",
++             "--width=700", "--height=480", "--column=Window", "--column=Process", "--column=ID",
++             "--hide-column=3", "--print-column=3", *rows],
++            capture_output=True,
++            text=True,
++            timeout=120,
++            check=False,
++        )
++    except (OSError, subprocess.TimeoutExpired):
++        return None
++    selected = result.stdout.strip()
++    return next((window for window in windows if window["id"] == selected), None)
++
++
++def main() -> int:
++    scripts = Path(__file__).resolve().parent
++    presenter = scripts / "omarchy-windows-present"
++    picker = scripts / "omarchy-windows-app"
++    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
++        message("Open this from the Omarchy desktop.")
++        return 1
++    if not presenter.is_file() or not picker.is_file():
++        message("The Windows app integration is incomplete. Update Omarchy.")
++        return 1
++    try:
++        bridge = Bridge(load_token())
++        before = bridge.windows()
++    except BridgeError as exc:
++        message(str(exc))
++        return 1
++    if subprocess.run([str(presenter), "--probe"], check=False).returncode != 0:
++        message("The per-window presenter is unavailable. Check GTK4 and the Omarchy Windows launcher.")
++        return 1
++
++    environment = dict(os.environ, OMARCHY_WINDOW_PREVIEW="1")
++    result = subprocess.run([str(picker), "pick"], env=environment, check=False)
++    if result.returncode == 3:
++        return 0  # The user canceled the picker.
++    if result.returncode != 0:
++        message("Windows could not open that app on the host.")
++        return 1
++
++    old_ids = {window["id"] for window in before}
++    new_windows: list[dict] = []
++    all_windows = before
++    deadline = time.monotonic() + 12
++    while time.monotonic() < deadline:
++        try:
++            all_windows = bridge.windows()
++        except BridgeError:
++            time.sleep(0.3)
++            continue
++        new_windows = [window for window in all_windows if window["id"] not in old_ids]
++        if new_windows:
++            break
++        time.sleep(0.3)
++
++    selected = choose_window(new_windows or all_windows)
++    if selected is None:
++        message("The app opened on Windows, but no window was selected for the Omarchy preview. Use the host display or try again.")
++        return 1
++    try:
++        subprocess.Popen(
++            [str(presenter), "--id", selected["id"], "--group", selected["appGroup"]],
++            stdin=subprocess.DEVNULL,
++            stdout=subprocess.DEVNULL,
++            stderr=subprocess.DEVNULL,
++            start_new_session=True,
++        )
++    except OSError as exc:
++        message(f"Could not start the Omarchy window preview: {exc}")
++        return 1
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-present b/guest/factory-overlay/usr/local/bin/omarchy-windows-present
+new file mode 100755
+index 0000000..a603901
+--- /dev/null
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-present
+@@ -0,0 +1,446 @@
++#!/usr/bin/env python3
++"""Preview one Windows host HWND per ordinary Hyprland-managed GTK window.
++
++The bridge captures host windows; this client only presents frames and relays
++input. A new fullscreen HWND from the same app group inherits an existing
++presenter's Hyprland workspace before fullscreen is requested.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import argparse
++import json
++import os
++import queue
++import subprocess
++import sys
++import threading
++import time
++
++from omarchy_windows_protocol import Bridge, BridgeError, load_token
++
++try:
++    import gi
++
++    gi.require_version("Gtk", "4.0")
++    gi.require_version("Gdk", "4.0")
++    from gi.repository import Gdk, Gio, GLib, Gtk
++except (ImportError, ValueError) as exc:
++    print(f"Windows windows preview needs GTK4 and python-gobject: {exc}", file=sys.stderr)
++    raise SystemExit(1) from exc
++
++
++MAX_PRESENTED = 8
++POLL_SECONDS = 0.7
++FRAME_INTERVAL = 0.15  # PNG-over-HTTP preview, not a game-streaming transport.
++EXCLUDED_PROCESSES = {"tryomarchy.exe", "qemu-system-x86_64.exe", "qemu-system-x86_64w.exe"}
++
++
++def presentable(metadata: dict) -> bool:
++    process = metadata["process"].replace("\\", "/").rsplit("/", 1)[-1].lower()
++    return process not in EXCLUDED_PROCESSES
++
++
++def marker_for(ident: str) -> str:
++    return f" [Omarchy Windows {hashlib.sha256(ident.encode()).hexdigest()[:12]}]"
++
++
++def hyprland_clients() -> list[dict]:
++    if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
++        return []
++    try:
++        result = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=2, check=True)
++        clients = json.loads(result.stdout)
++    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
++        return []
++    return clients if isinstance(clients, list) else []
++
++
++def workspace_for(marker: str, clients: list[dict]) -> tuple[str, str] | None:
++    for client in clients:
++        if not isinstance(client, dict) or not str(client.get("title", "")).endswith(marker):
++            continue
++        address = client.get("address")
++        workspace = client.get("workspace")
++        if not isinstance(address, str) or not isinstance(workspace, dict):
++            continue
++        name = workspace.get("name")
++        ident = workspace.get("id")
++        if isinstance(name, str) and name.startswith("special:"):
++            return name, address
++        if isinstance(ident, int) and ident > 0:
++            return str(ident), address
++        if isinstance(name, str) and name:
++            return "name:" + name, address
++    return None
++
++
++def key_to_vk(keyval: int) -> int | None:
++    # Windows virtual keys for ordinary keyboard input. IME/composition and
++    # game raw input are outside this prototype's tested surface.
++    char = Gdk.keyval_to_unicode(keyval)
++    if 0x61 <= char <= 0x7A:
++        return char - 0x20
++    if 0x41 <= char <= 0x5A or 0x30 <= char <= 0x39:
++        return char
++    name = Gdk.keyval_name(keyval) or ""
++    fixed = {
++        "Return": 0x0D, "KP_Enter": 0x0D, "BackSpace": 0x08, "Tab": 0x09,
++        "Escape": 0x1B, "space": 0x20, "Delete": 0x2E, "Insert": 0x2D,
++        "Home": 0x24, "End": 0x23, "Prior": 0x21, "Next": 0x22,
++        "Left": 0x25, "Up": 0x26, "Right": 0x27, "Down": 0x28,
++        "Shift_L": 0xA0, "Shift_R": 0xA1, "Control_L": 0xA2,
++        "Control_R": 0xA3, "Alt_L": 0xA4, "Alt_R": 0xA5,
++        "comma": 0xBC, "period": 0xBE, "slash": 0xBF,
++        "semicolon": 0xBA, "apostrophe": 0xDE, "minus": 0xBD,
++        "equal": 0xBB, "bracketleft": 0xDB, "bracketright": 0xDD,
++        "backslash": 0xDC, "grave": 0xC0,
++    }
++    if name in fixed:
++        return fixed[name]
++    if name.startswith("F") and name[1:].isdigit() and 1 <= int(name[1:]) <= 24:
++        return 0x6F + int(name[1:])
++    return None
++
++
++class HostWindow:
++    def __init__(self, app: "Presenter", metadata: dict, workspace: str | None):
++        self.app = app
++        self.ident = metadata["id"]
++        self.marker = marker_for(self.ident)
++        self.metadata = metadata
++        self.frame_size = (metadata["width"], metadata["height"])
++        self.pending_workspace = workspace
++        self.move_attempts = 0
++        self.fullscreen_requested = False
++        self.retiring = False
++        self.last_motion = 0.0
++
++        self.window = Gtk.ApplicationWindow(application=app)
++        self.window.set_default_size(min(metadata["width"], 1000), min(metadata["height"], 700))
++        self.picture = Gtk.Picture()
++        self.picture.set_can_shrink(True)
++        self.picture.set_content_fit(Gtk.ContentFit.FILL)
++        self.window.set_child(self.picture)
++        self.window.connect("close-request", self.on_close)
++
++        click = Gtk.GestureClick.new()
++        click.set_button(0)
++        click.connect("pressed", self.on_pressed)
++        click.connect("released", self.on_released)
++        self.picture.add_controller(click)
++        motion = Gtk.EventControllerMotion.new()
++        motion.connect("motion", self.on_motion)
++        self.picture.add_controller(motion)
++        keys = Gtk.EventControllerKey.new()
++        keys.connect("key-pressed", self.on_key_pressed)
++        keys.connect("key-released", self.on_key_released)
++        self.window.add_controller(keys)
++
++        self.update(metadata)
++        self.window.present()
++        if workspace:
++            GLib.timeout_add(150, self.move_to_inherited_workspace)
++
++    def image_point(self, x: float, y: float) -> tuple[int, int]:
++        width = max(1, self.picture.get_width())
++        height = max(1, self.picture.get_height())
++        frame_width, frame_height = self.frame_size
++        return (
++            min(frame_width - 1, max(0, round(x * frame_width / width))),
++            min(frame_height - 1, max(0, round(y * frame_height / height))),
++        )
++
++    def pointer(self, x: float, y: float, button: int | None = None, down: bool | None = None) -> None:
++        px, py = self.image_point(x, y)
++        packet: dict[str, object] = {"type": "pointer", "x": px, "y": py}
++        if button is not None:
++            packet.update(button=button, down=down)
++        self.app.send_input(self.ident, packet)
++
++    def on_pressed(self, gesture: Gtk.GestureClick, _count: int, x: float, y: float) -> None:
++        self.pointer(x, y, gesture.get_current_button(), True)
++
++    def on_released(self, gesture: Gtk.GestureClick, _count: int, x: float, y: float) -> None:
++        self.pointer(x, y, gesture.get_current_button(), False)
++
++    def on_motion(self, _controller: Gtk.EventControllerMotion, x: float, y: float) -> None:
++        now = time.monotonic()
++        if now - self.last_motion >= 1 / 30:
++            self.last_motion = now
++            self.pointer(x, y)
++
++    def on_key_pressed(self, _controller: Gtk.EventControllerKey, keyval: int, _keycode: int, _state: Gdk.ModifierType) -> bool:
++        vk = key_to_vk(keyval)
++        if vk is None:
++            return False
++        self.app.send_input(self.ident, {"type": "key", "vk": vk, "down": True})
++        return True
++
++    def on_key_released(self, _controller: Gtk.EventControllerKey, keyval: int, _keycode: int, _state: Gdk.ModifierType) -> None:
++        vk = key_to_vk(keyval)
++        if vk is not None:
++            self.app.send_input(self.ident, {"type": "key", "vk": vk, "down": False})
++
++    def on_close(self, _window: Gtk.ApplicationWindow) -> bool:
++        if not self.retiring:
++            self.app.dismissed.add(self.ident)
++            self.app.send_close(self.ident)
++            self.app.windows.pop(self.ident, None)
++        return False
++
++    def move_to_inherited_workspace(self) -> bool:
++        if not self.pending_workspace:
++            return False
++        found = workspace_for(self.marker, hyprland_clients())
++        if found is None:
++            self.move_attempts += 1
++            if self.move_attempts < 12:
++                return True
++            self.pending_workspace = None
++            self.app.warn_workspace("Could not place the Windows game on its client workspace. Fullscreen was requested on the current workspace.")
++            if self.metadata["fullscreen"]:
++                self.set_fullscreen(True)
++            return False
++        _, address = found
++        try:
++            subprocess.run(
++                ["hyprctl", "dispatch", "movetoworkspacesilent", f"{self.pending_workspace},address:{address}"],
++                capture_output=True, timeout=2, check=True,
++            )
++        except (OSError, subprocess.SubprocessError):
++            self.app.warn_workspace("Could not move the Windows game to its client workspace. Fullscreen was requested on the current workspace.")
++        self.pending_workspace = None
++        if self.metadata["fullscreen"]:
++            self.set_fullscreen(True)
++        return False
++
++    def set_fullscreen(self, value: bool) -> None:
++        if value == self.fullscreen_requested:
++            return
++        self.fullscreen_requested = value
++        if value:
++            self.window.fullscreen()
++        else:
++            self.window.unfullscreen()
++
++    def update(self, metadata: dict) -> None:
++        self.metadata = metadata
++        self.window.set_title((metadata["title"] or metadata["process"] or "Windows app")[:160] + self.marker)
++        if not self.pending_workspace:
++            self.set_fullscreen(metadata["fullscreen"])
++
++    def update_frame(self, data: bytes, size: tuple[int, int]) -> None:
++        self.frame_size = size
++        try:
++            texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
++            self.picture.set_paintable(texture)
++        except GLib.Error:
++            pass
++
++    def retire(self) -> None:
++        self.retiring = True
++        self.window.destroy()
++
++
++class Presenter(Gtk.Application):
++    def __init__(self, bridge: Bridge, selected_id: str, group: str):
++        super().__init__(application_id="org.omarchy.WindowsPresent", flags=Gio.ApplicationFlags.NON_UNIQUE)
++        self.bridge = bridge
++        self.selected_id = selected_id
++        self.group = group
++        self.windows: dict[str, HostWindow] = {}
++        self.dismissed: set[str] = set()
++        self.commands: queue.Queue[tuple[str, str, dict | None]] = queue.Queue(maxsize=128)
++        self.stop = threading.Event()
++        self.status: Gtk.ApplicationWindow | None = None
++        self.last_error = ""
++        self.workspace_history: dict[str, str] = {}
++        self.pending_frames: set[str] = set()
++        self.pending_lock = threading.Lock()
++
++    def do_activate(self) -> None:
++        self.hold()
++        self.status = Gtk.ApplicationWindow(application=self)
++        self.status.set_title("Windows windows (Preview)")
++        self.status.set_default_size(460, 140)
++        self.message = Gtk.Label(label="Connecting to Windows window bridge…")
++        self.message.set_wrap(True)
++        self.message.set_margin_top(24)
++        self.message.set_margin_bottom(24)
++        self.message.set_margin_start(24)
++        self.message.set_margin_end(24)
++        self.status.set_child(self.message)
++        self.status.connect("close-request", self.on_status_close)
++        self.status.present()
++        threading.Thread(target=self.worker, daemon=True).start()
++
++    def on_status_close(self, _window: Gtk.ApplicationWindow) -> bool:
++        self.quit()
++        return False
++
++    def do_shutdown(self) -> None:
++        self.stop.set()
++        super().do_shutdown()
++
++    def warn_workspace(self, message: str) -> None:
++        print(message, file=sys.stderr)
++        try:
++            subprocess.Popen(["notify-send", "Windows windows (Preview)", message],
++                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++        except OSError:
++            pass
++
++    def send_input(self, ident: str, payload: dict) -> None:
++        try:
++            self.commands.put_nowait(("input", ident, payload))
++        except queue.Full:
++            pass
++
++    def send_close(self, ident: str) -> None:
++        try:
++            self.commands.put_nowait(("close", ident, None))
++        except queue.Full:
++            pass
++
++    def worker(self) -> None:
++        catalog: list[dict] = []
++        next_catalog = 0.0
++        while not self.stop.is_set():
++            try:
++                for _ in range(24):
++                    command, ident, payload = self.commands.get_nowait()
++                    try:
++                        if command == "close":
++                            self.bridge.close(ident)
++                        elif payload is not None:
++                            self.bridge.input(ident, payload)
++                    except BridgeError:
++                        pass
++            except queue.Empty:
++                pass
++            now = time.monotonic()
++            if now >= next_catalog:
++                next_catalog = now + POLL_SECONDS
++                try:
++                    catalog = self.bridge.windows()
++                    GLib.idle_add(self.apply_catalog, catalog)
++                    if self.last_error:
++                        self.last_error = ""
++                except BridgeError as exc:
++                    if str(exc) != self.last_error:
++                        self.last_error = str(exc)
++                        GLib.idle_add(self.show_status, str(exc))
++                    self.stop.wait(1)
++                    continue
++            allowed = [w for w in catalog if presentable(w) and
++                       (w["id"] == self.selected_id or w["appGroup"] == self.group)]
++            allowed.sort(key=lambda w: (not w["fullscreen"], w["id"] != self.selected_id))
++            for metadata in allowed[:MAX_PRESENTED]:
++                if self.stop.is_set():
++                    break
++                if metadata["id"] in self.dismissed:
++                    continue
++                with self.pending_lock:
++                    if metadata["id"] in self.pending_frames:
++                        continue
++                    self.pending_frames.add(metadata["id"])
++                try:
++                    data, dimensions = self.bridge.frame(metadata["id"])
++                    GLib.idle_add(self.apply_frame, metadata["id"], data, dimensions)
++                except BridgeError:
++                    with self.pending_lock:
++                        self.pending_frames.discard(metadata["id"])
++                    continue
++            self.stop.wait(FRAME_INTERVAL)
++
++    def show_status(self, message: str) -> bool:
++        if self.status is not None:
++            self.message.set_text(message)
++            if not self.windows:
++                self.status.present()
++        return False
++
++    def inherited_workspace(self, group: str) -> str | None:
++        clients = hyprland_clients()
++        for other in self.windows.values():
++            if other.metadata["appGroup"] != group:
++                continue
++            found = workspace_for(other.marker, clients)
++            if found:
++                return found[0]
++        return self.workspace_history.get(group)
++
++    def apply_catalog(self, catalog: list[dict]) -> bool:
++        allowed = [w for w in catalog if presentable(w) and
++                   (w["id"] == self.selected_id or w["appGroup"] == self.group)]
++        allowed.sort(key=lambda w: (not w["fullscreen"], w["id"] != self.selected_id))
++        allowed = allowed[:MAX_PRESENTED]
++        live = {w["id"] for w in allowed}
++        had_windows = bool(self.windows)
++        self.dismissed.intersection_update(live)
++        clients = hyprland_clients()
++        for view in self.windows.values():
++            found = workspace_for(view.marker, clients)
++            if found:
++                self.workspace_history[view.metadata["appGroup"]] = found[0]
++        for ident in list(self.windows):
++            if ident not in live:
++                self.windows.pop(ident).retire()
++        for metadata in allowed:
++            ident = metadata["id"]
++            if ident in self.dismissed:
++                continue
++            if ident in self.windows:
++                self.windows[ident].update(metadata)
++            else:
++                workspace = self.inherited_workspace(metadata["appGroup"]) if metadata["fullscreen"] else None
++                self.windows[ident] = HostWindow(self, metadata, workspace)
++        if self.status is not None:
++            if self.windows:
++                self.status.hide()
++            else:
++                self.message.set_text("The selected Windows app has no visible windows. Close this preview or open the app again from the Omarchy menu.")
++                if had_windows:
++                    self.status.present()
++        return False
++
++    def apply_frame(self, ident: str, data: bytes, dimensions: tuple[int, int]) -> bool:
++        try:
++            view = self.windows.get(ident)
++            if view is not None:
++                view.update_frame(data, dimensions)
++        finally:
++            with self.pending_lock:
++                self.pending_frames.discard(ident)
++        return False
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description="Preview individual Windows windows inside Omarchy")
++    parser.add_argument("--probe", action="store_true", help="check the authenticated bridge")
++    parser.add_argument("--id", help="selected Windows window ID")
++    parser.add_argument("--group", help="application group for child windows")
++    args = parser.parse_args()
++    if not args.probe and (not args.id or not args.group):
++        parser.error("--id and --group are required unless --probe is set")
++    try:
++        bridge = Bridge(load_token())
++    except BridgeError as exc:
++        print(str(exc), file=sys.stderr)
++        if os.environ.get("WAYLAND_DISPLAY") and subprocess.call(["which", "zenity"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
++            subprocess.run(["zenity", "--error", "--title=Windows windows (Preview)", f"--text={exc}"], timeout=30, check=False)
++        return 1
++    if args.probe:
++        try:
++            bridge.windows()
++            return 0
++        except BridgeError as exc:
++            print(str(exc), file=sys.stderr)
++            return 1
++    return Presenter(bridge, args.id, args.group).run([])
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy_windows_protocol.py b/guest/factory-overlay/usr/local/bin/omarchy_windows_protocol.py
+new file mode 100644
+index 0000000..fe3f9b5
+--- /dev/null
++++ b/guest/factory-overlay/usr/local/bin/omarchy_windows_protocol.py
+@@ -0,0 +1,132 @@
++"""Bounded guest client for Omarchy's authenticated Windows window bridge.
++
++The Windows launcher serves this only on host loopback. QEMU user networking
++maps that listener to 10.0.2.2 in the guest. The token is supplied by QEMU
++fw_cfg on each launch and is never stored in the guest disk image.
++"""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++import struct
++import urllib.error
++import urllib.parse
++import urllib.request
++
++BASE_URL = "http://10.0.2.2:4457"
++TOKEN_FILE = Path("/run/try-omarchy/seamless-token")
++MAX_JSON = 1024 * 1024
++MAX_PNG = 16 * 1024 * 1024
++MAX_IMAGE_DIMENSION = 8192
++PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
++
++
++class BridgeError(RuntimeError):
++    """The Windows window bridge is absent or returned an invalid response."""
++
++
++def load_token(path: Path = TOKEN_FILE) -> str:
++    try:
++        token = path.read_bytes().strip().decode("ascii")
++    except (OSError, UnicodeDecodeError) as exc:
++        raise BridgeError("The Omarchy window bridge token is unavailable. Restart with the updated Windows launcher and guest integration.") from exc
++    if len(token) != 64 or any(c not in "0123456789abcdefABCDEF" for c in token):
++        raise BridgeError("The Omarchy window bridge token is invalid. Restart with the updated Windows launcher.")
++    return token
++
++
++def validate_window(raw: object) -> dict:
++    if not isinstance(raw, dict):
++        raise BridgeError("The Windows bridge returned an invalid window entry.")
++    ident = raw.get("id")
++    if not isinstance(ident, str) or not 1 <= len(ident) <= 128 or any(ord(c) < 33 for c in ident):
++        raise BridgeError("The Windows bridge returned an invalid window ID.")
++    width, height = raw.get("width"), raw.get("height")
++    if not isinstance(width, int) or not isinstance(height, int) or not 0 < width <= MAX_IMAGE_DIMENSION or not 0 < height <= MAX_IMAGE_DIMENSION:
++        raise BridgeError("The Windows bridge returned an invalid window size.")
++    title, process = raw.get("title", ""), raw.get("process", "")
++    if not isinstance(title, str) or not isinstance(process, str):
++        raise BridgeError("The Windows bridge returned invalid window metadata.")
++    group = raw.get("appGroup")
++    if group is not None and (not isinstance(group, str) or len(group) > 64):
++        raise BridgeError("The Windows bridge returned an invalid application group.")
++    return {
++        "id": ident,
++        "title": title[:200],
++        "process": process[:100],
++        "appGroup": group or process.lower(),
++        "width": width,
++        "height": height,
++        "fullscreen": raw.get("fullscreen") is True,
++    }
++
++
++def validate_png(data: bytes) -> tuple[int, int]:
++    if len(data) < 24 or len(data) > MAX_PNG or not data.startswith(PNG_SIGNATURE) or data[12:16] != b"IHDR":
++        raise BridgeError("The Windows bridge returned an invalid PNG frame.")
++    width, height = struct.unpack(">II", data[16:24])
++    if not 0 < width <= MAX_IMAGE_DIMENSION or not 0 < height <= MAX_IMAGE_DIMENSION or width * height > 32_000_000:
++        raise BridgeError("The Windows bridge returned an oversized frame.")
++    return width, height
++
++
++class Bridge:
++    def __init__(self, token: str, base_url: str = BASE_URL):
++        if len(token) != 64:
++            raise ValueError("Invalid bridge token")
++        self.token = token
++        self.base_url = base_url.rstrip("/")
++        # Never send this bearer token through an environment-configured proxy.
++        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
++
++    def request(self, path: str, *, payload: dict | None = None, limit: int = MAX_JSON, timeout: float = 2) -> bytes:
++        body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
++        request = urllib.request.Request(
++            self.base_url + path,
++            data=body,
++            method="GET" if body is None else "POST",
++            headers={
++                "Authorization": f"Bearer {self.token}",
++                "Accept": "application/json" if limit == MAX_JSON else "image/png",
++                **({"Content-Type": "application/json"} if body is not None else {}),
++            },
++        )
++        try:
++            with self.opener.open(request, timeout=timeout) as response:
++                data = response.read(limit + 1)
++                if len(data) > limit:
++                    raise BridgeError("The Windows bridge response exceeded its size limit.")
++                return data
++        except urllib.error.HTTPError as exc:
++            if exc.code == 401:
++                raise BridgeError("The Windows bridge rejected its launch token. Restart Omarchy.") from exc
++            if exc.code == 404:
++                raise BridgeError("The Windows window has closed.") from exc
++            raise BridgeError(f"The Windows bridge returned HTTP {exc.code}.") from exc
++        except (urllib.error.URLError, TimeoutError, OSError) as exc:
++            raise BridgeError("The Windows window bridge is unavailable. Start the updated Omarchy Windows launcher.") from exc
++
++    @staticmethod
++    def window_path(ident: str) -> str:
++        return "/v1/windows/" + urllib.parse.quote(ident, safe="")
++
++    def windows(self) -> list[dict]:
++        try:
++            document = json.loads(self.request("/v1/windows"))
++        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
++            raise BridgeError("The Windows bridge returned invalid window data.") from exc
++        raw = document.get("windows") if isinstance(document, dict) else None
++        if not isinstance(raw, list) or len(raw) > 64:
++            raise BridgeError("The Windows bridge returned an invalid window list.")
++        return [validate_window(item) for item in raw]
++
++    def frame(self, ident: str) -> tuple[bytes, tuple[int, int]]:
++        image = self.request(self.window_path(ident) + "/frame", limit=MAX_PNG, timeout=2)
++        return image, validate_png(image)
++
++    def input(self, ident: str, payload: dict) -> None:
++        self.request(self.window_path(ident) + "/input", payload=payload)
++
++    def close(self, ident: str) -> None:
++        self.request(self.window_path(ident) + "/close", payload={})
+diff --git a/guest/factory-overlay/usr/local/lib/try-omarchy/export-seamless-token b/guest/factory-overlay/usr/local/lib/try-omarchy/export-seamless-token
+new file mode 100755
+index 0000000..2a154be
+--- /dev/null
++++ b/guest/factory-overlay/usr/local/lib/try-omarchy/export-seamless-token
+@@ -0,0 +1,30 @@
++#!/usr/bin/env bash
++# Run as root at boot. The QEMU fw_cfg raw file is root-only in Linux.
++set -euo pipefail
++
++source_file=/sys/firmware/qemu_fw_cfg/by_name/opt/omarchy/seamless-token/raw
++runtime_dir=/run/try-omarchy
++runtime_file=$runtime_dir/seamless-token
++
++if [[ ! -e $source_file ]]; then
++  modprobe qemu_fw_cfg
++fi
++if [[ ! -e $source_file ]]; then
++  rm -f -- "$runtime_file"
++  exit 0  # Older launchers do not supply the per-window bridge token.
++fi
++
++token=$(<"$source_file")
++if [[ ! $token =~ ^[[:xdigit:]]{64}$ ]]; then
++  printf 'Invalid Omarchy seamless-window token from QEMU fw_cfg.\n' >&2
++  exit 1
++fi
++
++install -d -m 0750 -o root -g video -- "$runtime_dir"
++umask 077
++temporary=$(mktemp "$runtime_dir/.seamless-token.XXXXXXXX")
++trap 'rm -f -- "$temporary"' EXIT
++printf '%s\n' "$token" >"$temporary"
++chown root:video "$temporary"
++chmod 0640 "$temporary"
++mv -f -- "$temporary" "$runtime_file"
+diff --git a/guest/factory-overlay/usr/share/applications/omarchy-windows-apps.desktop b/guest/factory-overlay/usr/share/applications/omarchy-windows-apps.desktop
+new file mode 100644
+index 0000000..f609d32
+--- /dev/null
++++ b/guest/factory-overlay/usr/share/applications/omarchy-windows-apps.desktop
+@@ -0,0 +1,8 @@
++[Desktop Entry]
++Type=Application
++Name=Open on Windows host (Preview)
++Comment=Choose an installed Windows app to open on the host display
++Exec=/usr/local/bin/omarchy-windows-app pick
++Icon=applications-system
++Terminal=false
++Categories=System;
+diff --git a/guest/factory-overlay/usr/share/applications/omarchy-windows-desktop.desktop b/guest/factory-overlay/usr/share/applications/omarchy-windows-desktop.desktop
+new file mode 100644
+index 0000000..7cad9c7
+--- /dev/null
++++ b/guest/factory-overlay/usr/share/applications/omarchy-windows-desktop.desktop
+@@ -0,0 +1,8 @@
++[Desktop Entry]
++Type=Application
++Name=Windows Desktop (Preview)
++Comment=Preview Windows desktop streaming with Moonlight
++Exec=/usr/local/bin/omarchy-windows-desktop
++Icon=video-display
++Terminal=false
++Categories=Network;RemoteAccess;
+diff --git a/guest/factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop b/guest/factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop
+new file mode 100644
+index 0000000..f42d568
+--- /dev/null
++++ b/guest/factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop
+@@ -0,0 +1,8 @@
++[Desktop Entry]
++Type=Application
++Name=File Explorer on Windows host
++Comment=Open File Explorer on the Windows host
++Exec=/usr/local/bin/omarchy-windows-app explorer
++Icon=system-file-manager
++Terminal=false
++Categories=System;FileManager;
+diff --git a/guest/factory-overlay/usr/share/applications/omarchy-windows-league.desktop b/guest/factory-overlay/usr/share/applications/omarchy-windows-league.desktop
+new file mode 100644
+index 0000000..c5e1666
+--- /dev/null
++++ b/guest/factory-overlay/usr/share/applications/omarchy-windows-league.desktop
+@@ -0,0 +1,8 @@
++[Desktop Entry]
++Type=Application
++Name=League on Windows host
++Comment=Launch the native Windows game on the host
++Exec=/usr/local/bin/omarchy-windows-app league
++Icon=applications-games
++Terminal=false
++Categories=Game;
+diff --git a/guest/factory-overlay/usr/share/applications/omarchy-windows-open.desktop b/guest/factory-overlay/usr/share/applications/omarchy-windows-open.desktop
+new file mode 100644
+index 0000000..749877d
+--- /dev/null
++++ b/guest/factory-overlay/usr/share/applications/omarchy-windows-open.desktop
+@@ -0,0 +1,8 @@
++[Desktop Entry]
++Type=Application
++Name=Windows Apps in Omarchy (Preview)
++Comment=Open a Windows app in a separate Omarchy window when capture supports it
++Exec=/usr/local/bin/omarchy-windows-open
++Icon=video-display
++Terminal=false
++Categories=System;
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index 285fd5d..f8e239f 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -103,6 +103,19 @@ compat_paths=(
+   etc/modules-load.d/90-try-omarchy-camera.conf
+   etc/modprobe.d/90-try-omarchy-camera.conf
+   usr/local/bin/try-omarchy-drop
++  usr/local/bin/omarchy-windows-app
++  usr/local/bin/omarchy-windows-desktop
++  usr/local/bin/omarchy-windows-open
++  usr/local/bin/omarchy-windows-present
++  usr/local/bin/omarchy_windows_protocol.py
++  usr/local/lib/try-omarchy/export-seamless-token
++  etc/systemd/system/try-omarchy-seamless-token.service
++  etc/systemd/system/multi-user.target.wants/try-omarchy-seamless-token.service
++  usr/share/applications/omarchy-windows-apps.desktop
++  usr/share/applications/omarchy-windows-explorer.desktop
++  usr/share/applications/omarchy-windows-league.desktop
++  usr/share/applications/omarchy-windows-desktop.desktop
++  usr/share/applications/omarchy-windows-open.desktop
+   etc/systemd/user/clipboard-bridge.service
+   etc/systemd/user/omarchy-fcitx5.service.d/10-try-omarchy.conf
+   etc/systemd/user/graphical-session.target.wants/clipboard-bridge.service
+@@ -153,7 +166,8 @@ kernel_release=$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d -printf '
+ # Revision 27 delivers the complete matching kernel modules and preserves
+ # the transfer fallback when a direct paste cannot be confirmed.
+ # Revision 28 receives file drops in the background directly into folders.
+-compat_revision=29
++# Revision 30 adds Windows Apps and first-run Moonlight launchers.
++compat_revision=32
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Fail the build if DKMS or networking modules were not packaged for this kernel.
+diff --git a/guest/tests/test_windows_present_protocol.py b/guest/tests/test_windows_present_protocol.py
+new file mode 100644
+index 0000000..bda6a11
+--- /dev/null
++++ b/guest/tests/test_windows_present_protocol.py
+@@ -0,0 +1,85 @@
++"""The guest never trusts unbounded host responses or sends its token to a proxy."""
++
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from pathlib import Path
++import struct
++import sys
++import tempfile
++import threading
++import unittest
++
++script_dir = Path(__file__).resolve().parent
++protocol_dir = script_dir if (script_dir / "omarchy_windows_protocol.py").exists() else script_dir.parent / "factory-overlay/usr/local/bin"
++sys.path.insert(0, str(protocol_dir))
++
++from omarchy_windows_protocol import Bridge, BridgeError, PNG_SIGNATURE, load_token, validate_png
++
++
++TOKEN = "a" * 64
++WINDOW = {"id": "window-1", "title": "Character Map", "process": "charmap.exe",
++          "appGroup": "charmap", "width": 640, "height": 480, "fullscreen": False}
++PNG_HEADER = PNG_SIGNATURE + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", 2, 3)
++
++
++class Handler(BaseHTTPRequestHandler):
++    seen = []
++
++    def log_message(self, *_args):
++        pass
++
++    def _reply(self, content_type, data):
++        self.send_response(200)
++        self.send_header("Content-Type", content_type)
++        self.send_header("Content-Length", str(len(data)))
++        self.end_headers()
++        self.wfile.write(data)
++
++    def do_GET(self):
++        self.seen.append((self.path, self.headers.get("Authorization")))
++        if self.path == "/v1/windows":
++            self._reply("application/json", b'{"windows":[{"id":"window-1","title":"Character Map","process":"charmap.exe","appGroup":"charmap","width":640,"height":480,"fullscreen":false}]}')
++        else:
++            self._reply("image/png", PNG_HEADER)
++
++    def do_POST(self):
++        self.seen.append((self.path, self.headers.get("Authorization")))
++        self.rfile.read(int(self.headers["Content-Length"]))
++        self._reply("application/json", b'{"ok":true}')
++
++
++class ProtocolTests(unittest.TestCase):
++    def test_token_must_be_64_hex_digits(self):
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / "token"
++            path.write_text(TOKEN + "\n")
++            self.assertEqual(load_token(path), TOKEN)
++            path.write_text("short")
++            with self.assertRaises(BridgeError):
++                load_token(path)
++
++    def test_png_dimensions_and_size_are_bounded(self):
++        self.assertEqual(validate_png(PNG_HEADER), (2, 3))
++        with self.assertRaises(BridgeError):
++            validate_png(PNG_SIGNATURE + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", 9000, 2))
++
++    def test_authenticated_listing_frame_and_control(self):
++        Handler.seen = []
++        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
++        thread = threading.Thread(target=server.serve_forever, daemon=True)
++        thread.start()
++        try:
++            bridge = Bridge(TOKEN, f"http://127.0.0.1:{server.server_address[1]}")
++            self.assertEqual(bridge.windows(), [WINDOW])
++            self.assertEqual(bridge.frame("window-1"), (PNG_HEADER, (2, 3)))
++            bridge.input("window-1", {"type": "pointer", "x": 2, "y": 3})
++            bridge.close("window-1")
++            self.assertEqual(len(Handler.seen), 4)
++            self.assertTrue(all(auth == f"Bearer {TOKEN}" for _, auth in Handler.seen))
++        finally:
++            server.shutdown()
++            server.server_close()
++            thread.join(timeout=2)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index a8bf9d4..0c92b18 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -266,7 +266,7 @@ def main() -> None:
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     compat_paths = finalize_rootfs.split("compat_paths=(", 1)[1].split(")", 1)[0]
+     check(
+-        "compat_revision=29" in finalize_rootfs
++        "compat_revision=32" in finalize_rootfs
+         and "usr/local/lib/try-omarchy/catch-up" in compat_paths
+         and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
+         and "etc/skel/.config/nvim/lua/plugins/theme.lua" in compat_paths
+@@ -303,6 +303,59 @@ def main() -> None:
+         and (GUEST / "factory-overlay/usr/local/bin/try-omarchy-drop").stat().st_mode & stat.S_IXUSR != 0,
+         "direct file-drop delivery reaches persistent disks",
+     )
++    windows_app = GUEST / "factory-overlay/usr/local/bin/omarchy-windows-app"
++    windows_desktop = GUEST / "factory-overlay/usr/local/bin/omarchy-windows-desktop"
++    windows_open = GUEST / "factory-overlay/usr/local/bin/omarchy-windows-open"
++    windows_present = GUEST / "factory-overlay/usr/local/bin/omarchy-windows-present"
++    windows_protocol = GUEST / "factory-overlay/usr/local/bin/omarchy_windows_protocol.py"
++    token_export = GUEST / "factory-overlay/usr/local/lib/try-omarchy/export-seamless-token"
++    token_service = GUEST / "factory-overlay/etc/systemd/system/try-omarchy-seamless-token.service"
++    check(
++        all(path in compat_paths for path in (
++            "usr/local/bin/omarchy-windows-app",
++            "usr/local/bin/omarchy-windows-desktop",
++            "usr/local/bin/omarchy-windows-open",
++            "usr/local/bin/omarchy-windows-present",
++            "usr/local/bin/omarchy_windows_protocol.py",
++            "usr/local/lib/try-omarchy/export-seamless-token",
++            "etc/systemd/system/try-omarchy-seamless-token.service",
++            "etc/systemd/system/multi-user.target.wants/try-omarchy-seamless-token.service",
++            "usr/share/applications/omarchy-windows-apps.desktop",
++            "usr/share/applications/omarchy-windows-explorer.desktop",
++            "usr/share/applications/omarchy-windows-league.desktop",
++            "usr/share/applications/omarchy-windows-desktop.desktop",
++            "usr/share/applications/omarchy-windows-open.desktop",
++        ))
++        and windows_app.stat().st_mode & stat.S_IXUSR != 0
++        and windows_desktop.stat().st_mode & stat.S_IXUSR != 0
++        and windows_open.stat().st_mode & stat.S_IXUSR != 0
++        and windows_present.stat().st_mode & stat.S_IXUSR != 0
++        and windows_protocol.exists()
++        and "10.0.2.2:4457" in windows_protocol.read_text()
++        and "/run/try-omarchy/seamless-token" in windows_protocol.read_text()
++        and token_export.stat().st_mode & stat.S_IXUSR != 0
++        and "modprobe qemu_fw_cfg" in token_export.read_text()
++        and "chmod 0640" in token_export.read_text()
++        and "chown root:video" in token_export.read_text()
++        and "Before=display-manager.service" in token_service.read_text()
++        and (GUEST / "factory-overlay/etc/systemd/system/multi-user.target.wants/try-omarchy-seamless-token.service").is_symlink()
++        and "--probe" in windows_open.read_text()
++        and "movetoworkspacesilent" in windows_present.read_text()
++        and "10.0.2.2/4456" in windows_app.read_text()
++        and "sha256sum --check --status" in windows_desktop.read_text()
++        and "version=6.1.0" in windows_desktop.read_text()
++        and "expected_sha256=0e855ffd22d407e18ab5fdb575fed5f01ca119a3f91993c5f0213f15ac80b400" in windows_desktop.read_text()
++        and "Windows Desktop is a preview" in windows_desktop.read_text()
++        and "Name=Windows Desktop (Preview)" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-desktop.desktop")
++        and "Exec=/usr/local/bin/omarchy-windows-desktop" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-desktop.desktop")
++        and "Name=Open on Windows host (Preview)" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-apps.desktop")
++        and "Name=File Explorer on Windows host" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop")
++        and "Name=League on Windows host" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-league.desktop")
++        and "Exec=/usr/local/bin/omarchy-windows-app pick" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-apps.desktop")
++        and "Name=Windows Apps in Omarchy (Preview)" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-open.desktop")
++        and "Exec=/usr/local/bin/omarchy-windows-open" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-open.desktop"),
++        "Windows app and desktop launchers reach fresh and upgraded guests",
++    )
+     catch_up = read(GUEST / "factory-overlay/usr/local/lib/try-omarchy/catch-up")
+     check(
+         "restore_nvim_theme_link" in catch_up
+-- 
+2.55.0
+

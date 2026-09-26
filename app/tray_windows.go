@@ -45,6 +45,7 @@ const (
 	trayCommandClipboardFiles = 3009
 	trayCommandDevices        = 3010
 	trayCommandTransfers      = 3011
+	trayCommandWindowsDesktop = 3012
 
 	nimAdd                = 0
 	nimDelete             = 2
@@ -169,7 +170,7 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 	var hwnd uintptr
 	var nid notifyIconData
 	var aboutOpen atomic.Bool
-	var settingsOpen, diagnosticsOpen, devicesOpen atomic.Bool
+	var settingsOpen, diagnosticsOpen, devicesOpen, windowsDesktopOpen atomic.Bool
 
 	addIcon := func() bool {
 		if hwnd == 0 {
@@ -192,7 +193,7 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		self, err := os.Executable()
 		if err != nil {
 			running.Store(false)
-			errorBox("Try Omarchy could not open " + flag + ".\n\n" + err.Error())
+			errorBox("Omarchy could not open " + flag + ".\n\n" + err.Error())
 			return
 		}
 		args := []string{}
@@ -206,7 +207,7 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 		if err := cmd.Start(); err != nil {
 			running.Store(false)
-			errorBox("Try Omarchy could not open " + flag + ".\n\n" + err.Error())
+			errorBox("Omarchy could not open " + flag + ".\n\n" + err.Error())
 			return
 		}
 		// The tray action is user initiated, but the child has a different PID.
@@ -254,6 +255,7 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		appendItem(mfString, trayCommandSettings, "Settings...")
 		appendItem(mfString, trayCommandCameraStatus, "Camera status...")
 		appendItem(mfString, trayCommandDevices, "USB devices...")
+		appendItem(mfString, trayCommandWindowsDesktop, "Windows desktop in Omarchy...")
 		appendItem(mfString, trayCommandTransfers, "File transfers…")
 		appendItem(mfString, trayCommandDiagnose, "Create diagnostics...")
 		reclaimFlags := uintptr(mfString)
@@ -286,6 +288,8 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 			go showFileDropWindow(nil)
 		case trayCommandDevices:
 			launchControl("-devices", &devicesOpen)
+		case trayCommandWindowsDesktop:
+			launchControl("-sunshine-setup", &windowsDesktopOpen)
 		case trayCommandSettings:
 			launchControl("-settings", &settingsOpen)
 		case trayCommandDiagnose:

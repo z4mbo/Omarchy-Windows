@@ -1,50 +1,47 @@
 <p align="center">
-  <img src="app/OmarchyIcon.svg" width="128" height="128" alt="Try Omarchy logo">
+  <img src="app/OmarchyIcon.svg" width="128" height="128" alt="Omarchy logo">
 </p>
 
-<h1 align="center">Try Omarchy for Windows</h1>
+<h1 align="center">Omarchy for Windows</h1>
 
-Run the full [Omarchy](https://omarchy.org) desktop in a window on Windows 10 or 11. No VMware, no VirtualBox, no dual boot: QEMU on the Windows Hypervisor Platform (WHPX), a prebuilt Arch image with Omarchy baked in, and the desktop rendered on your actual GPU (virgl + Venus Vulkan via [WINQ-EMU](https://github.com/cmspam/winq-emu)) with CPU rendering as the automatic fallback. No repartitioning or replacement of Windows. Setup may enable Windows Hypervisor Platform and request a restart; the Linux installation lives in a folder chosen on first run, with `%LOCALAPPDATA%\TryOmarchy` as the default.
+Run [Omarchy](https://omarchy.org) on Windows 10 or 11 with QEMU and Windows Hypervisor Platform (WHPX). Windows stays installed, and the Linux disk lives in a folder you choose. The visible Windows app, Start entry, Desktop shortcut, and tray are named **Omarchy**. Settings are inside the app's tray and settings dialog. The launcher filename `TryOmarchy.exe` and existing data-folder names remain for upgrade compatibility.
 
 Download, boot, Hyprland.
 
-![The Omarchy desktop running in the Try Omarchy window on Windows](docs/images/hero.jpg)
+![The Omarchy desktop running on Windows](docs/images/hero.jpg)
 
-![Live capture on the Ryzen 5 test laptop: fastfetch, the Omarchy menu, and a screensaver inside the Try Omarchy window](docs/images/demo.gif)
+![Omarchy desktop demo](docs/images/demo.gif)
 
-**Status: working end to end on real hardware.** One app switches on Windows' virtualization, downloads the GPU runtime and the image, boots, and supervises; the desktop renders on the GPU and falls back to CPU rendering automatically. Landing page: [tryomarchy.com](https://tryomarchy.com). See the [changelog](CHANGELOG.md) for release history.
+**Status of this fork: development preview.** On a Windows 11 Pro host with an RTX 5080, the launcher booted the existing guest, rendered Hyprland through VirGL, and presented Notepad and File Explorer as two separate tiled Omarchy windows. A temporary borderless Windows window also filled the guest workspace. This is an ordinary-window preview: modern Notepad ignored posted text input, and League gameplay, game input, fullscreen match capture, and latency are unverified. See [the host test notes](docs/evidence/WINDOWS-HOST-INTEGRATION-2026-09-26.md) and [Windows app details](docs/WINDOWS-APPS.md).
 
-Try Omarchy for Windows is maintained under [Omacom](https://github.com/omacom),
-alongside [Try Omarchy for macOS](https://github.com/omacom/try-omarchy).
+This fork builds on [Try Omarchy for Windows](https://github.com/omacom/try-omarchy-windows) by [Omacom](https://github.com/omacom).
 The Omarchy mark in the app icon is sourced from the
 [official Omarchy brand kit](https://omarchy.org/brand/) and remains subject to
 Omarchy's trademark rights.
 
-The current release is [v0.0.20-preview](https://github.com/omacom/try-omarchy-windows/releases/tag/v0.0.20-preview),
-including Omarchy 4.0.3, working camera and microphone capture, quiet file drops, snapshots and installation moves.
-We are working toward v1; see the [scope and remaining release gates](docs/V1-READINESS.md)
-and [Windows testing instructions](docs/TESTING.md). Physical acceptance currently
-centers on an AMD Windows 11 laptop; broader host coverage remains open.
+The [upstream v0.0.20 preview](https://github.com/omacom/try-omarchy-windows/releases/tag/v0.0.20-preview) does **not** contain this fork's Windows window preview or resource-profile changes. This fork does not yet publish a complete one-click installer and patched guest image. A fresh one-app release requires packaging and validating [guest patch 0083](guest-build/0083-Integrate-Windows-Apps-in-the-guest-menu.patch) with the launcher. The existing-guest setup below works for development and testing.
 
-## What works today
+## Current capabilities and limits
 
-- **The full Omarchy 4.0.3 desktop on new or reset guests**: Hyprland, the bar, notifications, all 22 themes, the screensavers. Launches after setup go straight to the desktop. Startup time depends on the host and the drive holding the guest. No Linux login screens, no console text, branded window.
-- **GPU acceleration**: Hyprland renders on the host GPU via virgl, `vulkaninfo` shows Venus, smooth video and audio (verified on a Radeon iGPU laptop); `-cpu host` (AVX2 and all) via WINQ-EMU's patched WHPX.
-- **One app, zero prerequisites**: `TryOmarchy.exe` (~10 MB, no console window). First run lets you keep the default Local AppData location or choose another local drive or folder, switches on Windows' Hypervisor Platform (one permission prompt, one restart), then downloads the SHA256-verified GPU runtime and image and boots into Omarchy's setup form. Once setup is complete it keeps a stable launcher in the chosen data folder and can add optional Start-menu and Desktop shortcuts. After that it supervises everything: GPU/CPU auto-detect, the known WHPX launch wedge, in-guest reboot relaunch, poweroff cleanup.
-- **Feels like an app, not a VM**: the window is branded "Try Omarchy", the Windows key acts as Super only while the window is focused (Start menu and Win+Shift+S keep working everywhere else), Ctrl+Alt+F goes fullscreen.
+- **Omarchy desktop**: Hyprland, themes, tray, clipboard, audio, shared folders, file drops, and guest lifecycle are available through one Windows launcher. New or reset guests use the image version bundled with the selected release.
+- **GPU translation**: Hyprland and tested OpenGL programs use the Windows GPU through VirGL. On the RTX 5080 host, Blender 5.2.2 viewport, Workbench and conservative Eevee scenes, Godot Compatibility mode, and SuperTuxKart ran. Blender Cycles used CPU. Native NVIDIA CUDA/OptiX, PCI GPU passthrough, and reliable Vulkan gaming are not available in this VM configuration; see [compatibility](docs/COMPATIBILITY.md).
+- **Host-aware boot resources**: Balanced and Maximum Performance profiles size vCPUs and RAM from Windows' current load. Maximum Performance now keeps at least one third of total RAM available for later Windows activity. Windows schedules CPU time between host and guest. Guest vCPU count and RAM do not resize while running: this QEMU build did not physically return ballooned RAM to Windows. The [experimental RAM-return patch](runtime-build/experimental/balloon-decommit/README.md) is not a released runtime.
+- **Separate Windows app windows in Omarchy**: the opt-in preview mirrors selected top-level Windows windows into individual GTK4/Hyprland surfaces. Notepad and File Explorer tiled side by side in a physical test. The host still runs the app, so it keeps its Windows files and drivers. Capture uses `PrintWindow` and PNG, and input may be ignored. It is not yet a high-frame-rate game transport.
+- **Fullscreen preview**: a synthetic borderless Windows test window was detected as fullscreen and filled the Omarchy output. The League client-to-match transition, actual match frames, controls, and same-workspace behavior remain unverified.
+- **Single visible Windows app**: installed shortcuts and Apps registration say Omarchy; Settings lives in its tray. The launcher keeps the existing `TryOmarchy.exe` filename so current installations update without deleting their Linux disk.
 - **Two-way text and image clipboard sharing** between Windows and Omarchy (own compositor-native bridge over wl-clipboard, no SPICE) and **folder sharing** over virtio-9p: standard installs offer to create `Omarchy Shared` in your Windows home, then pin it in Omarchy's Files sidebar and link it into the Linux home. The tray can open the Windows folder at any time. File and folder clipboard transfers stream in the background. Drop Windows files into the Omarchy window to copy them into the supported folder under the pointer, or Downloads when that folder cannot accept the drop. Larger copies show small, nonblocking progress with cancellation. Dropping directly into arbitrary guest applications remains unfinished.
 - First boot offers an instant trial account or Omarchy's normal personalized account setup, with SDDM autologin after either path. Instant mode keeps `omarchy` as both the local username and lock-screen password, shows that on the setup splash, and repeats it once on the first desktop. Sudo remains passwordless in this disposable local trial.
 - Reproducible x86_64 guest image build (containerized, package-locked, pinned Omarchy revision) and a headless QMP control plane for automated testing.
 
-See [app compatibility](docs/COMPATIBILITY.md) for package support and current VM limitations. The [v1 checklist](docs/V1-READINESS.md) tracks the remaining release work.
+See [app compatibility](docs/COMPATIBILITY.md), [Windows app integration](docs/WINDOWS-APPS.md), and the [v1 checklist](docs/V1-READINESS.md) for details.
 
 | First run | Screensaver |
 |---|---|
-| ![Omarchy first-run setup inside the Try Omarchy window](docs/images/first-run.jpg) | ![Omarchy pixel-logo screensaver](docs/images/screensaver.jpg) |
+| ![Omarchy first-run setup](docs/images/first-run.jpg) | ![Omarchy pixel-logo screensaver](docs/images/screensaver.jpg) |
 
 ## Essential keys
 
-- **Windows key** acts as Super, but only while the Try Omarchy window is focused. Everywhere else it stays your normal Windows key, so the Start menu and Win+Shift+S keep working.
+- **Windows key** acts as Super, but only while the Omarchy window is focused. Everywhere else it stays your normal Windows key, so the Start menu and Win+Shift+S keep working.
 - **Ctrl+Alt+F** fullscreens the VM window itself on your Windows desktop (SUPER+F, below, is the in-Omarchy one).
 - **Ctrl+Alt+G** grabs or releases raw keyboard input. If the host steals a shortcut you meant for Omarchy, grab first. Same trick if you're driving the VM over VNC or RDP and focus gets weird.
 - Hyprland is keyboard-first by design and the first hour is the adjustment period. Learn two keys and the rest follows: **SUPER+SPACE** opens the Omarchy menu, **SUPER+K** opens the keybinding viewer with every binding and its description. The everyday starters: SUPER+RETURN opens a terminal, SUPER+W closes the focused window, SUPER+F fullscreens it.
@@ -57,7 +54,7 @@ Same recipe as the excellent macOS [try-omarchy](https://github.com/themartiano/
 |---|---|---|
 | Hypervisor | Hypervisor.framework | Windows Hypervisor Platform (WHPX) |
 | Guest image | ARM64 Arch + Omarchy | x86_64 Arch + Omarchy |
-| Graphics | VirGL | virtio-gpu virgl + Venus Vulkan (WINQ-EMU); llvmpipe fallback |
+| Graphics | VirGL | virtio-gpu VirGL OpenGL; Venus is present but not a reliable tested game path; llvmpipe fallback |
 | App shell | Swift/AppKit | Go: one console-less `TryOmarchy.exe` (PowerShell scripts remain as a fallback path) |
 
 WHPX works on Windows Home and Pro (it's the same platform WSL2 rides on), so no Hyper-V role is required. If WSL2 runs on your machine, you're set.
@@ -66,25 +63,28 @@ Proven boot recipe: `-accel whpx -machine q35 -cpu qemu64`, direct kernel boot (
 
 ## Try it
 
-Download [TryOmarchy.exe](https://github.com/omacom/try-omarchy-windows/releases/latest/download/TryOmarchy.exe) (~10 MB, [SHA256](https://github.com/omacom/try-omarchy-windows/releases/latest/download/TryOmarchy.exe.sha256)) and open it. First run asks where to store the virtual machine, graphics runtime, and downloads. Use the default Local AppData location or choose another local drive or folder. Windows then asks permission to switch on the Hypervisor Platform and restarts once, after which the app pulls the GPU runtime (a portable [WINQ-EMU](https://github.com/cmspam/winq-emu) tree, ~84 MB) and the Omarchy image (~2 GB), everything SHA256-verified. Choose the instant trial account to go straight to the desktop, or use Omarchy's setup form to choose your own account. Every launch after goes straight to the desktop.
+There is no packaged release of this fork yet. To test the current launcher on an **existing** Omarchy installation, build it on Windows with Go:
 
-After the first successful setup, Try Omarchy offers optional Start-menu and Desktop shortcuts. Start-menu installs include a separate settings shortcut. They point to a stable copy of the signed launcher in the chosen data folder, so the original download can be moved or deleted. Opening a newer downloaded release refreshes that stable copy.
+```powershell
+git clone https://github.com/z4mbo/Omarchy-Windows.git
+cd Omarchy-Windows\app
+go build -trimpath -ldflags '-H windowsgui -s -w' -o Omarchy.exe .
+.\Omarchy.exe -dir 'C:\Omarchy\TryOmarchy' -no-update
+```
 
-While Omarchy is running, the Try Omarchy tray icon can reopen its window, open the active shared folder, open Settings, create a diagnostics bundle, or request a clean shutdown.
+Replace the `-dir` path with your existing data folder. The app keeps `vm\disk.raw` and upgrades the stable launcher copy after a healthy boot. **Do not use `-uninstall` for an upgrade**: that removes the guest disk. The `-no-update` flag keeps an older published upstream release from replacing this development build while testing.
 
-Try Omarchy checks for updates when it starts. Release metadata is signed with a separate Ed25519 update key, and its authenticated hashes cover the signed launcher and the guest payload manifest. New files are fully downloaded and verified before they replace anything. The previous launcher, bundled runtime, and factory image remain available until the updated VM reaches a healthy boot, while `vm\disk.raw` is left untouched. If the first boot fails or is interrupted, the next launch restores the previous files automatically. Use `-no-update` when an offline or version-pinned launch is required.
+For the Windows app preview on an existing guest, follow [the guest integration steps](docs/WINDOWS-APPS.md#getting-the-guest-menu). A fresh install still downloads the published guest image, which predates this fork's per-window menu; the complete one-app installer awaits a new image built with patch 0083 and release validation.
+
+After successful setup, the app offers one **Omarchy** Start shortcut and an optional Desktop shortcut. Settings opens from the Omarchy tray. The shortcuts point to a stable launcher in the data folder; opening a newer launcher refreshes that copy after a healthy boot.
+
+While Omarchy is running, its tray icon can reopen the window, open the active shared folder, open Settings, create a diagnostics bundle, or request a clean shutdown.
+
+Published upstream releases use signed update metadata. New files are downloaded and verified before replacing the previous launcher, runtime, or factory image; `vm\disk.raw` is left untouched. This fork's development changes are not in that upstream update channel. Use `-no-update` when testing a source build.
 
 For the full guest OS update, open **Update > Omarchy** inside the guest after updating the launcher. Existing files and the writable guest disk are preserved; launcher rollback does not roll back guest package transactions. See [updating an existing guest](docs/GUEST-UPGRADES.md).
 
 Already have WINQ-EMU at `C:\WINQ-EMU`, or stock QEMU from the old bootstrap? The app prefers what's installed and downloads nothing extra.
-
-Prefer to build the app yourself? Any machine with Go, then run the exe on Windows:
-
-```
-git clone https://github.com/omacom/try-omarchy-windows
-cd try-omarchy-windows/app
-GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-H windowsgui -s -w" -o TryOmarchy.exe .
-```
 
 The launcher embeds and pins the SHA256 digest of the default release's
 `SHA256SUMS` file. It verifies an existing cache before trusting it, records a
@@ -122,9 +122,9 @@ launch. Portable mode continues to support exFAT through the `data` and
 
 [Moving an existing installation](docs/MOVING.md) is available from Settings.
 
-The next candidate adds General, Devices, Advanced and Recovery pages, camera
+The app includes General, Devices, Advanced and Recovery pages, camera
 selection and camera/microphone switches, and About and updates. These controls
-are in this source branch and are not yet part of the published v20 download.
+are in this source branch and are not all part of the published upstream v20 download.
 See [desktop controls](docs/DESKTOP-CONTROLS.md) for behavior and validation.
 
 `settings.json` in the chosen data folder keeps the choices that survive a
@@ -153,7 +153,7 @@ the Windows folder shared into Omarchy (`-share`), `shareDisabled` turns that
 folder off without forgetting it, and `forwards` are loopback port
 forwards (`-forward`), and `sshKey` is the public key file to authorize when a
 forward targets sshd (`-ssh-key`), and `render` picks the rendering path
-(`-render`). Open Settings from the tray, the Start menu, or
+(`-render`). Open Settings from the tray or
 `TryOmarchy.exe -settings`. Changes apply on the next launch.
 
 `render` is `auto` by default: the launcher tries GPU rendering and, when this
@@ -165,6 +165,68 @@ the GPU path when the runtime or the display drivers change, and once a day.
 Automatic sizing gives the guest all logical processors but two, between two
 and eight, and a third of the machine's RAM between 4 and 8 GiB (6 GiB with GPU
 rendering, the same as before), reduced to what Windows can spare at launch.
+
+#### CPU and RAM profiles
+
+Open **Settings > General > Resource profile** before starting Omarchy:
+
+- **Balanced** keeps the automatic sizing above.
+- **Maximum performance** samples Windows CPU activity for 750 ms and reads
+  available physical RAM immediately before starting the VM. It gives Omarchy
+  the unused capacity after leaving additional Windows headroom: at least two
+  logical processors (one eighth of the host on larger machines), and at least
+  4 GiB RAM (one third of physical RAM on larger machines). RAM is rounded down
+  to 256 MiB steps. The supported limits remain 64 vCPUs and 64 GiB RAM.
+- **Manual** enables the CPU count and RAM fields together. RAM is entered in
+  GiB; either field can be 0 to use Balanced sizing for that resource. Requests
+  exceeding the host CPU count or leaving less than 2 GiB physical RAM for
+  Windows are rejected with an explanation.
+
+Settings shows an estimate using the host state when the window opens. Maximum
+performance measures again on launch. The CPU count and maximum guest RAM are
+set at boot; Windows and Omarchy share processor scheduling. The launcher does
+not pin cores or guarantee an FPS increase. Save, shut down, and relaunch to
+apply a profile change. Windows must retain headroom for new applications,
+QEMU, and graphics resources.
+
+Windows schedules CPU time between its apps and Omarchy as their workloads
+change. The current bundled Windows QEMU runtime does not return ballooned
+guest pages to Windows physical memory, so guest RAM cannot safely resize live.
+Resource profiles measure Windows load at launch and choose the VM's boot-time
+capacity. The VM must restart to change guest RAM or vCPU count.
+
+If CPU measurement fails, or the PC has more than 64 logical processors,
+Maximum performance uses the Balanced CPU count. An unavailable memory query
+uses Balanced RAM sizing. A successful query showing insufficient free RAM
+stops Maximum performance with an explanation instead of allocating that RAM.
+The existing QEMU low-memory retry can still reduce an allocation if conditions
+change after measurement; the effective allocation is recorded in `vm/shell.log`.
+
+The profile is saved separately in `resources.json` so older launchers can
+still read `settings.json` after rollback. Old CPU/RAM choices are preserved
+and select Manual until a profile is chosen. Presets retain those manual values
+for later use. Backups and snapshots include the profile.
+
+For one launch, use `-resource-profile maximum-performance`, `balanced`, or
+`manual`. Explicit `-cpus` and `-memory` flags override their individual
+resources within any profile; `-memory` still takes **MiB**. For example:
+
+```powershell
+TryOmarchy.exe -resource-profile maximum-performance
+TryOmarchy.exe -resource-profile manual -cpus 16 -memory 24576
+```
+
+**Graphics:** Settings > Advanced reports the last successful boot's rendering
+path. GPU mode shares Windows' GPU through VirGL OpenGL; Venus Vulkan is present
+but has not been reliable on the tested RTX 5080 guest. It
+does not assign the physical GPU to Linux. NVIDIA CUDA/OptiX and native PCI GPU
+passthrough are not provided by this runtime. See [application and graphics
+limits](docs/COMPATIBILITY.md) before relying on a particular game or renderer.
+
+Optional [Blender, Godot and SuperTuxKart launch profiles](docs/GPU-APPLICATIONS.md)
+document tested OpenGL paths, a separately built Blender compatibility patch,
+installation and rollback. These are experimental application profiles, not a
+change to the bundled graphics runtime or a claim of universal GPU support.
 
 The guest follows the Windows time zone, default keyboard layout, and display
 language. Each is applied inside Omarchy when it changes on the Windows side,
@@ -274,11 +336,11 @@ A live USB means rebooting away from your machine and forgetting everything on s
 
 ### What are the instant trial credentials?
 
-The local trial account is named `omarchy` and its lock-screen password is `omarchy`. Sudo does not ask for a password in instant trial mode. Try Omarchy does not enable SSH or expose inbound network ports unless you ask for a forward with `-ssh` or `-forward`, and those bind to `127.0.0.1` only.
+The local trial account is named `omarchy` and its lock-screen password is `omarchy`. Sudo does not ask for a password in instant trial mode. Omarchy does not enable SSH or expose inbound network ports unless you ask for a forward with `-ssh` or `-forward`, and those bind to `127.0.0.1` only.
 
-### How do I remove Try Omarchy?
+### How do I remove Omarchy?
 
-Close Omarchy, then use **Remove Try Omarchy** in Settings, the Try Omarchy
+Close Omarchy, then use **Uninstall** in Settings, the Omarchy
 entry in Windows Apps & features, or `TryOmarchy.exe -uninstall`. It offers a
 full backup first, then removes the shortcuts, the Apps & features entry, the
 saved data location, and the data folder with the launcher, runtime, image,

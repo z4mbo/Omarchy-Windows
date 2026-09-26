@@ -200,13 +200,13 @@ func (ui *progressUI) chooseSharedFolder() bool {
 
 func (ui *progressUI) confirmCancel(hCancel uintptr) bool {
 	if ui.finishOnly.Load() {
-		infoBox("Try Omarchy is finishing this operation. Please wait for it to complete.")
+		infoBox("Omarchy is finishing this operation. Please wait for it to complete.")
 		return false
 	}
 	if ui.canceling.Load() {
 		return true
 	}
-	message := "Cancel Try Omarchy setup?\n\nUnfinished setup files will be removed. An existing working installation will be kept."
+	message := "Cancel Omarchy setup?\n\nUnfinished setup files will be removed. An existing working installation will be kept."
 	if custom, ok := ui.cancelMessage.Load().(string); ok {
 		message = custom
 	}

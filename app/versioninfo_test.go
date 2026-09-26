@@ -65,6 +65,12 @@ func TestVersionInfoResourceMatchesCurrentVersion(t *testing.T) {
 		t.Errorf("rsrc_windows_amd64.syso carries %q %d time(s), want it in both FileVersion "+
 			"and ProductVersion - rebuild it from versioninfo.rc", currentVersion, n)
 	}
+	if n := bytes.Count(syso, utf16le("Omarchy\x00")); n < 2 {
+		t.Errorf("compiled resource carries Omarchy %d time(s), want FileDescription and ProductName", n)
+	}
+	if bytes.Contains(syso, utf16le("Try Omarchy\x00")) {
+		t.Error("compiled resource still carries the old display name")
+	}
 	file, product := fixedFileInfo(t, syso)
 	if file != want {
 		t.Errorf("compiled FILEVERSION = %v, want %v", file, want)

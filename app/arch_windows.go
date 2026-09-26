@@ -41,7 +41,7 @@ func nativeMachine() uint16 {
 	return native
 }
 
-// hostArchUnsupportedReason returns "" when this machine can run Try Omarchy,
+// hostArchUnsupportedReason returns "" when this machine can run Omarchy,
 // otherwise the message to show the user. The launcher, the WINQ-EMU runtime
 // and the guest image are all x86_64-only, so ARM64 Windows PCs cannot run
 // the app - and before this check they got the worst possible tour: an
@@ -65,9 +65,9 @@ func hostArchUnsupportedReason() string {
 // the machine is broken or misconfigured - the hardware line sits elsewhere.
 func intelAMDOnlyMessage(detail string) string {
 	return strings.Join([]string{
-		"Try Omarchy needs an Intel or AMD (x86_64) PC.",
+		"Omarchy needs an Intel or AMD (x86_64) PC.",
 		"",
-		fmt.Sprintf("This PC has %s. Nothing is misconfigured: the x86_64 virtualization Try Omarchy is built on is not supported on ARM64 Windows, so setup cannot continue on this PC.", detail),
+		fmt.Sprintf("This PC has %s. Nothing is misconfigured: the x86_64 virtualization Omarchy is built on is not supported on ARM64 Windows, so setup cannot continue on this PC.", detail),
 		"",
 		"To try Omarchy, run it on an Intel or AMD Windows PC. There is no ARM64 build yet - if you would like one, please open an issue:",
 		"https://github.com/omacom/try-omarchy-windows/issues",

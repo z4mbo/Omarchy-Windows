@@ -46,7 +46,7 @@ func backupNameAllowed(name string) bool {
 			return true
 		}
 	}
-	return name == "vm/disk.raw" || name == "settings.json" || name == desktopPreferencesFilename || name == storageSettingsFilename || strings.HasPrefix(name, "guest/") || strings.HasPrefix(name, "runtime/")
+	return name == "vm/disk.raw" || name == "settings.json" || name == resourcePreferencesFilename || name == desktopPreferencesFilename || name == storageSettingsFilename || strings.HasPrefix(name, "guest/") || strings.HasPrefix(name, "runtime/")
 }
 
 func requiredBackupFiles(files map[string]bool) error {
@@ -90,7 +90,7 @@ func writeVMArchive(dir, destination string, report backupProgress, checkpoint b
 	rel, err := filepath.Rel(root, parent)
 	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		if !checkpoint || filepath.Base(destination) != "vm.zip" || filepath.Dir(rel) != "checkpoints" || !strings.HasPrefix(filepath.Base(rel), ".pending-") || !validCheckpointID(strings.TrimPrefix(filepath.Base(rel), ".pending-")) {
-			return fmt.Errorf("save the backup outside the Try Omarchy data folder")
+			return fmt.Errorf("save the backup outside the Omarchy data folder")
 		}
 	}
 
@@ -113,13 +113,13 @@ func writeVMArchive(dir, destination string, report backupProgress, checkpoint b
 	defer cleanup()
 	disk, err := openBackupDisk(diskPath)
 	if err != nil {
-		return fmt.Errorf("close Try Omarchy before backing up: %w", err)
+		return fmt.Errorf("close Omarchy before backing up: %w", err)
 	}
 	defer disk.Close()
 	var entries []backupEntry
 	seen := map[string]bool{}
 	var total int64
-	roots := []string{"guest", "runtime", "vm/disk.raw", "settings.json", storageSettingsFilename, desktopPreferencesFilename}
+	roots := []string{"guest", "runtime", "vm/disk.raw", "settings.json", storageSettingsFilename, desktopPreferencesFilename, resourcePreferencesFilename}
 	for index := 0; index < maximumGuestDisplays; index++ {
 		roots = append(roots, displayPlacementFilename(index))
 	}

@@ -34,7 +34,7 @@ func TestGetWithSetupRetryRecoversFromTemporaryFailure(t *testing.T) {
 
 func TestSetupFailureHelpExplainsDNS(t *testing.T) {
 	err := fmt.Errorf("download failed: %w", &net.DNSError{Err: "no such host", Name: "github.com"})
-	if got := setupFailureHelp(err); got == "Check your connection and start Try Omarchy again." {
+	if got := setupFailureHelp(err); got == "Check your connection and start Omarchy again." {
 		t.Fatalf("DNS error got generic help: %q", got)
 	}
 }
@@ -46,7 +46,7 @@ func TestSetupFailureHelpExplainsDiskFull(t *testing.T) {
 		Err:  diskFullErrno,
 	})
 	got := setupFailureHelp(err)
-	if got == "Check your connection and start Try Omarchy again." {
+	if got == "Check your connection and start Omarchy again." {
 		t.Fatalf("disk-full error got connection help: %q", got)
 	}
 	if !strings.Contains(got, "disk space") {
@@ -57,7 +57,7 @@ func TestSetupFailureHelpExplainsDiskFull(t *testing.T) {
 func TestSetupFailureHelpExplainsPreflightDiskFull(t *testing.T) {
 	err := fmt.Errorf("preflighting Omarchy storage: %w", errInsufficientDiskSpace)
 	got := setupFailureHelp(err)
-	if got == "Check your connection and start Try Omarchy again." {
+	if got == "Check your connection and start Omarchy again." {
 		t.Fatalf("preflight disk-full error got connection help: %q", got)
 	}
 	if !strings.Contains(got, "disk space") {

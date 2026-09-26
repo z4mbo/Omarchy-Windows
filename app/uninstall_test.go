@@ -18,7 +18,10 @@ func TestUninstallKeyNameIsStablePerInstall(t *testing.T) {
 	if uninstallKeyName(`D:\Other`, def) == a {
 		t.Fatal("different folders must not share a key")
 	}
-	if got := uninstallDisplayName(`E:\Omarchy\TryOmarchy`, def); got != `Try Omarchy (E:\Omarchy\TryOmarchy)` {
+	if got := uninstallDisplayName(def, def); got != "Omarchy" {
+		t.Fatalf("default display name: %q", got)
+	}
+	if got := uninstallDisplayName(`E:\Omarchy\TryOmarchy`, def); got != `Omarchy (E:\Omarchy\TryOmarchy)` {
 		t.Fatalf("display name: %q", got)
 	}
 }

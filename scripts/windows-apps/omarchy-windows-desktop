@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Launch the Windows host desktop through Moonlight. The first launch installs
+# a pinned, checksum-verified Moonlight AppImage for the current guest user.
+set -euo pipefail
+
+if (( EUID == 0 )); then
+  printf 'Open Windows Desktop as your normal Omarchy user.\n' >&2
+  exit 1
+fi
+
+version=6.1.0
+expected_sha256=0e855ffd22d407e18ab5fdb575fed5f01ca119a3f91993c5f0213f15ac80b400
+base="$HOME/.local/opt/moonlight"
+appimage="$base/Moonlight-$version-x86_64.AppImage"
+appdir="$base/squashfs-root"
+
+error() {
+  printf 'Windows Desktop: %s\n' "$1" >&2
+  if command -v zenity >/dev/null 2>&1; then
+    zenity --error --title='Windows Desktop' --text="$1" --width=420 || true
+  fi
+  exit 1
+}
+
+if [[ ! -x $appdir/AppRun ]]; then
+  command -v curl >/dev/null 2>&1 || error 'Moonlight needs curl to download its first-run files.'
+  command -v zenity >/dev/null 2>&1 || error 'Moonlight needs zenity to show installation progress.'
+  mkdir -p -- "$base"
+  if [[ ! -f $appimage ]]; then
+    zenity --info --title='Windows Desktop Preview' --width=420 \
+      --text='Windows Desktop is a preview. Moonlight will be downloaded and verified on this first launch. An internet connection is required.' || exit 0
+    if ! (
+      printf '# Downloading Moonlight %s…\n' "$version"
+      curl --fail --location --retry 3 --silent --show-error \
+        "https://github.com/moonlight-stream/moonlight-qt/releases/download/v$version/Moonlight-$version-x86_64.AppImage" \
+        --output "$appimage.part"
+    ) | zenity --progress --pulsate --auto-close --no-cancel \
+        --title='Windows Desktop' --text='Downloading Moonlight…' --width=420; then
+      rm -f -- "$appimage.part"
+      error 'Moonlight could not be downloaded. Check the connection and try again.'
+    fi
+    mv -- "$appimage.part" "$appimage"
+  fi
+  if ! printf '%s  %s\n' "$expected_sha256" "$appimage" | sha256sum --check --status; then
+    rm -f -- "$appimage"
+    error 'Moonlight failed its checksum verification. Try again.'
+  fi
+  chmod 0755 -- "$appimage"
+  # The guest lacks FUSE 2, so extract to a private directory before launch.
+  extraction=$(mktemp -d "$base/.extract.XXXXXXXX") || error 'Could not prepare Moonlight installation.'
+  if ! (cd -- "$extraction" && "$appimage" --appimage-extract >/dev/null 2>&1); then
+    rm -rf -- "$extraction"
+    error 'Moonlight could not be extracted. Try again.'
+  fi
+  rm -rf -- "$appdir"
+  mv -- "$extraction/squashfs-root" "$appdir"
+  rmdir -- "$extraction"
+fi
+
+export QT_QPA_PLATFORM=xcb
+export DISPLAY="${DISPLAY:-:1}"
+export QT_QUICK_BACKEND=software
+exec "$appdir/AppRun" "$@"

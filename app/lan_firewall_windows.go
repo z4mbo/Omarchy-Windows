@@ -35,7 +35,7 @@ try {
   if($current.Count){$current | Remove-NetFirewallRule}
   $local=if($wanted.address -eq '0.0.0.0'){'Any'}else{$wanted.address}
   $profiles=if($p.public){@('Any')}else{@('Domain','Private')}
-  New-NetFirewallRule -PolicyStore PersistentStore -Name $name -DisplayName ('Try Omarchy '+$wanted.protocol.ToUpper()+' '+$wanted.port) -Group $p.group -Direction Inbound -Action Allow -Enabled True -Profile $profiles -Program $p.program -Protocol $wanted.protocol -LocalPort $wanted.port -LocalAddress $local -RemoteAddress LocalSubnet -EdgeTraversalPolicy Block | Out-Null
+  New-NetFirewallRule -PolicyStore PersistentStore -Name $name -DisplayName ('Omarchy '+$wanted.protocol.ToUpper()+' '+$wanted.port) -Group $p.group -Direction Inbound -Action Allow -Enabled True -Profile $profiles -Program $p.program -Protocol $wanted.protocol -LocalPort $wanted.port -LocalAddress $local -RemoteAddress LocalSubnet -EdgeTraversalPolicy Block | Out-Null
   $created+=,$name
  }
  $existing | Where-Object {$_.Name -notin $names} | Remove-NetFirewallRule

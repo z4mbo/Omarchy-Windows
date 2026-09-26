@@ -379,7 +379,7 @@ func (s *mfCameraSource) open() error {
 	}
 	if s.activate == nil {
 		mfRelease(&attributes)
-		return errors.New("The selected camera is disconnected. Reconnect it or choose another camera in Try Omarchy Settings.")
+		return errors.New("The selected camera is disconnected. Reconnect it or choose another camera in Omarchy Settings.")
 	}
 
 	var source unsafe.Pointer

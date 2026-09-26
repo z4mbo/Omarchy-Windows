@@ -11,7 +11,7 @@ import (
 )
 
 func runAbout() {
-	message := fmt.Sprintf("Try Omarchy %s\n\nRun Omarchy on Windows. Your files persist between sessions.\n\nLauncher updates and Linux updates are separate. For Linux packages and Omarchy, use Update > Omarchy inside the desktop.\n\nCheck for launcher updates now?", currentVersion)
+	message := fmt.Sprintf("Omarchy %s\n\nRun Omarchy on Windows. Your files persist between sessions.\n\nLauncher updates and Linux updates are separate. For Linux packages and Omarchy, use Update > Omarchy inside the desktop.\n\nCheck for launcher updates now?", currentVersion)
 	if msgBox(message, mbYesNo|mbIconQuestion|mbDefbutton2) != idYes {
 		return
 	}
