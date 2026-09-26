@@ -18,6 +18,8 @@ Download, boot, Hyprland.
 
 **Updates are part of the goal.** Future Omarchy releases must pass compatibility, upgrade, and recovery checks before automatic rollout. The Windows integration must preserve user files and settings, negotiate supported features across host/guest versions, and keep a working recovery path. Unknown future releases cannot be certified in advance; see the [installation and update gates](docs/evidence/NATIVE-INSTALL-GATES-2026-09-26.md).
 
+The [revision-35 image passed its complete build and automated desktop boot](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36263005169), including checks that the native Windows-app helpers are present and load correctly. CI also checks that development helpers match the files packaged into the image. An automated older-install upgrade test is now wired into CI and required before release publication; its first result is pending. It checks preserved files/settings and repeated boots using a disposable disk. Physical Windows app/game behavior and recovery from a failed package upgrade remain separate acceptance requirements.
+
 This fork builds on [Try Omarchy for Windows](https://github.com/omacom/try-omarchy-windows) by [Omacom](https://github.com/omacom).
 The Omarchy mark in the app icon is sourced from the
 [official Omarchy brand kit](https://omarchy.org/brand/) and remains subject to

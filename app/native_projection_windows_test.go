@@ -10,6 +10,18 @@ import (
 	"time"
 )
 
+type blockingNativeInputBackend struct {
+	fakeSeamlessBackend
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingNativeInputBackend) input(window seamlessWindow, event seamlessInput) error {
+	close(b.entered)
+	<-b.release
+	return b.fakeSeamlessBackend.input(window, event)
+}
+
 func nativeTestLayout() nativeLayout {
 	var l nativeLayout
 	l.Sequence = 1
@@ -187,23 +199,37 @@ func TestNativePresentationRequiresBearerAndDisablesCaptureInput(t *testing.T) {
 		t.Fatalf("layout accepted in capture mode: %d", r.Code)
 	}
 	b.projection = &nativeProjection{bridge: b, tracked: make(map[seamlessWindowKey]*nativeProjectedWindow)}
+	if !b.grantWindow(backend.items[0]) {
+		t.Fatal("host grant failed")
+	}
+	id := b.catalogue()[0].ID
+	// A revision-33 guest never negotiates presentation or sends layouts.
+	// Configuring a newer host for native must not break its capture path.
+	if r := request(http.MethodGet, "/v1/windows/"+id+"/frame", "", true); r.Code != http.StatusOK || r.Body.String() != "png-bytes" {
+		t.Fatalf("old guest capture failed before native layout: %d %s", r.Code, r.Body.String())
+	}
+	if r := request(http.MethodPost, "/v1/windows/"+id+"/input", `{"type":"key","vk":65}`, true); r.Code != http.StatusOK || backend.inputCount != 1 {
+		t.Fatalf("old guest input failed before native layout: %d", r.Code)
+	}
 	if r := request(http.MethodGet, "/v1/presentation", "", true); r.Code != http.StatusOK ||
 		!strings.Contains(r.Body.String(), `"mode":"native"`) ||
 		!strings.Contains(r.Body.String(), `"occlusions":{"coordinates":"tile","maxRectsPerWindow":16}`) {
 		t.Fatalf("native mode: %d %s", r.Code, r.Body.String())
 	}
-	if !b.grantWindow(backend.items[0]) {
-		t.Fatal("host grant failed")
+	if r := request(http.MethodGet, "/v1/windows/"+id+"/frame", "", true); r.Code != http.StatusOK {
+		t.Fatalf("mode query activated native before a layout: %d", r.Code)
 	}
-	id := b.catalogue()[0].ID
-	if r := request(http.MethodGet, "/v1/windows/"+id+"/frame", "", true); r.Code != http.StatusConflict {
-		t.Fatalf("native frame accepted: %d", r.Code)
+	if r := request(http.MethodPost, "/v1/layout", `{"sequence":1,"output":{"width":2560,"height":1440},"windows":[]}`, false); r.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized layout response: %d", r.Code)
 	}
-	if r := request(http.MethodPost, "/v1/windows/"+id+"/input", `{"type":"key","vk":65}`, true); r.Code != http.StatusConflict || backend.inputCount != 0 {
-		t.Fatalf("native input accepted: %d", r.Code)
+	if r := request(http.MethodGet, "/v1/windows/"+id+"/frame", "", true); r.Code != http.StatusOK {
+		t.Fatalf("unauthorized layout activated native: %d", r.Code)
 	}
 	if r := request(http.MethodPost, "/v1/layout", `{"sequence":1,"output":{"width":0,"height":1},"windows":[]}`, true); r.Code != http.StatusBadRequest {
 		t.Fatalf("malformed dimensions: %d", r.Code)
+	}
+	if r := request(http.MethodGet, "/v1/windows/"+id+"/frame", "", true); r.Code != http.StatusOK {
+		t.Fatalf("invalid layout activated native: %d", r.Code)
 	}
 	if r := request(http.MethodPost, "/v1/layout", `{"sequence":1,"output":{"width":2560,"height":1440},"windows":[]} {}`, true); r.Code != http.StatusBadRequest {
 		t.Fatalf("trailing JSON accepted: %d", r.Code)
@@ -212,8 +238,72 @@ func TestNativePresentationRequiresBearerAndDisablesCaptureInput(t *testing.T) {
 	if r := request(http.MethodPost, "/v1/layout", empty, true); r.Code != http.StatusOK || !strings.Contains(r.Body.String(), `"accepted":true`) {
 		t.Fatalf("empty release rejected: %d %s", r.Code, r.Body.String())
 	}
+	if r := request(http.MethodGet, "/v1/windows/"+id+"/frame", "", true); r.Code != http.StatusConflict {
+		t.Fatalf("native frame accepted after layout: %d", r.Code)
+	}
+	if r := request(http.MethodPost, "/v1/windows/"+id+"/input", `{"type":"key","vk":65}`, true); r.Code != http.StatusConflict || backend.inputCount != 1 {
+		t.Fatalf("native input accepted after layout: %d", r.Code)
+	}
 	if r := request(http.MethodPost, "/v1/layout", empty, true); r.Code != http.StatusConflict {
 		t.Fatalf("stale sequence accepted: %d", r.Code)
+	}
+}
+
+func TestNativeActivationWaitsForLegacyInput(t *testing.T) {
+	window := seamlessWindow{PID: 123, handle: 0xab, Class: "Editor", Width: 800, Height: 600}
+	backend := &blockingNativeInputBackend{fakeSeamlessBackend: fakeSeamlessBackend{items: []seamlessWindow{window}},
+		entered: make(chan struct{}), release: make(chan struct{})}
+	b := &seamlessWindowBridge{token: strings.Repeat("b", 64), backend: backend, frames: make(chan struct{}, 2)}
+	b.projection = &nativeProjection{bridge: b, tracked: make(map[seamlessWindowKey]*nativeProjectedWindow)}
+	if !b.grantWindow(window) {
+		t.Fatal("host grant failed")
+	}
+	id := b.catalogue()[0].ID
+	request := func(path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+b.token)
+		w := httptest.NewRecorder()
+		b.ServeHTTP(w, r)
+		return w
+	}
+	inputDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { inputDone <- request("/v1/windows/"+id+"/input", `{"type":"key","vk":65}`) }()
+	select {
+	case <-backend.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("legacy input did not start")
+	}
+	layoutStarted := make(chan struct{})
+	layoutDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		close(layoutStarted)
+		layoutDone <- request("/v1/layout", `{"sequence":1,"output":{"width":2560,"height":1440},"windows":[]}`)
+	}()
+	<-layoutStarted
+	select {
+	case <-layoutDone:
+		t.Fatal("native activation overlapped in-flight legacy input")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(backend.release)
+	select {
+	case got := <-inputDone:
+		if got.Code != http.StatusOK {
+			t.Fatalf("legacy input failed while activation waited: %d", got.Code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("legacy input did not drain")
+	}
+	select {
+	case got := <-layoutDone:
+		if got.Code != http.StatusOK {
+			t.Fatalf("native activation failed after legacy input drained: %d %s", got.Code, got.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("native activation did not finish")
+	}
+	if got := request("/v1/windows/"+id+"/input", `{"type":"key","vk":65}`); got.Code != http.StatusConflict || backend.inputCount != 1 {
+		t.Fatalf("legacy input continued after native activation: %d", got.Code)
 	}
 }
 

@@ -63,13 +63,29 @@ system and icon-cache hooks from failing during package updates.
 
 ## Validation
 
+CI now follows each fresh guest image build with an older-disk upgrade job.
+It downloads the public `v0.0.20-preview` baseline using a fixed independent
+manifest pin, verifies both compressed and decompressed disks, and uses candidate
+kernel/initramfs inputs from the same workflow run. Their manifest digest is
+passed separately by the build job. The release publication job repeats this
+test against the source-pinned release assets before signing and publishing.
+
+The five boots share a disposable QCOW2 overlay; the factory baseline is hashed
+before and after to detect mutation. Candidate boots also check the integration
+revision, native helper imports, and supported occlusion negotiation. These
+checks matter even when the baseline and candidate Omarchy package version is
+unchanged. Logs are retained for 14 days. A backward-image boot tests the older
+external kernel/initramfs against the upgraded disk; it does not undo installed
+packages or prove package rollback. The first run of this new gate is pending.
+
 On a Linux machine with KVM, use verified release artifacts and a newly built
 candidate. Decompress the baseline `rootfs.ext4.zst` first. The work directory
 must be new, and the test retains its disposable disk and logs for inspection:
 
 ```sh
 python3 scripts/release/smoke-guest-upgrade.py \
-  /path/to/older-release /path/to/candidate /path/to/new-test-directory
+  /path/to/older-release /path/to/candidate /path/to/new-test-directory \
+  --disk-mode qcow2
 ```
 
 The test provisions an older image, seeds preservation fixtures, upgrades it,
@@ -78,6 +94,12 @@ It checks package versions, user files, an edited system configuration, installe
 packages, busy-lock handling, repair services, and repeated publication. It does
 not modify either input image. Network access is required for the normal signed
 Arch repository updates.
+
+The default mode requires `qemu-img`; `--disk-mode raw` retains the earlier
+sparse-copy test path. CI checks at least 20 GiB free on a separate runner before
+fetching the baseline, after reclaiming that disposable runner's unused language
+tool cache. For manual tests, size the available storage for the
+verified baseline and the changes written during package updates.
 
 
 The guest contract suite tests corrupt and incomplete payloads, interrupted

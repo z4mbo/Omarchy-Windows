@@ -58,6 +58,7 @@ git -C "$work" config user.name "Try Omarchy Release"
 git -C "$work" config user.email "actions@users.noreply.github.com"
 git -C "$work" am "$repo_root"/guest-build/*.patch
 
+python3 "$repo_root/scripts/release/verify-guest-integration.py" "$work/guest"
 "$work/guest/test"
 
 if ((contract_only)); then

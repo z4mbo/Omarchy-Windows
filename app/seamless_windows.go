@@ -37,13 +37,16 @@ var activeSeamlessBridge atomic.Pointer[seamlessWindowBridge]
 // Capture/input forwarding is disabled in native mode; no general game or
 // exclusive-fullscreen compatibility is implied.
 type seamlessWindowBridge struct {
-	token      string
-	backend    seamlessWindowBackend
-	frames     chan struct{}
-	projection *nativeProjection
-	mu         sync.Mutex
-	grants     map[seamlessWindowKey]string
-	pending    []seamlessLaunch
+	token        string
+	backend      seamlessWindowBackend
+	frames       chan struct{}
+	projection   *nativeProjection
+	nativeModeMu sync.RWMutex // excludes in-flight capture/input while native projection activates
+	nativeActive bool         // sticky for this bridge boot after the first valid layout
+	captureWarm  sync.Once
+	mu           sync.Mutex
+	grants       map[seamlessWindowKey]string
+	pending      []seamlessLaunch
 }
 
 type seamlessWindowKey struct {
@@ -170,9 +173,9 @@ func runSeamlessWindowBridge() (string, func(), error) {
 		_ = server.Shutdown(ctx)
 		if bridge.projection != nil {
 			bridge.projection.Close()
-		} else {
-			stopSeamlessWGC()
 		}
+		// A legacy guest may have used capture before native activation.
+		stopSeamlessWGC()
 		_ = os.Remove(path)
 	}, nil
 }
@@ -214,7 +217,13 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			seamlessJSONError(w, http.StatusBadRequest, "invalid_layout")
 			return
 		}
+		b.nativeModeMu.Lock()
+		// Older guests never submit layouts and retain the capture path even
+		// when this host was configured for native projection. From the first
+		// valid native layout onward, do not mix synthetic input with HWNDs.
+		b.nativeActive = true
 		suspended, err := b.projection.Apply(layout)
+		b.nativeModeMu.Unlock()
 		if err != nil {
 			seamlessJSONError(w, http.StatusConflict, "layout_unavailable")
 			return
@@ -256,9 +265,16 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	}
 	switch {
 	case action == "frame" && r.Method == http.MethodGet:
-		if b.projection != nil {
+		b.nativeModeMu.RLock()
+		defer b.nativeModeMu.RUnlock()
+		if b.nativeActive {
 			seamlessJSONError(w, http.StatusConflict, "native_presentation_active")
 			return
+		}
+		if b.projection != nil {
+			if _, native := b.backend.(nativeSeamlessWindows); native {
+				b.captureWarm.Do(prewarmSeamlessWGC)
+			}
 		}
 		select {
 		case b.frames <- struct{}{}:
@@ -279,7 +295,9 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(png)
 	case action == "input" && r.Method == http.MethodPost:
-		if b.projection != nil {
+		b.nativeModeMu.RLock()
+		defer b.nativeModeMu.RUnlock()
+		if b.nativeActive {
 			seamlessJSONError(w, http.StatusConflict, "native_presentation_active")
 			return
 		}

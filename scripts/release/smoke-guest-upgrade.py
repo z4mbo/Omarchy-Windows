@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Upgrade a disposable copy of an older image and verify it across reboots."""
 import argparse
+import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
+import posixpath
 import selectors
 import shlex
 import subprocess
@@ -13,15 +16,68 @@ import time
 FIXTURES = Path(__file__).resolve().parent / 'guest-upgrade'
 
 
-def boot(artifacts, disk, phase, log, environment, timeout):
+def source_compat_revision():
+    """Use the same source revision expectation as the fresh-image smoke."""
+    path = Path(__file__).with_name('smoke-guest.py')
+    spec = importlib.util.spec_from_file_location('smoke_guest', path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError('cannot load guest smoke revision')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.guest_compat_revision()
+
+
+def candidate_checks(revision, compat_path='/usr/share/try-omarchy/compat-version',
+                     bin_dir='/usr/local/bin'):
+    """Run only with the candidate kernel/initramfs, before package updates."""
+    checks = [f'test "$(cat {shlex.quote(compat_path)})" = "{revision}:$(uname -r)"']
+    if revision >= 34:
+        native = posixpath.join(bin_dir, 'omarchy-windows-native')
+        checks.append(f'test -x {shlex.quote(native)}')
+        checks.append(f'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={shlex.quote(bin_dir)} '
+                      f'python3 {shlex.quote(native)} --help >/dev/null 2>&1')
+    if revision >= 35:
+        probe = ('from omarchy_windows_native_layout import occlusion_limit; '
+                 'assert occlusion_limit({"protocol":1,"mode":"native",'
+                 '"capabilities":{"occlusions":{"maxRectsPerWindow":16,'
+                 '"coordinates":"tile"}}}) == 16')
+        checks.append(f'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={shlex.quote(bin_dir)} '
+                      f'python3 -c {shlex.quote(probe)}')
+    return ' && '.join(checks)
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def create_disk(baseline_disk, work, mode):
+    """Keep the verified factory immutable; all five boots share one writable disk."""
+    if mode == 'qcow2':
+        disk = work / 'persistent.qcow2'
+        size = max(baseline_disk.stat().st_size, 24 * 1024**3)
+        subprocess.run(['qemu-img', 'create', '-f', 'qcow2', '-F', 'raw',
+                        '-b', str(baseline_disk), str(disk), str(size)], check=True)
+        return disk, 'qcow2'
+    disk = work / 'persistent.ext4'
+    subprocess.run(['cp', '--reflink=auto', '--sparse=always', str(baseline_disk), str(disk)], check=True)
+    with disk.open('r+b') as stream:
+        stream.truncate(max(disk.stat().st_size, 24 * 1024**3))
+    return disk, 'raw'
+
+
+def qemu_command(artifacts, disk, disk_format):
     spec = json.loads((artifacts / 'build-spec.json').read_text())
     cmdline = spec['runtime']['kernelCommandLine'].replace('console=tty0 ', '').replace('console=hvc0', 'console=ttyS0')
     cmdline += ' tryomarchy.instant=1 systemd.unit=multi-user.target'
-    command = [
+    return [
         'qemu-system-x86_64', '-nodefaults', '-no-reboot', '-accel', 'kvm',
         '-machine', 'q35', '-cpu', 'host', '-smp', '4', '-m', '4096',
         '-display', 'none', '-monitor', 'none', '-serial', 'stdio',
-        '-drive', f'file={disk},format=raw,if=virtio',
+        '-drive', f'file={disk},format={disk_format},if=virtio',
         '-kernel', str(artifacts / 'vmlinuz-linux'),
         '-initrd', str(artifacts / 'initramfs-linux.img'), '-append', cmdline,
         '-device', 'virtio-rng-pci', '-netdev', 'user,id=net0',
@@ -29,6 +85,10 @@ def boot(artifacts, disk, phase, log, environment, timeout):
         '-fsdev', f'local,id=tests,path={FIXTURES},security_model=none,readonly=on',
         '-device', 'virtio-9p-pci,fsdev=tests,mount_tag=hostshare',
     ]
+
+
+def boot(artifacts, disk, disk_format, phase, log, environment, timeout, checks=''):
+    command = qemu_command(artifacts, disk, disk_format)
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
@@ -62,7 +122,8 @@ def boot(artifacts, disk, phase, log, environment, timeout):
                     # One short command avoids terminal input limits and sudo
                     # discarding queued lines. Test scripts mount read-only.
                     assignments = ' '.join(shlex.quote(f'{k}={v}') for k, v in environment.items())
-                    script = f'env {assignments} bash /mnt/host/{phase}.sh; result=$?; '
+                    script = f'{checks} && ' if checks else ''
+                    script += f'env {assignments} bash /mnt/host/{phase}.sh; result=$?; '
                     script += f"printf 'UPGRADE_%s:%s:%s\\n' RESULT {phase} $result; sudo systemctl poweroff\n"
                     process.stdin.write(script.encode())
                     process.stdin.flush()
@@ -97,11 +158,21 @@ def main():
     parser.add_argument('baseline', type=Path, help='verified older release artifacts, including decompressed rootfs.ext4')
     parser.add_argument('candidate', type=Path, help='newly built candidate artifacts')
     parser.add_argument('work', type=Path, help='new directory for the disposable disk and logs; must not exist')
+    parser.add_argument('--disk-mode', choices=('qcow2', 'raw'), default='qcow2',
+                        help='writable backing overlay by default; raw preserves the older copy mode')
+    parser.add_argument('--candidate-compat-revision', type=int, default=None,
+                        help='expected candidate guest revision; defaults to the current source patch revision')
     parser.add_argument('--timeout', type=int, default=1800, help='seconds per boot')
     args = parser.parse_args()
     if not os.access('/dev/kvm', os.R_OK | os.W_OK):
         parser.error('accessible /dev/kvm is required')
+    revision = args.candidate_compat_revision if args.candidate_compat_revision is not None else source_compat_revision()
+    if not 1 <= revision <= 999999:
+        parser.error('candidate compatibility revision is invalid')
     baseline, candidate, work = (p.resolve() for p in (args.baseline, args.candidate, args.work))
+    if (baseline == candidate or work.is_relative_to(baseline) or work.is_relative_to(candidate)
+            or baseline.is_relative_to(work) or candidate.is_relative_to(work)):
+        parser.error('baseline, candidate, and disposable work directory must be separate')
     for directory in (baseline, candidate):
         # Only the baseline factory is copied. Candidate boots reuse that disk.
         required = ('vmlinuz-linux', 'initramfs-linux.img', 'build-spec.json')
@@ -118,16 +189,20 @@ def main():
     environment = {'BASELINE_RUNTIME': runtime(specs[0]), 'CANDIDATE_RUNTIME': runtime(specs[1]),
                    'CANDIDATE_VERSION': specs[1]['upstream']['version']}
     work.mkdir(parents=True, exist_ok=False)
-    disk = work / 'persistent.ext4'
-    subprocess.run(['cp', '--reflink=auto', '--sparse=always', str(baseline / 'rootfs.ext4'), str(disk)], check=True)
-    with disk.open('r+b') as stream:
-        stream.truncate(max(disk.stat().st_size, 24 * 1024**3))
-    for artifacts, phase, name in (
-        (baseline, 'seed', '01-seed'), (candidate, 'upgrade', '02-upgrade'),
-        (candidate, 'reboot', '03-reboot'), (baseline, 'reboot', '04-old-image'),
-        (candidate, 'reboot', '05-return-to-candidate'),
-    ):
-        boot(artifacts, disk, phase, work / f'{name}.log', environment, args.timeout)
+    baseline_disk = baseline / 'rootfs.ext4'
+    baseline_digest = sha256(baseline_disk)
+    try:
+        disk, disk_format = create_disk(baseline_disk, work, args.disk_mode)
+        for artifacts, phase, name in (
+            (baseline, 'seed', '01-seed'), (candidate, 'upgrade', '02-upgrade'),
+            (candidate, 'reboot', '03-reboot'), (baseline, 'reboot', '04-backward-image'),
+            (candidate, 'reboot', '05-return-to-candidate'),
+        ):
+            checks = candidate_checks(revision) if artifacts == candidate else ''
+            boot(artifacts, disk, disk_format, phase, work / f'{name}.log', environment, args.timeout, checks)
+    finally:
+        if sha256(baseline_disk) != baseline_digest:
+            raise RuntimeError('verified baseline factory disk changed during upgrade smoke')
     print(f'Upgrade and preservation checks passed. Evidence: {work}')
 
 

@@ -60,7 +60,10 @@ Primary references: [Windows window positioning](https://learn.microsoft.com/en-
 The opt-in host controller, guest GTK layout proxies, mode negotiation, and
 Super-key routing are implemented. Guest compatibility revision 34 packages the
 base helpers and revision 35 adds optional floating-window occlusion support.
-Native mode rejects the old frame and application-input endpoints.
+Older guests retain capture on a newer native-configured host until a guest
+submits its first valid native layout. Activation waits for any in-flight
+capture/input request; afterward the old frame and application-input endpoints
+are rejected for the rest of that boot. Mode discovery alone never switches it.
 Normal typing and clicks go to the actual Windows window. Omarchy Super-key
 chords use a separate ordered QMP transport that releases possibly held keys
 after a connection failure or queue overflow.
@@ -105,7 +108,10 @@ or integrated desktop result is inferred from that attempt. See the
 
 CI now builds and boots a fresh image when a pull request or push changes guest
 patches or image test/build inputs. The existing manual image-build input is
-retained. This adds an automatic future-update check; old-disk upgrade, rollback,
+retained. [CI #20](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36263005169)
+built and booted revision 35 with native helpers and a clean package database.
+The next workflow revision adds an automatic old-disk upgrade and preservation
+test plus a packaged-source parity check. Its first result is pending. Rollback
 and physical Windows acceptance remain separate gates.
 
 ## Acceptance before replacing the installed app

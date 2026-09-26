@@ -210,10 +210,73 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+  guest-upgrade:
+    name: Verify existing guest before publishing
+    if: inputs.phase == 'publish'
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 190
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate pinned release and obtain upgrade inputs
+        run: |
+          python3 scripts/release/validate-pin.py --require-independent-key "$RELEASE_TAG"
+          prepared=$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish)
+          [[ "$prepared" =~ ^[0-9a-f]{40}$ ]]
+          # Committing the manifest pin after preparation is expected. Changes
+          # to image or runtime inputs require a newly prepared candidate.
+          git diff --exit-code "$prepared" "$GITHUB_SHA" -- \
+            guest-build scripts/windows-apps runtime-build \
+            scripts/release/build-guest.sh scripts/release/prepare-assets.sh \
+            .github/workflows/release.yml
+          gh release download "$RELEASE_TAG" --dir guest-upgrade-input \
+            --pattern SHA256SUMS --pattern build-spec.json \
+            --pattern vmlinuz-linux --pattern initramfs-linux.img
+
+      - name: Prepare upgrade runner
+        run: |
+          test "$(readlink -f "$RUNNER_TOOL_CACHE")" = /opt/hostedtoolcache
+          sudo rm -rf -- /opt/hostedtoolcache
+          test "$(df --output=avail -B1G "$RUNNER_TEMP" | tail -1)" -ge 20
+          test -e /dev/kvm
+          sudo chmod 666 /dev/kvm
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends qemu-system-x86 qemu-utils zstd
+
+      - name: Authenticate baseline and pinned candidate
+        run: |
+          digest=$(sha256sum "app/testdata/SHA256SUMS.$RELEASE_TAG" | cut -d' ' -f1)
+          python3 scripts/release/prepare-guest-upgrade.py \
+            guest-upgrade-input "$RUNNER_TEMP/guest-upgrade-baseline" \
+            --candidate-manifest-sha256 "$digest"
+
+      - name: Upgrade older disk and verify preservation across boots
+        run: |
+          python3 scripts/release/smoke-guest-upgrade.py \
+            "$RUNNER_TEMP/guest-upgrade-baseline" guest-upgrade-input \
+            "$RUNNER_TEMP/guest-upgrade-evidence" --disk-mode qcow2
+
+      - name: Retain upgrade logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-guest-upgrade-evidence
+          path: ${{ runner.temp }}/guest-upgrade-evidence/*.log
+          retention-days: 14
+          if-no-files-found: warn
+
   publish:
     name: Sign and publish
     if: inputs.phase == 'publish'
-    needs: guard
+    needs: [guard, guest-upgrade]
     runs-on: windows-2025
     timeout-minutes: 45
     environment: release

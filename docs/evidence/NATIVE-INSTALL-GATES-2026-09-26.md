@@ -17,7 +17,7 @@ were changed for this audit.
 - The release helper checks out the exact guest source commit in
   `guest-build/source.lock.json`, applies every numbered patch, runs guest
   contract tests, builds the full image, and boots a disposable KVM desktop
-  during the opt-in CI image job. The CI job retains a candidate artifact for
+  during the automatic CI image job. The CI job retains a candidate artifact for
   seven days; that artifact is not a signed public release.
 - `scripts/windows-apps/install-in-guest.sh` is a manual development path. It
   copies user scripts and requires one `sudo` transaction for the token unit.
@@ -43,18 +43,20 @@ not a working native tile.
    lease expiry. Compare frame time, image quality, CPU load, and input latency
    against the same standalone Windows workload. Source and unit tests alone
    cannot establish the requested behavior.
-2. **Version 35 image and old-disk upgrade.** Push the intended source commit,
-   retain the automatic image-build run for that exact commit, preserve its digest and
-   smoke logs, then run `smoke-guest-upgrade.py` from an authenticated revision
-   33 baseline to revision 35 on a disposable disk. Check native files and
+2. **Version 35 image and old-disk upgrade.** The image build and automated
+   desktop boot passed in CI #20 below. The new automatic upgrade gate uses the
+   authenticated public `v0.0.20-preview` actual-user baseline and a disposable
+   QCOW2 overlay. It is awaiting its first CI result. Check native files and
    service, user-file hashes, edited system configuration, installed packages,
-   old-image boot, return to candidate, and repeated update. The current
+   backward-image boot, return to candidate, and repeated update. The current
    `docs/GUEST-UPGRADES.md` validation predates native revision 34.
 3. **Host/guest compatibility at update boundaries.** `app/manifest.go` still
    defaults to the older `v0.0.20-preview` image; the launcher has no guest
    integration revision in `buildSpec`. A newer native host can therefore be
-   opted in against an older disk. The guest fails closed with an update
-   message, but this is not a managed upgrade experience. Add an authenticated
+   opted in against an older disk. The host now retains capture until the first
+   authenticated valid native layout, with mixed-version and in-flight-input
+   tests. Native activation remains sticky for that boot. This preserves the
+   older guest path but is not a managed upgrade experience. Add an authenticated
    image capability/revision field or a guest-ready capability response, and
    test revision-33 host/guest combinations before enabling native mode by
    default. Keep protocol 1 explicit and reject unknown future protocols until
@@ -114,3 +116,24 @@ The separate release workflow requires the default branch, a new tag, a
 protected release environment, an independent signing key, and publication
 checks. Its source comments still flag the inherited development update key;
 publishing a signed one-app release remains a separate gate.
+
+## Revision 35 full-image evidence
+
+[CI #20](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36263005169)
+completed successfully for published head
+`1f3aad0ebef7caa0776393f71ce0490f42dea4e9` (PR merge checkout
+`e9c3fc96c2bdda881ba2728c52f202ea7ebd6350`). All source jobs passed, and the
+locked image built and booted under Linux KVM. Serial facts confirm revision
+35, native helper imports, one Hyprland output, a visible file-transfer window,
+matching kernel modules, and a clean/unlocked package database.
+
+Artifact `guest-candidate`, ID `10912418718`, has archive SHA256
+`72fe9b0df39f7b7a977eb3fda822b1dcc5bfe34f93dfa6a45184c14e9c87c82c`.
+It expires October 3, 2026. This artifact digest identifies the CI archive,
+not the internal release manifest. This is fresh-image evidence, not physical
+Windows interaction, native app performance, or old-disk upgrade proof.
+
+The next CI revision adds a packaged-source parity check, an automatic
+older-install upgrade test with authenticated inputs, and a required upgrade
+job before release publication. Those new checks remain pending until their
+own exact-source run succeeds.
