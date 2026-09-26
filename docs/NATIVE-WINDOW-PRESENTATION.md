@@ -68,9 +68,19 @@ Normal typing and clicks go to the actual Windows window. Omarchy Super-key
 chords use a separate ordered QMP transport that releases possibly held keys
 after a connection failure or queue overflow.
 
-Twenty-four guest helper tests pass, including the copies embedded in the
-revision-35 patched source. Four image-smoke helper tests and three offline
-performance-analyzer tests pass locally.
+Revision 37 adds workspace inheritance for new granted fullscreen windows in
+the same application group. The guest waits for a confirmed workspace move
+before requesting fullscreen. A failed move leaves the window windowed and
+reports the failure. The host keeps fullscreen intent separate from its own
+placement geometry, so a monitor-sized Omarchy tile does not itself request
+app fullscreen. Geometry-only detection cannot identify a mode change that
+leaves the window bounds unchanged. Newly created app/game windows still need
+a host grant; an app group does not authorize another Windows process.
+
+Guest helper regression tests also run against the copies embedded in the
+patched source. Fresh-image and existing-disk probes check the installed
+workspace helper. These checks cover selection, bounded placement state, and
+fullscreen metadata; they do not establish compositor focus or game behavior.
 The full native Windows Go suite passes, the Windows launcher builds, and its
 static analysis passes. Automated checks
 cover bounds, host grants, hidden-window retention, layout acknowledgements,
@@ -112,6 +122,10 @@ retained. [CI #20](https://github.com/z4mbo/Omarchy-Windows/actions/runs/3626300
 built and booted revision 35 with native helpers and a clean package database.
 CI #21 passed packaged-source parity and fresh-image validation, then its new
 old-disk test caught a [kernel-header ownership conflict](evidence/UPGRADE-COMPATIBILITY-2026-09-26.md).
+[CI #22](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36265114340)
+passed the revision-36 repair, fresh desktop boot, and all five old-disk phases.
+Results for the newer revision-37 candidate are recorded in
+[PR #1](https://github.com/z4mbo/Omarchy-Windows/pull/1).
 Rollback and physical Windows acceptance remain separate gates.
 
 ## Acceptance before replacing the installed app

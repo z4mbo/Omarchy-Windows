@@ -53,6 +53,49 @@ func TestTrayReconciliationRetainsHiddenNativeGrant(t *testing.T) {
 	}
 }
 
+func TestNativeFullscreenIntentIgnoresProjectorGeometry(t *testing.T) {
+	projected := seamlessRect{100, 200, 900, 700}
+	fullscreen := seamlessRect{0, 0, 2560, 1440}
+	state := &nativeProjectedWindow{fullscreenIntent: true, lastRect: projected, applied: true}
+	if got := nativeResolvedFullscreen(state, projected, true, true, false); !got {
+		t.Fatal("projector resize cleared the app's fullscreen intent")
+	}
+	state.fullscreenIntent = false
+	state.lastRect = fullscreen
+	if got := nativeResolvedFullscreen(state, fullscreen, true, true, true); got {
+		t.Fatal("projector-owned monitor geometry invented app fullscreen")
+	}
+	state.lastRect = projected
+	if got := nativeResolvedFullscreen(state, fullscreen, false, true, true); got {
+		t.Fatal("hiding the projected window changed fullscreen intent")
+	}
+	if got := nativeResolvedFullscreen(state, fullscreen, true, false, true); got {
+		t.Fatal("unmeasured app geometry changed fullscreen intent")
+	}
+	state.uncertainMutation = true
+	if got := nativeResolvedFullscreen(state, fullscreen, true, true, true); got {
+		t.Fatal("uncertain projector mutation was classified as app fullscreen")
+	}
+}
+
+func TestNativeFullscreenIntentAcceptsIndependentAppResize(t *testing.T) {
+	projected := seamlessRect{100, 200, 900, 700}
+	fullscreen := seamlessRect{0, 0, 2560, 1440}
+	state := &nativeProjectedWindow{lastRect: projected, applied: true}
+	if got := nativeResolvedFullscreen(state, fullscreen, true, true, true); !got {
+		t.Fatal("independent app fullscreen transition was missed")
+	}
+	state.fullscreenIntent = true
+	state.lastRect = fullscreen
+	if got := nativeResolvedFullscreen(state, projected, true, true, false); got {
+		t.Fatal("independent app return to windowed geometry was missed")
+	}
+	state.applied = false // Snapshot exists but the first projection has not run.
+	if got := nativeResolvedFullscreen(state, projected, true, true, false); got {
+		t.Fatal("app resize before first projection was missed")
+	}
+}
+
 func TestNativeLayoutRejectsUnboundedOrAmbiguousRects(t *testing.T) {
 	if err := validateNativeLayout(nativeTestLayout()); err != nil {
 		t.Fatal(err)

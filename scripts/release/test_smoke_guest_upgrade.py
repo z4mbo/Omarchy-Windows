@@ -105,6 +105,28 @@ class UpgradeHarnessTests(unittest.TestCase):
             layout.write_text('def occlusion_limit(document):\n    return 0\n')
             self.assertNotEqual(subprocess.run(['bash', '-c', checks], check=False).returncode, 0)
 
+    @unittest.skipUnless(os.name == 'posix' and shutil.which('bash'), 'guest shell requires Linux')
+    def test_revision37_upgrade_probe_requires_fullscreen_workspace_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            native = root / 'omarchy-windows-native'
+            native.write_text('#!/usr/bin/env python3\nimport omarchy_windows_native_layout\n')
+            native.chmod(0o755)
+            layout = root / 'omarchy_windows_native_layout.py'
+            layout.write_text('def occlusion_limit(document): return 16\n'
+                              'def marker_for(ident): return " [proxy]"\n'
+                              'def inherited_workspace(group, known, clients, pid, history):\n'
+                              '    return clients[0]["workspace"]["id"] if group in known.values() else None\n')
+            compat = root / 'compat-version'
+            kernel = subprocess.check_output(['uname', '-r'], text=True).strip()
+            compat.write_text(f'37:{kernel}\n')
+            checks = upgrade.candidate_checks(37, str(compat), str(root))
+            self.assertEqual(subprocess.run(['bash', '-c', checks], check=False).returncode, 0)
+            layout.write_text('def occlusion_limit(document): return 16\n'
+                              'def marker_for(ident): return " [proxy]"\n'
+                              'def inherited_workspace(group, known, clients, pid, history): return None\n')
+            self.assertNotEqual(subprocess.run(['bash', '-c', checks], check=False).returncode, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

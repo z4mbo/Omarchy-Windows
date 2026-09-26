@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,35 @@ class ParseFactsTests(unittest.TestCase):
 
 
 class NativeGuestFactsTests(unittest.TestCase):
+    def test_revision37_fullscreen_probe_detects_wrong_workspace_inheritance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            helper = target / "omarchy_windows_native_layout.py"
+            helper.write_text("def marker_for(ident): return ' [proxy]'\n"
+                              "def inherited_workspace(group, known, clients, pid, history):\n"
+                              "    return clients[0]['workspace']['id'] if group in known.values() else None\n")
+            facts, expected = {}, {}
+            smoke_guest.add_native_guest_facts(37, facts, expected, target)
+            command = facts["windows-apps-fullscreen-workspace"]
+            self.assertEqual(expected["windows-apps-fullscreen-workspace"], "yes")
+            code = shlex.split(command.split("python3 -c ", 1)[1].split(" && echo", 1)[0])[0]
+            environment = dict(os.environ, PYTHONPATH=str(target), PYTHONDONTWRITEBYTECODE="1")
+            self.assertEqual(subprocess.run([sys.executable, "-c", code], env=environment,
+                                            capture_output=True, check=False).returncode, 0)
+            if os.name == "posix" and shutil.which("bash"):
+                self.assertEqual(subprocess.run(["bash", "-c", command], capture_output=True,
+                                                text=True, check=True).stdout.strip(), "yes")
+            helper.write_text("def marker_for(ident): return ' [proxy]'\n"
+                              "def inherited_workspace(group, known, clients, pid, history): return None\n")
+            self.assertNotEqual(subprocess.run([sys.executable, "-c", code], env=environment,
+                                               capture_output=True, check=False).returncode, 0)
+            if os.name == "posix" and shutil.which("bash"):
+                self.assertEqual(subprocess.run(["bash", "-c", command], capture_output=True,
+                                                text=True, check=True).stdout.strip(), "no")
+            older, older_expected = {}, {}
+            smoke_guest.add_native_guest_facts(36, older, older_expected, target)
+            self.assertNotIn("windows-apps-fullscreen-workspace", older)
+
     def test_current_native_revision_probe_imports_packaged_native_script(self) -> None:
         revision = smoke_guest.guest_compat_revision()
         self.assertGreaterEqual(revision, 34)

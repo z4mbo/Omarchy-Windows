@@ -83,7 +83,18 @@ Windows VM tests unless noted in the release checklist):
   launcher commits a guest-image update. Its explicit integration revision is
   bumped whenever those files must be reapplied without a kernel version change
 
-Patch 0087 bumps the integration revision to 35. It adds optional, negotiated
+Patch 0089 bumps the integration revision to 37. New granted fullscreen Windows
+windows inherit their application group's last verified Omarchy workspace.
+The guest confirms placement before fullscreen and reports bounded placement
+failures. The helper and regression tests are included in the image and in
+existing-disk integration updates. Physical game transitions remain unverified.
+
+Patch 0088 bumped the integration revision to 36. It excludes header-owned
+vDSO objects from the module overlay and repairs authenticated, unowned copies
+left on older disks. Its five-boot upgrade test passed; see
+[the upgrade evidence](../docs/evidence/UPGRADE-COMPATIBILITY-2026-09-26.md).
+
+Patch 0087 bumped the integration revision to 35. It adds optional, negotiated
 clipping for floating Linux windows that overlap a native Windows tile. Older
 hosts retain the previous layout format; uncertain stacking hides the native
 windows with an explanation. Launcher layers and child popups still need a

@@ -348,6 +348,9 @@ func (b *seamlessWindowBridge) catalogue() []seamlessWindow {
 	}
 	items := b.backend.windows()
 	windows := b.sharedWindows(items, time.Now())
+	if b.projection != nil {
+		b.projection.StabilizeFullscreen(windows)
+	}
 	for i := range windows {
 		windows[i].ID = b.windowID(windows[i])
 	}

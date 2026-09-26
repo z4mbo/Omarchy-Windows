@@ -18,7 +18,7 @@ import threading
 import time
 import urllib.error
 
-from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked
+from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked, proxy_location
 from omarchy_windows_protocol import Bridge, BridgeError, load_token
 
 POLL_SECONDS = 0.4
@@ -90,9 +90,10 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
         return 1
 
     class NativeWindow:
-        def __init__(self, controller: "Controller", metadata: dict):
+        def __init__(self, controller: "Controller", metadata: dict, workspace: int | None):
             self.controller = controller
             self.ident = metadata["id"]
+            self.metadata = metadata
             self.window = Gtk.ApplicationWindow(application=controller)
             self.window.set_title((metadata["title"] or metadata["process"] or "Windows app") + marker_for(self.ident))
             self.window.set_default_size(min(metadata["width"], 1100), min(metadata["height"], 750))
@@ -101,12 +102,35 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
             self.window.set_child(label)
             self.close_handler = self.window.connect("close-request", self.close)
             self.fullscreen = False
-            self.window.present()
+            self.retiring = False
+            self.workspace_target = workspace
+            self.retry_on_fullscreen = False
+            self.move = WorkspaceMove(workspace)
+            if self.move.target is not None:
+                # Mapping is needed before Hyprland supplies an address. Do not
+                # explicitly activate the new proxy on the current workspace.
+                self.window.set_visible(True)
+            else:
+                self.window.present()
             self.update(metadata)
+            if self.move.target is not None:
+                self.move.source_id = GLib.timeout_add(150, self.move_to_inherited_workspace)
 
         def update(self, metadata: dict) -> None:
+            self.metadata = metadata
             self.window.set_title((metadata["title"] or metadata["process"] or "Windows app") + marker_for(self.ident))
             wanted = metadata["fullscreen"] is True
+            if not wanted and (self.move.target is not None or self.move.failed):
+                self.move.cancel(GLib.source_remove)
+                self.retry_on_fullscreen = self.workspace_target is not None
+            if wanted and self.retry_on_fullscreen:
+                # A later app-driven fullscreen transition gets a fresh,
+                # bounded placement attempt after a canceled or failed move.
+                self.move = WorkspaceMove(self.workspace_target)
+                self.retry_on_fullscreen = False
+                self.move.source_id = GLib.timeout_add(150, self.move_to_inherited_workspace)
+            if wanted and not self.move.can_fullscreen():
+                return  # Only fullscreen after Hyprland confirms the move.
             if wanted != self.fullscreen:
                 self.fullscreen = wanted
                 if wanted:
@@ -114,11 +138,42 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
                 else:
                     self.window.unfullscreen()
 
+        def move_to_inherited_workspace(self) -> bool:
+            if self.retiring or self.move.target is None:
+                return False
+            target = self.move.target
+            try:
+                location = proxy_location(self.ident, hyprctl_json("clients"), os.getpid())
+            except LayoutError:
+                location = None
+            if location is not None and location[0] == target:
+                self.move.complete()
+                self.update(self.metadata)
+                return False
+            if location is not None:
+                try:
+                    subprocess.run(
+                        ["hyprctl", "dispatch", "movetoworkspacesilent",
+                         f"{target},address:{location[1]}"],
+                        capture_output=True, timeout=HYPRCTL_TIMEOUT, check=True)
+                except (OSError, subprocess.SubprocessError):
+                    pass  # Retry only while the bounded move is pending.
+            if self.move.retry():
+                return True
+            self.move.fail()
+            self.controller.warn_workspace(
+                "Could not move the Windows game to its client workspace. It remains windowed on the current workspace.")
+            return False
+
         def close(self, *_args: object) -> bool:
+            self.retiring = True
+            self.move.cancel(GLib.source_remove)
             self.controller.dismiss(self.ident)
             return False
 
         def retire(self) -> None:
+            self.retiring = True
+            self.move.cancel(GLib.source_remove)
             self.window.disconnect(self.close_handler)
             self.window.close()
 
@@ -132,6 +187,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
             self.dismissed: set[str] = set()
             self.pending_close: dict[str, tuple[int, float]] = {}
             self.views: dict[str, NativeWindow] = {}
+            self.workspace_history: dict[str, int] = {}
             self.last_output: dict | None = None
             self.last_catalog: list[dict] = []
             self.sequence = 0
@@ -139,6 +195,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
             self.status = None
             self.status_label = None
             self.error = ""
+            self.workspace_warning = ""
 
         def do_activate(self):
             if self.worker is not None:
@@ -170,7 +227,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
         def update_status(self) -> None:
             if self.status is None:
                 return
-            message = self.error or ("No native Windows app windows are open. Close this controller or open an app on Windows."
+            message = self.error or self.workspace_warning or ("No native Windows app windows are open. Close this controller or open an app on Windows."
                                      if not self.views else "")
             if message:
                 if self.status_label.get_text() != message:
@@ -181,9 +238,15 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
             elif self.status.get_visible():
                 self.status.hide()
 
-        def apply_catalog(self, catalog: list[dict]) -> bool:
+        def apply_catalog(self, catalog: list[dict], clients: list[dict]) -> bool:
             with self.state_lock:
                 dismissed = set(self.dismissed)
+            known = {ident: view.metadata["appGroup"] for ident, view in self.views.items()
+                     if view.move.can_fullscreen() and not view.retiring}
+            for group in set(known.values()):
+                observed = inherited_workspace(group, known, clients, os.getpid(), {})
+                if observed is not None:
+                    self.workspace_history[group] = observed
             live = {item["id"] for item in catalog}
             for ident in list(self.views):
                 if ident not in live:
@@ -195,7 +258,10 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
                 if ident in self.views:
                     self.views[ident].update(metadata)
                 else:
-                    self.views[ident] = NativeWindow(self, metadata)
+                    workspace = (inherited_workspace(metadata["appGroup"], known, clients,
+                                                     os.getpid(), self.workspace_history)
+                                 if metadata["fullscreen"] else None)
+                    self.views[ident] = NativeWindow(self, metadata, workspace)
             self.update_status()
             return False
 
@@ -203,6 +269,13 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
             self.error = message
             self.update_status()
             return False
+
+        def warn_workspace(self, message: str) -> None:
+            self.workspace_warning = message
+            if self.status is not None:
+                self.status_label.set_text(message)
+                # Report the failed placement without an explicit focus request.
+                self.status.set_visible(True)
 
         def clear_error(self) -> bool:
             self.error = ""
@@ -258,13 +331,15 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
                             dismissed = set(self.dismissed)
                         catalog = [item for item in catalog if item["id"] not in dismissed]
                         self.last_catalog = catalog
-                        GLib.idle_add(self.apply_catalog, catalog)
                         monitors = hyprctl_json("monitors")
                         output, _monitor = output_state(monitors)
                         self.last_output = output
                         layout_error = False
                         try:
                             clients = hyprctl_json("clients")
+                            if not isinstance(clients, list):
+                                raise LayoutError("Hyprland returned an invalid client list.")
+                            GLib.idle_add(self.apply_catalog, catalog, clients)
                             locked = parse_locked(hyprctl_json("locked"))
                             layout = compute_layout(catalog, clients, monitors, locked, os.getpid(),
                                                     max_occlusions=self.max_occlusions)

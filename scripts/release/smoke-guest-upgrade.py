@@ -16,15 +16,20 @@ import time
 FIXTURES = Path(__file__).resolve().parent / 'guest-upgrade'
 
 
-def source_compat_revision():
-    """Use the same source revision expectation as the fresh-image smoke."""
+def source_smoke_guest():
+    """Share the fresh-image revision and native behavior probe."""
     path = Path(__file__).with_name('smoke-guest.py')
     spec = importlib.util.spec_from_file_location('smoke_guest', path)
     if spec is None or spec.loader is None:
         raise RuntimeError('cannot load guest smoke revision')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.guest_compat_revision()
+    return module
+
+
+def source_compat_revision():
+    """Use the same source revision expectation as the fresh-image smoke."""
+    return source_smoke_guest().guest_compat_revision()
 
 
 def candidate_checks(revision, compat_path='/usr/share/try-omarchy/compat-version',
@@ -43,6 +48,8 @@ def candidate_checks(revision, compat_path='/usr/share/try-omarchy/compat-versio
                  '"coordinates":"tile"}}}) == 16')
         checks.append(f'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={shlex.quote(bin_dir)} '
                       f'python3 -c {shlex.quote(probe)}')
+    if revision >= 37:
+        checks.append(source_smoke_guest().native_fullscreen_workspace_probe(bin_dir))
     return ' && '.join(checks)
 
 

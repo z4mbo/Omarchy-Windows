@@ -137,6 +137,25 @@ def add_native_guest_facts(revision: int, facts: dict[str, str], expected: dict[
         f"python3 {native} --help >/dev/null 2>&1 && echo yes || echo no"
     )
     expected["windows-apps-native"] = "yes"
+    if revision >= 37:
+        facts["windows-apps-fullscreen-workspace"] = (
+            f"{native_fullscreen_workspace_probe(bin_dir)} && echo yes || echo no"
+        )
+        expected["windows-apps-fullscreen-workspace"] = "yes"
+
+
+def native_fullscreen_workspace_probe(bin_dir: Path | str = Path("/usr/local/bin")) -> str:
+    """Exercise revision 37's client-workspace inheritance without a display."""
+    code = (
+        "from omarchy_windows_native_layout import inherited_workspace, marker_for; "
+        "ident='a'*32; pid=4607; "
+        "clients=[{'pid':pid,'title':'Game'+marker_for(ident),'mapped':True,'address':'0x123',"
+        "'workspace':{'id':3}}]; known={ident:'league'}; "
+        "assert inherited_workspace('league',known,clients,pid,{}) == 3; "
+        "assert inherited_workspace('other',known,clients,pid,{}) is None"
+    )
+    return (f"PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={shlex.quote(str(bin_dir))} "
+            f"python3 -c {shlex.quote(code)}")
 
 
 def main() -> None:

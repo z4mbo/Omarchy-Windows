@@ -102,6 +102,7 @@ type nativeForegroundWindow struct {
 
 type nativeProjectedWindow struct {
 	window            seamlessWindow
+	fullscreenIntent  bool // App state, independent of projector-issued window geometry.
 	created           uint64
 	original          windowPlacementStruct
 	originalVisible   bool
@@ -297,10 +298,66 @@ func (p *nativeProjection) HiddenWindows(visible []seamlessWindow) []seamlessWin
 			continue
 		}
 		if shown, _, _ := procIsWindowVisible.Call(key.handle); shown == 0 {
-			hidden = append(hidden, state.window)
+			window := state.window
+			window.Fullscreen = state.fullscreenIntent
+			hidden = append(hidden, window)
 		}
 	}
 	return hidden
+}
+
+// EnumWindows runs before the projection lock and can report our own resize as
+// an app fullscreen transition. Read current geometry under the lock instead:
+// only a visible rectangle changed independently of our last mutation can
+// refresh the app's fullscreen intent. The caller must hold nativeDPIEnter
+// across enumeration and this method so both rectangles use physical pixels.
+func (p *nativeProjection) StabilizeFullscreen(windows []seamlessWindow) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range windows {
+		state := p.tracked[seamlessKey(windows[i])]
+		if state == nil || !nativeIdentityMatches(state) {
+			continue
+		}
+		if !state.pendingRestore {
+			var current seamlessRect
+			if ok, _, _ := seamlessGetRect.Call(state.window.handle, uintptr(unsafe.Pointer(&current))); ok != 0 {
+				shown, _, _ := procIsWindowVisible.Call(state.window.handle)
+				nativeObserveFullscreen(state, current, shown != 0)
+			}
+		}
+		windows[i].Fullscreen = state.fullscreenIntent
+	}
+}
+
+func nativeIndependentFullscreenChange(state *nativeProjectedWindow, current seamlessRect, shown bool) bool {
+	return !state.uncertainMutation && shown && current != state.lastRect
+}
+
+func nativeResolvedFullscreen(state *nativeProjectedWindow, current seamlessRect, shown, measured, coversMonitor bool) bool {
+	if nativeIndependentFullscreenChange(state, current, shown) && measured {
+		return coversMonitor
+	}
+	return state.fullscreenIntent
+}
+
+func nativeObserveFullscreen(state *nativeProjectedWindow, current seamlessRect, shown bool) {
+	if !nativeIndependentFullscreenChange(state, current, shown) {
+		return
+	}
+	var visible seamlessRect
+	measured := seamlessVisibleRect(state.window.handle, &visible)
+	covers := false
+	if measured {
+		covers = seamlessCoversMonitor(state.window.handle, visible)
+		var verified seamlessRect
+		visibleNow, _, _ := procIsWindowVisible.Call(state.window.handle)
+		if ok, _, _ := seamlessGetRect.Call(state.window.handle, uintptr(unsafe.Pointer(&verified))); ok == 0 ||
+			verified != current || visibleNow == 0 {
+			measured = false // The app moved while we sampled its bounds.
+		}
+	}
+	state.fullscreenIntent = nativeResolvedFullscreen(state, current, shown, measured, covers)
 }
 
 func nativeProcessCreated(pid uint32) (uint64, error) {
@@ -367,7 +424,13 @@ func nativeSnapshot(w seamlessWindow) (*nativeProjectedWindow, error) {
 		return nil, errors.New("cannot read window rectangle")
 	}
 	shown, _, _ := procIsWindowVisible.Call(w.handle)
-	return &nativeProjectedWindow{window: w, created: created, original: placement,
+	if shown != 0 {
+		var visible seamlessRect
+		if seamlessVisibleRect(w.handle, &visible) {
+			w.Fullscreen = seamlessCoversMonitor(w.handle, visible)
+		}
+	}
+	return &nativeProjectedWindow{window: w, fullscreenIntent: w.Fullscreen, created: created, original: placement,
 		originalVisible: shown != 0, restorePlacement: placement, restoreVisible: shown != 0,
 		lastRect: rect, lastVisible: shown != 0}, nil
 }
@@ -923,6 +986,7 @@ func (p *nativeProjection) placeLocked(state *nativeProjectedWindow, tile native
 		return errors.New("window rectangle unavailable")
 	}
 	shown, _, _ := procIsWindowVisible.Call(state.window.handle)
+	nativeObserveFullscreen(state, current, shown != 0)
 	if state.applied {
 		changed := current != state.lastRect || (shown != 0) != state.lastVisible
 		if state.requestedShown == tile.Visible && (!tile.Visible || state.requestedRect == rect) {

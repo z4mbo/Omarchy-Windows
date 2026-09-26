@@ -25,6 +25,85 @@ def marker_for(ident: str) -> str:
     return f" [Omarchy Native {hashlib.sha256(ident.encode('ascii')).hexdigest()[:16]}]"
 
 
+def proxy_location(ident: str, clients: object, pid: int) -> tuple[int, str] | None:
+    """Locate exactly one of our mapped proxies on an ordinary workspace."""
+    marker = marker_for(ident)
+    if not isinstance(clients, list) or not _integer(pid) or pid <= 0:
+        return None
+    matches = [client for client in clients if isinstance(client, dict)
+               and client.get("pid") == pid and isinstance(client.get("title"), str)
+               and client["title"].endswith(marker)]
+    if len(matches) != 1:
+        return None
+    client = matches[0]
+    address, workspace = client.get("address"), client.get("workspace")
+    if (client.get("mapped") is not True or not isinstance(address, str)
+            or not re.fullmatch(r"0x[0-9a-fA-F]+", address)
+            or not isinstance(workspace, dict) or not _integer(workspace.get("id"))
+            or workspace["id"] <= 0):
+        return None
+    return workspace["id"], address
+
+
+def inherited_workspace(group: str, known: dict[str, str], clients: object,
+                        pid: int, history: dict[str, int]) -> int | None:
+    """Prefer the one current group workspace, then its last verified workspace."""
+    observed = set()
+    if not isinstance(clients, list):
+        return None
+    for ident, existing_group in known.items():
+        if existing_group != group:
+            continue
+        marker = marker_for(ident)
+        matches = [client for client in clients if isinstance(client, dict)
+                   and client.get("pid") == pid and isinstance(client.get("title"), str)
+                   and client["title"].endswith(marker)]
+        if len(matches) > 1:
+            return None
+        if matches:
+            location = proxy_location(ident, clients, pid)
+            if location is None:
+                return None
+            observed.add(location[0])
+    if len(observed) > 1:
+        return None
+    if observed:
+        return observed.pop()
+    previous = history.get(group)
+    return previous if _integer(previous) and previous > 0 else None
+
+
+class WorkspaceMove:
+    """Track one bounded move and allow retirement to cancel its timer."""
+
+    def __init__(self, target: int | None):
+        self.target = target
+        self.attempts = 0
+        self.source_id = 0
+        self.failed = False
+
+    def retry(self) -> bool:
+        self.attempts += 1
+        return self.attempts < 12
+
+    def can_fullscreen(self) -> bool:
+        return self.target is None and not self.failed
+
+    def complete(self) -> None:
+        self.target = None
+        self.source_id = 0
+
+    def fail(self) -> None:
+        self.complete()
+        self.failed = True
+
+    def cancel(self, remove_source) -> None:
+        if self.source_id:
+            remove_source(self.source_id)
+        self.complete()
+        self.failed = False
+
+
 def parse_presentation(document: object) -> None:
     if not isinstance(document, dict) or type(document.get("protocol")) is not int or document["protocol"] != 1:
         raise LayoutError("The host does not support native window protocol 1.")

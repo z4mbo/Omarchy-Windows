@@ -1,15 +1,19 @@
 """Recorded Hyprland client shape and native projection safety cases."""
 
 import copy
+import os
 from pathlib import Path
+import runpy
 import sys
+import types
 import unittest
+from unittest import mock
 
 script_dir = Path(__file__).resolve().parent
 helper_dir = script_dir if (script_dir / "omarchy_windows_native_layout.py").exists() else script_dir.parent / "factory-overlay/usr/local/bin"
 sys.path.insert(0, str(helper_dir))
 
-from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation
+from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation, proxy_location
 
 WINDOW_ID = "a" * 32
 PID = 4607
@@ -35,6 +39,164 @@ def state():
 
 
 class NativeLayoutTest(unittest.TestCase):
+    def test_gtk_proxy_waits_for_verified_workspace_before_fullscreen(self):
+        controllers = []
+        removed_sources = []
+
+        class FakeApplication:
+            def __init__(self, **_kwargs):
+                pass
+
+            def run(self, _args):
+                controllers.append(self)
+                return 0
+
+        class FakeWindow:
+            def __init__(self, **_kwargs):
+                self.fullscreen_calls = 0
+                self.present_calls = 0
+                self.visible = False
+
+            def set_title(self, _title):
+                pass
+
+            def set_default_size(self, _width, _height):
+                pass
+
+            def set_child(self, _child):
+                pass
+
+            def connect(self, *_args):
+                return 1
+
+            def disconnect(self, _handler):
+                pass
+
+            def set_visible(self, value):
+                self.visible = value
+
+            def present(self):
+                self.present_calls += 1
+
+            def fullscreen(self):
+                self.fullscreen_calls += 1
+
+            def unfullscreen(self):
+                pass
+
+            def close(self):
+                pass
+
+        class FakeLabel:
+            def __init__(self, **_kwargs):
+                pass
+
+            def set_wrap(self, _value):
+                pass
+
+        gi = types.ModuleType("gi")
+        gi.require_version = lambda *_args: None
+        repository = types.ModuleType("gi.repository")
+        repository.Gio = types.SimpleNamespace(ApplicationFlags=types.SimpleNamespace(NON_UNIQUE=1))
+        repository.GLib = types.SimpleNamespace(timeout_add=lambda _delay, _callback: 73,
+                                                source_remove=removed_sources.append)
+        repository.Gtk = types.SimpleNamespace(Application=FakeApplication,
+                                               ApplicationWindow=FakeWindow, Label=FakeLabel)
+        gi.repository = repository
+        fcntl = types.ModuleType("fcntl")
+        with mock.patch.dict(sys.modules, {"gi": gi, "gi.repository": repository, "fcntl": fcntl}):
+            script = runpy.run_path(str(helper_dir / "omarchy-windows-native"), run_name="native_test")
+            fd = os.open(os.devnull, os.O_RDONLY)
+            self.assertEqual(script["start_gtk"](object(), fd, 0), 0)
+            controller = controllers[0]
+            controller.workspace_history["league"] = 3
+            game_id = "b" * 32
+            game = {"id": game_id, "title": "League game", "process": "League.exe",
+                    "appGroup": "league", "width": 1280, "height": 720, "fullscreen": True}
+            controller.apply_catalog([game], [])
+            view = controller.views[game_id]
+            self.assertTrue(view.window.visible)
+            self.assertEqual(view.window.present_calls, 0)
+            self.assertEqual(view.window.fullscreen_calls, 0)
+            # A repeated catalog update must not bypass the pending move.
+            view.update(game)
+            self.assertEqual(view.window.fullscreen_calls, 0)
+            location = {"pid": os.getpid(), "title": "League game" + marker_for(game_id),
+                        "address": "0x1234", "mapped": True, "workspace": {"id": 1, "name": "1"}}
+            view.move_to_inherited_workspace.__func__.__globals__["hyprctl_json"] = lambda _command: [location]
+            with mock.patch.object(script["subprocess"], "run") as dispatch:
+                self.assertTrue(view.move_to_inherited_workspace())
+                self.assertEqual(dispatch.call_args.args[0], [
+                    "hyprctl", "dispatch", "movetoworkspacesilent", "3,address:0x1234"])
+            self.assertEqual(view.window.fullscreen_calls, 0)
+            location["workspace"] = {"id": 3, "name": "3"}
+            self.assertFalse(view.move_to_inherited_workspace())
+            self.assertEqual(view.window.fullscreen_calls, 1)
+
+            # If placement times out, later metadata updates must not fullscreen
+            # on the wrong workspace. Retiring another pending view removes its timer.
+            failed_id = "c" * 32
+            failed = {**game, "id": failed_id}
+            controller.apply_catalog([game, failed], [])
+            failed_view = controller.views[failed_id]
+            failed_view.move_to_inherited_workspace.__func__.__globals__["hyprctl_json"] = lambda _command: []
+            for _ in range(12):
+                failed_view.move_to_inherited_workspace()
+            failed_view.update(failed)
+            self.assertEqual(failed_view.window.fullscreen_calls, 0)
+            failed_view.update({**failed, "fullscreen": False})
+            self.assertTrue(failed_view.retry_on_fullscreen)
+            failed_view.update(failed)
+            self.assertIsNotNone(failed_view.move.target)
+            self.assertEqual(failed_view.window.fullscreen_calls, 0)
+            recovered = {**location, "title": "League game" + marker_for(failed_id)}
+            failed_view.move_to_inherited_workspace.__func__.__globals__["hyprctl_json"] = lambda _command: [recovered]
+            self.assertFalse(failed_view.move_to_inherited_workspace())
+            self.assertEqual(failed_view.window.fullscreen_calls, 1)
+            retiring_id = "d" * 32
+            controller.apply_catalog([game, failed, {**game, "id": retiring_id}], [])
+            controller.views[retiring_id].retire()
+            self.assertIn(73, removed_sources)
+
+    def test_new_fullscreen_game_inherits_client_workspace(self):
+        _, clients, _ = state()
+        clients[0]["address"] = "0x563190857090"
+        clients[0]["workspace"] = {"id": 4, "name": "4"}
+        known = {WINDOW_ID: "league"}
+        self.assertEqual(proxy_location(WINDOW_ID, clients, PID), (4, "0x563190857090"))
+        self.assertEqual(inherited_workspace("league", known, clients, PID, {}), 4)
+        self.assertIsNone(inherited_workspace("explorer", known, clients, PID, {}))
+
+    def test_gone_client_uses_history_but_ambiguous_proxy_is_rejected(self):
+        _, clients, _ = state()
+        clients[0]["address"] = "0x563190857090"
+        history = {"league": 3}
+        known = {WINDOW_ID: "league"}
+        self.assertEqual(inherited_workspace("league", known, [], PID, history), 3)
+        self.assertIsNone(inherited_workspace("league", known, clients, PID + 1, {}))
+        self.assertIsNone(inherited_workspace("league", known, clients * 2, PID, history))
+        clients[0]["mapped"] = False
+        self.assertIsNone(proxy_location(WINDOW_ID, clients, PID))
+        self.assertIsNone(inherited_workspace("league", known, clients, PID, history))
+
+    def test_workspace_move_blocks_fullscreen_until_verified_and_cancels_timer(self):
+        move = WorkspaceMove(3)
+        move.source_id = 72
+        self.assertFalse(move.can_fullscreen())
+        self.assertEqual([move.retry() for _ in range(12)], [True] * 11 + [False])
+        move.fail()
+        self.assertFalse(move.can_fullscreen())
+        self.assertIsNone(move.target)
+        retired = WorkspaceMove(3)
+        retired.source_id = 73
+        removed = []
+        retired.cancel(removed.append)
+        self.assertEqual(removed, [73])
+        self.assertIsNone(retired.target)
+        verified = WorkspaceMove(3)
+        verified.complete()
+        self.assertTrue(verified.can_fullscreen())
+
     def test_mapped_client_uses_output_relative_rect(self):
         windows, clients, monitors = state()
         monitors[0]["x"] = 100
