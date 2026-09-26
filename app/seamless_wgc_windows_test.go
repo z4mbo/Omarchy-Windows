@@ -54,18 +54,45 @@ func TestSeamlessWGCOptInDefaultsOff(t *testing.T) {
 	}
 }
 
+func TestSeamlessWGCFramesFallBackWhilePreparingOrBusy(t *testing.T) {
+	c := &seamlessWGCClient{}
+	c.prewarming.Store(true)
+	start := time.Now()
+	if _, err := c.capture(seamlessWindow{}); err == nil {
+		t.Fatal("capture did not fall back during helper preparation")
+	}
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatal("capture waited for helper preparation")
+	}
+	c.prewarming.Store(false)
+	c.mu.Lock()
+	start = time.Now()
+	if _, err := c.capture(seamlessWindow{}); err == nil {
+		t.Fatal("capture did not fall back while another frame was in progress")
+	}
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatal("capture waited for the busy helper")
+	}
+	c.mu.Unlock()
+}
+
 // Opt-in integration check: compile the embedded helper, load WinRT, and
 // shut down without capturing a user window or changing the display.
 func TestSeamlessWGCHelperLifecycle(t *testing.T) {
 	if os.Getenv("OMARCHY_TEST_WGC_HELPER") != "1" {
 		t.Skip("set OMARCHY_TEST_WGC_HELPER=1 for a local Windows WGC runtime check")
 	}
-	seamlessWGC.mu.Lock()
-	err := seamlessWGC.startLocked()
-	seamlessWGC.mu.Unlock()
+	t.Setenv(seamlessWGCEnv, "1")
+	prewarmSeamlessWGC()
+	deadline := time.Now().Add(40 * time.Second)
+	for seamlessWGC.prewarming.Load() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
 	defer stopSeamlessWGC()
-	if err != nil {
-		t.Fatal(err)
+	seamlessWGC.mu.Lock()
+	defer seamlessWGC.mu.Unlock()
+	if seamlessWGC.prewarming.Load() || seamlessWGC.disabled || seamlessWGC.cmd == nil {
+		t.Fatal("WGC helper did not finish prewarming")
 	}
 }
 

@@ -91,6 +91,16 @@ on the NVMe drive; its sparse Linux disk has a 200 GiB virtual capacity.
   showed the Omarchy desktop filling the monitor. This verifies the primary
   monitor on this installed PC; mixed-refresh secondary outputs remain a
   documented limitation.
+- With opt-in Windows Graphics Capture enabled, a guest launch granted a new
+  Character Map window. The first authenticated frame request timed out at
+  six seconds while the helper was starting; a later request returned a
+  487×435 PNG in under a second. After the launcher prewarm change, a cold
+  reboot and fresh Character Map launch returned the first frame in 4.2
+  seconds through `PrintWindow` fallback (491×437), then a 487×435 WGC
+  frame in 0.44 seconds. The presenter appeared as a non-floating Hyprland
+  client on workspace 1. The guest was locked during screenshot inspection,
+  so this test verifies frame transport and window creation, not a visual
+  usability or input pass.
 - A temporary Windows Forms app opened a borderless 2560x1440 host window. The
   bridge identified it as fullscreen and the guest presenter filled the
   2560x1417 Omarchy output in a compositor screenshot. The test app closed

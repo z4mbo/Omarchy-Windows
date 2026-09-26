@@ -41,8 +41,9 @@ that wrong character. See the
 
 The default capture uses Windows `PrintWindow` and a PNG-over-HTTP transport.
 An opt-in Windows Graphics Capture prototype (`OMARCHY_SEAMLESS_WGC=1`) captured
-one Character Map window on the test host and falls back to `PrintWindow` if
-it cannot capture a window. The PNG transport remains preview speed and has
+one Character Map window through the guest bridge on the test host. It starts
+the helper in the background and falls back to `PrintWindow` while capture
+warms up or fails. The PNG transport remains preview speed and has
 not been tested with a live game. Some apps ignore posted input, and the bridge does not
 move focus to a host window or resize it: the host app and Omarchy share one
 Windows desktop, so either action can cover or unfocus Omarchy. A Windows

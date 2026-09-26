@@ -144,6 +144,7 @@ func runSeamlessWindowBridge() (string, func(), error) {
 		IdleTimeout:       15 * time.Second,
 		MaxHeaderBytes:    4096,
 	}
+	prewarmSeamlessWGC()
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logf("seamless Windows bridge stopped: %v", err)

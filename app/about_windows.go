@@ -33,7 +33,7 @@ func runAbout() {
 	if msgBox("Update available: "+manifest.Version+"\nInstalled: "+currentVersion+"\n\nOpen the release notes and download page? Close Omarchy before opening the new launcher.", mbYesNo|mbIconQuestion) != idYes {
 		return
 	}
-	openWindowsURL("https://github.com/omacom/try-omarchy-windows/releases/tag/" + manifest.Version)
+	openWindowsURL("https://github.com/z4mbo/Omarchy-Windows/releases/tag/" + manifest.Version)
 }
 func openWindowsURL(url string) {
 	cmd := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", url)

@@ -55,6 +55,9 @@ func main() {
 	if *version == "" || *release == "" || *launcher == "" || !validSHA256(*manifestSHA) {
 		fatalf("version, release, launcher, and a valid manifest-sha256 are required")
 	}
+	if !validForkRelease(*version, *release) {
+		fatalf("update release must be this fork's tagged GitHub release")
+	}
 	launcherData, err := os.ReadFile(*launcher)
 	if err != nil {
 		fatalf("read launcher: %v", err)
@@ -115,6 +118,11 @@ func validSHA256(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+func validForkRelease(version, release string) bool {
+	return regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview)?$`).MatchString(version) &&
+		release == "https://github.com/z4mbo/Omarchy-Windows/releases/download/"+version
 }
 
 func fatalf(format string, values ...any) {

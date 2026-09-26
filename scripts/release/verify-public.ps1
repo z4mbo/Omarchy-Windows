@@ -1,8 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$Tag,
     [switch]$Latest,
-    [ValidateSet('omacom/try-omarchy-windows', 'tsouth89/try-omarchy-windows')]
-    [string]$Repository = 'omacom/try-omarchy-windows',
+    [ValidateSet('z4mbo/Omarchy-Windows', 'omacom/try-omarchy-windows', 'tsouth89/try-omarchy-windows')]
+    [string]$Repository = 'z4mbo/Omarchy-Windows',
     [ValidateRange(1, 18)][int]$Attempts = 18,
     [ValidateRange(0, 60)][int]$RetryDelaySeconds = 10
 )

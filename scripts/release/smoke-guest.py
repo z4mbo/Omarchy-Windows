@@ -99,6 +99,9 @@ EXPECTED_FACTS = {
     "complete-modules": "yes",
 }
 
+# This is a public, disposable smoke-test value, never a production bridge token.
+WINDOWS_APPS_TEST_TOKEN = "a1" * 32
+
 
 def parse_facts(transcript: bytes) -> dict[str, str]:
     """Return the last real value printed for each smoke fact.
@@ -164,6 +167,25 @@ def main() -> None:
         EXPECTED_FACTS["nvim-theme-user"] = "yes"
         FACT_CHECKS["omarchy-nvim-files"] = "sudo pacman -Qk omarchy-nvim >/dev/null 2>&1 && echo yes || echo no"
         EXPECTED_FACTS["omarchy-nvim-files"] = "yes"
+    if args.compat_revision >= 32:
+        FACT_CHECKS["windows-apps-menu"] = (
+            "test -x /usr/local/bin/omarchy-windows-app && "
+            "test -x /usr/local/bin/omarchy-windows-open && "
+            "test -x /usr/local/bin/omarchy-windows-present && "
+            "test -x /usr/local/bin/omarchy-windows-desktop && "
+            "for entry in /usr/share/applications/omarchy-windows-*.desktop; do "
+            "desktop-file-validate \"$entry\" >/dev/null 2>&1 || exit 1; "
+            "done && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-apps-menu"] = "yes"
+        FACT_CHECKS["windows-apps-token-service"] = "systemctl is-enabled try-omarchy-seamless-token.service 2>/dev/null || true"
+        EXPECTED_FACTS["windows-apps-token-service"] = "enabled"
+        FACT_CHECKS["windows-apps-token"] = (
+            f"test \"$(cat /run/try-omarchy/seamless-token 2>/dev/null)\" = {WINDOWS_APPS_TEST_TOKEN} && "
+            "test \"$(stat -c %U:%G:%a /run/try-omarchy/seamless-token 2>/dev/null)\" = root:video:640 && "
+            "test -r /run/try-omarchy/seamless-token && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-apps-token"] = "yes"
 
     login_delay = args.login_delay if args.login_delay is not None else (60 if args.accel == "tcg" else 0)
     if login_delay < 0:
@@ -301,6 +323,8 @@ print('yes')
         device = {"driver": "virtio-gpu-pci", "max_outputs": args.displays,
                   "outputs": [{"name": f"Omarchy {index + 1}", "xres": 1280, "yres": 720} for index in range(args.displays)]}
         command.extend(["-device", json.dumps(device)])
+    if args.compat_revision >= 32:
+        command.extend(["-fw_cfg", "name=opt/omarchy/seamless-token,string=" + WINDOWS_APPS_TEST_TOKEN])
 
     process = subprocess.Popen(
         command,

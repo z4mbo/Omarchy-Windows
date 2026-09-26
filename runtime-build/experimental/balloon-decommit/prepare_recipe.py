@@ -11,7 +11,10 @@ from pathlib import Path
 
 
 EXPERIMENTAL_NAME = "winq-emu-alpha10-balloon-experimental"
-PATCH_NAME = "0013-windows-recommit-discarded-anonymous-ram.patch"
+PATCHES = (
+    ("0001-windows-recommit-discarded-anonymous-ram.patch", "0013-windows-recommit-discarded-anonymous-ram.patch"),
+    ("0002-report-balloon-reclaim-state.patch", "0014-report-balloon-reclaim-state.patch"),
+)
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
@@ -23,22 +26,22 @@ def replace_once(path: Path, old: str, new: str) -> None:
 
 def prepare(destination: Path) -> None:
     source = Path(__file__).resolve().parents[2]
-    patch = Path(__file__).with_name("0001-windows-recommit-discarded-anonymous-ram.patch")
     if destination.exists():
         raise ValueError(f"destination already exists: {destination}")
     shutil.copytree(source, destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
-    copied_patch = destination / "patches" / "qemu" / PATCH_NAME
-    shutil.copyfile(patch, copied_patch)
     lock_path = destination / "sources.lock.json"
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     lock["name"] = EXPERIMENTAL_NAME
-    lock["qemu"]["patches"].append(
-        {
-            "file": f"patches/qemu/{PATCH_NAME}",
-            "sha256": hashlib.sha256(copied_patch.read_bytes()).hexdigest(),
-        }
-    )
+    for source_name, destination_name in PATCHES:
+        copied_patch = destination / "patches" / "qemu" / destination_name
+        shutil.copyfile(Path(__file__).with_name(source_name), copied_patch)
+        lock["qemu"]["patches"].append(
+            {
+                "file": f"patches/qemu/{destination_name}",
+                "sha256": hashlib.sha256(copied_patch.read_bytes()).hexdigest(),
+            }
+        )
     lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8", newline="\n")
 
     for name in ("build.sh", "verify.py"):

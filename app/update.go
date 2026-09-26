@@ -17,16 +17,16 @@ import (
 
 const (
 	currentVersion         = "v0.0.20-preview"
-	defaultUpdateURL       = "https://github.com/omacom/try-omarchy-windows/releases/latest/download/update-v2.json"
+	defaultUpdateURL       = "https://github.com/z4mbo/Omarchy-Windows/releases/latest/download/update-v2.json"
+	forkReleaseBase        = "https://github.com/z4mbo/Omarchy-Windows/releases/download/"
 	legacyReleaseBase      = "https://github.com/tsouth89/try-omarchy-windows/releases/download/"
 	transferredReleaseBase = "https://github.com/omacom/try-omarchy-windows/releases/download/"
 	officialReleaseBase    = "https://github.com/omacom/omarchy-win/releases/download/"
 	maxUpdateManifestLen   = 64 << 10
 	maxUpdateSignatureLen  = 4 << 10
-	// Rotating the private half requires shipping a launcher that trusts both
-	// the old and new keys before publishing manifests signed only by the new
-	// key. The release workflow keeps the private key in the protected release
-	// environment.
+	// Replace this inherited development key with this fork's public key before
+	// its first release. The private key belongs only in the protected release
+	// environment; release validation rejects the inherited key.
 	updatePublicKeyHex = "f1edc8c2fc8fc8a7a108832eb93a9d9f2f8c07c5547fc4e4cb805c3b1615c9cd"
 )
 
@@ -101,8 +101,7 @@ func validateUpdateManifest(manifest *updateManifest) error {
 		return fmt.Errorf("invalid update version %q", manifest.Version)
 	}
 	release := normalizedRelease(manifest.Release)
-	if release != legacyReleaseBase+manifest.Version && release != transferredReleaseBase+manifest.Version &&
-		release != officialReleaseBase+manifest.Version {
+	if release != forkReleaseBase+manifest.Version {
 		return fmt.Errorf("update release URL does not match version")
 	}
 	if !validSHA256(manifest.ManifestSHA256) || !validSHA256(manifest.Launcher.SHA256) {

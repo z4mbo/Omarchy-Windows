@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"encoding/binary"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -28,11 +30,13 @@ var seamlessWGCSources embed.FS
 
 const seamlessWGCEnv = "OMARCHY_SEAMLESS_WGC"
 const seamlessWGCMaximumBytes = 60_000_000
+const seamlessWGCFrameTimeout = 4 * time.Second
 
 var seamlessWGC = &seamlessWGCClient{}
 
 type seamlessWGCClient struct {
 	mu         sync.Mutex
+	prewarming atomic.Bool
 	disabled   bool
 	workDir    string
 	helperPath string
@@ -56,6 +60,23 @@ func seamlessWGCFrame(window seamlessWindow) ([]byte, error) {
 	return seamlessWGC.capture(window)
 }
 
+// Prepare the optional helper before the guest can request its first frame.
+// While it compiles and starts, frame requests use the PrintWindow fallback.
+func prewarmSeamlessWGC() {
+	if !seamlessWGCRequested() || !seamlessWGC.prewarming.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer seamlessWGC.prewarming.Store(false)
+		seamlessWGC.mu.Lock()
+		defer seamlessWGC.mu.Unlock()
+		if err := seamlessWGC.startLocked(); err != nil {
+			seamlessWGC.disabled = true
+			logf("optional Windows Graphics Capture unavailable: %v", err)
+		}
+	}()
+}
+
 func stopSeamlessWGC() {
 	seamlessWGC.mu.Lock()
 	defer seamlessWGC.mu.Unlock()
@@ -71,7 +92,9 @@ func stopSeamlessWGC() {
 }
 
 func (c *seamlessWGCClient) capture(window seamlessWindow) ([]byte, error) {
-	c.mu.Lock()
+	if c.prewarming.Load() || !c.mu.TryLock() {
+		return nil, errSeamlessCapture
+	}
 	defer c.mu.Unlock()
 	if c.disabled {
 		return nil, errSeamlessCapture
@@ -125,7 +148,7 @@ func (c *seamlessWGCClient) capture(window seamlessWindow) ([]byte, error) {
 			return nil, errSeamlessCapture
 		}
 		return seamlessWSD1ToPNG(captured.frame)
-	case <-time.After(6 * time.Second):
+	case <-time.After(seamlessWGCFrameTimeout):
 		c.stopLocked()
 		return nil, errSeamlessCapture
 	}
@@ -244,9 +267,14 @@ func (c *seamlessWGCClient) compileLocked() error {
 		args = append(args, "/r:"+ref)
 	}
 	args = append(args, sources...)
-	build := exec.Command(compiler, args...)
+	buildContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	build := exec.CommandContext(buildContext, compiler, args...)
 	build.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := build.CombinedOutput(); err != nil {
+		if buildContext.Err() != nil {
+			return fmt.Errorf("compile WGC helper: %w", buildContext.Err())
+		}
 		message := string(output)
 		if len(message) > 512 {
 			message = message[:512]

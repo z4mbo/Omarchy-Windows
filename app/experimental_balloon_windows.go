@@ -69,10 +69,8 @@ func experimentalImagePath(path string) string {
 // launch never invokes it. It requires the exact experimental executable, the
 // live PID of that image, and a private socket named for that PID. The caller
 // must create the socket in the test QEMU invocation; no production control
-// socket is accepted. This verifies the executable but cannot prove that the
-// running process inherited OMARCHY_QEMU_BALLOON_DECOMMIT=1. Do not wire this
-// into the launcher until QEMU reports that backend capability over QMP (or an
-// equally direct attestation is added and tested).
+// socket is accepted. The controller additionally requires the experimental
+// QOM property to report that the running process enabled RAM reclaim.
 func runExperimentalBalloonOnWindows(ctx context.Context, o experimentalBalloonOptions) error {
 	if o.QEMUPID <= 0 || !filepath.IsAbs(o.QEMUPath) ||
 		!strings.EqualFold(filepath.Base(o.QEMUPath), "qemu-system-x86_64w.exe") ||

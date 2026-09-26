@@ -99,11 +99,13 @@ func TestExperimentalBalloonPolicyGrowthNeedsUninterruptedHeadroom(t *testing.T)
 }
 
 type fakeExperimentalBalloonQMP struct {
-	commands       []string
-	actual         int64
-	guestAvailable int64
-	updated        int64
-	target         int64
+	commands          []string
+	actual            int64
+	guestAvailable    int64
+	updated           int64
+	target            int64
+	reclaimActive     bool
+	capabilityMissing bool
 }
 
 func (f *fakeExperimentalBalloonQMP) Call(_ context.Context, command string, args any, result any) error {
@@ -115,7 +117,15 @@ func (f *fakeExperimentalBalloonQMP) Call(_ context.Context, command string, arg
 	case "query-balloon":
 		response = map[string]any{"actual": f.actual}
 	case "qom-get":
-		response = map[string]any{"stats": map[string]int64{"stat-available-memory": f.guestAvailable}, "last-update": f.updated}
+		property := args.(map[string]any)["property"]
+		if property == balloonReclaimCapabilityProperty {
+			if f.capabilityMissing {
+				return fmt.Errorf("PropertyNotFound")
+			}
+			response = f.reclaimActive
+		} else {
+			response = map[string]any{"stats": map[string]int64{"stat-available-memory": f.guestAvailable}, "last-update": f.updated}
+		}
 	case "balloon":
 		arg, ok := args.(map[string]any)
 		if !ok {
@@ -139,7 +149,7 @@ func TestExperimentalBalloonTickUsesQMPAndHostSample(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Unix(4000, 0)
-	qmp := &fakeExperimentalBalloonQMP{actual: 4096 << 20, guestAvailable: 3000 << 20, updated: now.Unix()}
+	qmp := &fakeExperimentalBalloonQMP{actual: 4096 << 20, guestAvailable: 3000 << 20, updated: now.Unix(), reclaimActive: true}
 	c := experimentalBalloonController{policy: policy, qmp: qmp,
 		balloonPath:         "/machine/peripheral/experimental-balloon",
 		measureAvailableMiB: func() (int, error) { return 6000, nil },
@@ -150,8 +160,8 @@ func TestExperimentalBalloonTickUsesQMPAndHostSample(t *testing.T) {
 	if qmp.target != 3072<<20 {
 		t.Fatalf("QMP target = %d, want %d", qmp.target, int64(3072)<<20)
 	}
-	if len(qmp.commands) != 4 || qmp.commands[0] != "query-status" ||
-		qmp.commands[1] != "query-balloon" || qmp.commands[2] != "qom-get" || qmp.commands[3] != "balloon" {
+	if len(qmp.commands) != 5 || qmp.commands[0] != "qom-get" || qmp.commands[1] != "query-status" ||
+		qmp.commands[2] != "query-balloon" || qmp.commands[3] != "qom-get" || qmp.commands[4] != "balloon" {
 		t.Fatalf("QMP sequence = %v", qmp.commands)
 	}
 	qmp.target = 0
@@ -163,5 +173,36 @@ func TestExperimentalBalloonTickUsesQMPAndHostSample(t *testing.T) {
 	}
 	if qmp.target != 0 {
 		t.Fatal("stale guest statistics caused another balloon command")
+	}
+}
+
+func TestExperimentalBalloonCapabilityFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		missing bool
+		invoke  func(*experimentalBalloonController) error
+	}{
+		{"inactive at startup", false, func(c *experimentalBalloonController) error { return c.run(context.Background()) }},
+		{"missing at startup", true, func(c *experimentalBalloonController) error { return c.run(context.Background()) }},
+		{"inactive during tick", false, func(c *experimentalBalloonController) error { return c.tick(context.Background()) }},
+		{"missing during tick", true, func(c *experimentalBalloonController) error { return c.tick(context.Background()) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy, err := newExperimentalBalloonPolicy(4096, 2048, 65536)
+			if err != nil {
+				t.Fatal(err)
+			}
+			qmp := &fakeExperimentalBalloonQMP{reclaimActive: false, capabilityMissing: tc.missing}
+			c := experimentalBalloonController{policy: policy, qmp: qmp,
+				balloonPath:         "/machine/peripheral/experimental-balloon",
+				measureAvailableMiB: func() (int, error) { return 2000, nil },
+				stillRunning:        func() bool { return true }, now: time.Now}
+			if err := tc.invoke(&c); err == nil {
+				t.Fatal("controller accepted inactive reclaim backend")
+			}
+			if len(qmp.commands) != 1 || qmp.commands[0] != "qom-get" || qmp.target != 0 {
+				t.Fatalf("controller sent commands after failed attestation: %v", qmp.commands)
+			}
+		})
 	}
 }

@@ -38,7 +38,7 @@ func signedUpdateServer(t *testing.T, body []byte, mutateSignature bool) (*httpt
 func validUpdateJSON(version string) []byte {
 	return []byte(fmt.Sprintf(`{"schema":1,"version":%q,"release":%q,"manifestSHA256":%q,"launcher":{"name":"TryOmarchy.exe","sha256":%q}}`,
 		version,
-		transferredReleaseBase+version,
+		forkReleaseBase+version,
 		strings.Repeat("a", 64), strings.Repeat("b", 64)))
 }
 
@@ -71,25 +71,16 @@ func TestFetchUpdateManifestRejectsUnexpectedRelease(t *testing.T) {
 	}
 }
 
-func TestValidateUpdateManifestAcceptsOfficialRepository(t *testing.T) {
+func TestValidateUpdateManifestRejectsOtherRepositories(t *testing.T) {
 	var manifest updateManifest
 	if err := json.Unmarshal(validUpdateJSON("v0.0.8-preview"), &manifest); err != nil {
 		t.Fatal(err)
 	}
-	manifest.Release = officialReleaseBase + manifest.Version
-	if err := validateUpdateManifest(&manifest); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestValidateUpdateManifestAcceptsLegacyRepository(t *testing.T) {
-	var manifest updateManifest
-	if err := json.Unmarshal(validUpdateJSON("v0.0.8-preview"), &manifest); err != nil {
-		t.Fatal(err)
-	}
-	manifest.Release = legacyReleaseBase + manifest.Version
-	if err := validateUpdateManifest(&manifest); err != nil {
-		t.Fatal(err)
+	for _, base := range []string{legacyReleaseBase, transferredReleaseBase, officialReleaseBase} {
+		manifest.Release = base + manifest.Version
+		if err := validateUpdateManifest(&manifest); err == nil {
+			t.Fatalf("accepted update release outside the fork: %s", manifest.Release)
+		}
 	}
 }
 

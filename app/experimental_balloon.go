@@ -10,17 +10,18 @@ import (
 // Windows entry point verifies an exact experimental QEMU build before it can
 // be used. QEMU's ordinary Windows runtime cannot reclaim ballooned pages.
 const (
-	balloonSampleInterval    = 5 * time.Second
-	balloonGuestStatsMaxAge  = 20 * time.Second
-	balloonPendingTimeout    = 45 * time.Second
-	balloonGrowStableFor     = 90 * time.Second
-	balloonGrowCooldown      = 120 * time.Second
-	balloonStepMiB           = 256
-	balloonMaxShrinkMiB      = 1024
-	balloonMaxGrowMiB        = 512
-	balloonGuestReserveMiB   = 1536
-	balloonGrowHysteresisMiB = 2048
-	balloonShrinkMarginMiB   = 512
+	balloonReclaimCapabilityProperty = "x-omarchy-balloon-reclaim-active"
+	balloonSampleInterval            = 5 * time.Second
+	balloonGuestStatsMaxAge          = 20 * time.Second
+	balloonPendingTimeout            = 45 * time.Second
+	balloonGrowStableFor             = 90 * time.Second
+	balloonGrowCooldown              = 120 * time.Second
+	balloonStepMiB                   = 256
+	balloonMaxShrinkMiB              = 1024
+	balloonMaxGrowMiB                = 512
+	balloonGuestReserveMiB           = 1536
+	balloonGrowHysteresisMiB         = 2048
+	balloonShrinkMarginMiB           = 512
 )
 
 type experimentalBalloonPolicy struct {
@@ -128,9 +129,25 @@ type experimentalBalloonController struct {
 	now                 func() time.Time
 }
 
+func (c *experimentalBalloonController) ensureReclaimActive(ctx context.Context) error {
+	var active bool
+	if err := c.qmp.Call(ctx, "qom-get", map[string]any{
+		"path": c.balloonPath, "property": balloonReclaimCapabilityProperty,
+	}, &active); err != nil {
+		return fmt.Errorf("experimental QEMU cannot attest RAM reclaim: %w", err)
+	}
+	if !active {
+		return fmt.Errorf("experimental QEMU RAM reclaim is not active")
+	}
+	return nil
+}
+
 func (c *experimentalBalloonController) tick(ctx context.Context) error {
 	if !c.stillRunning() {
 		return fmt.Errorf("experimental QEMU process exited")
+	}
+	if err := c.ensureReclaimActive(ctx); err != nil {
+		return err
 	}
 	var state vmRuntimeStatus
 	if err := c.qmp.Call(ctx, "query-status", nil, &state); err != nil {
@@ -184,6 +201,9 @@ func (c *experimentalBalloonController) run(ctx context.Context) error {
 	if c == nil || c.policy == nil || c.qmp == nil || c.balloonPath == "" ||
 		c.measureAvailableMiB == nil || c.stillRunning == nil || c.now == nil {
 		return fmt.Errorf("experimental balloon controller is incomplete")
+	}
+	if err := c.ensureReclaimActive(ctx); err != nil {
+		return err
 	}
 	if err := c.qmp.Call(ctx, "qom-set", map[string]any{"path": c.balloonPath,
 		"property": "guest-stats-polling-interval", "value": 5}, nil); err != nil {

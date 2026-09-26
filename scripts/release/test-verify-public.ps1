@@ -65,14 +65,14 @@ try {
 
     $global:downloadCase = 'success'
     $global:downloadURLs.Clear()
-    & $verifier -Tag v1.0.0 -Latest -Repository tsouth89/try-omarchy-windows -Attempts 1 -RetryDelaySeconds 0 | Out-Null
+    & $verifier -Tag v1.0.0 -Latest -Attempts 1 -RetryDelaySeconds 0 | Out-Null
     if ($global:downloadURLs.Count -ne 6) { throw 'Latest did not check all launcher and feed assets' }
     foreach ($url in $global:downloadURLs) {
-        if (-not $url.StartsWith('https://github.com/tsouth89/try-omarchy-windows/releases/latest/download/')) {
-            throw "Unexpected legacy Latest URL: $url"
+        if (-not $url.StartsWith('https://github.com/z4mbo/Omarchy-Windows/releases/latest/download/')) {
+            throw "Unexpected fork Latest URL: $url"
         }
     }
-    Write-Output 'ok - legacy Latest feed and launcher URLs'
+    Write-Output 'ok - fork Latest feed and launcher URLs'
 } finally {
     Pop-Location
     $env:RUNNER_TEMP = $previousTemp

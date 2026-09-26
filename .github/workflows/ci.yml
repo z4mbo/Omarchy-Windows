@@ -54,7 +54,7 @@ jobs:
         run: GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-H windowsgui -s -w" -o ../TryOmarchy.exe .
 
       - name: Validate current release pin
-        run: scripts/release/validate-pin.py --require-public "$(sed -n 's/.*releases\/download\/\([^\"]*\).*/\1/p' app/manifest.go)"
+        run: scripts/release/validate-pin.py --require-public --allow-upstream-bootstrap --require-independent-key "$(sed -n 's/.*releases\/download\/\([^\"]*\).*/\1/p' app/manifest.go)"
 
   windows-launcher:
     name: Windows launcher
@@ -109,8 +109,8 @@ jobs:
       - name: Build locked guest image
         run: scripts/release/build-guest.sh --output "$ARTIFACT_DIR"
 
-      - name: Boot the complete guest candidate
-        run: scripts/release/smoke-guest.py "$ARTIFACT_DIR"
+      - name: Boot the complete guest candidate desktop
+        run: scripts/release/smoke-guest.py "$ARTIFACT_DIR" --displays 1
 
       - name: Remove unpacked test input
         run: rm -- "$ARTIFACT_DIR/rootfs.ext4"
