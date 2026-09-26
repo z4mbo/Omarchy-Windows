@@ -20,6 +20,8 @@ Download, boot, Hyprland.
 
 The [revision-36 image passed its build, automated desktop boot, and five older-install upgrade/reboot checks](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36265114340), including preserved test files/settings and an unchanged factory baseline. CI also checks that development helpers match the files packaged into the image. The required upgrade test's [first run caught a kernel-header file conflict](docs/evidence/UPGRADE-COMPATIBILITY-2026-09-26.md), which revision 36 fixes. Newer candidate results are recorded in [PR #1](https://github.com/z4mbo/Omarchy-Windows/pull/1). Physical Windows app/game behavior and recovery from a failed package upgrade remain separate acceptance requirements.
 
+A further [recovery test](docs/GUEST-UPGRADES.md#package-write-interruption-and-offline-recovery) interrupts a real package payload write in a disposable guest and restores an independent stopped-disk backup. CI and release publication require this check. Its results and limits are recorded in PR #1; it does not provide automatic package rollback in the installed Windows app.
+
 This fork builds on [Try Omarchy for Windows](https://github.com/omacom/try-omarchy-windows) by [Omacom](https://github.com/omacom).
 The Omarchy mark in the app icon is sourced from the
 [official Omarchy brand kit](https://omarchy.org/brand/) and remains subject to

@@ -104,7 +104,7 @@ not modify either input image. Network access is required for the normal signed
 Arch repository updates.
 
 The default mode requires `qemu-img`; `--disk-mode raw` retains the earlier
-sparse-copy test path. CI checks at least 20 GiB free on a separate runner before
+sparse-copy test path. CI checks at least 35 GiB free on a separate runner before
 fetching the baseline, after reclaiming that disposable runner's unused language
 tool cache. For manual tests, size the available storage for the
 verified baseline and the changes written during package updates.
@@ -182,3 +182,38 @@ before package writes, the orphaned-lock auto-recovery, and the following normal
 transaction. It does not cover power loss during extraction, a partially
 installed system update, Windows launcher rollback, or the original reporter's
 unknown interruption. Passing it does not establish those other cases.
+
+## Package-write interruption and offline recovery
+
+The separate `smoke-package-write-recovery.py` runner uses the completed,
+stopped upgrade-test disk and the authenticated candidate boot assets. CI and
+release publication require this additional test after the five normal boots:
+
+```sh
+python3 scripts/release/smoke-package-write-recovery.py \
+  /path/to/candidate /path/to/upgrade-evidence/persistent.qcow2 \
+  /path/to/new-package-write-evidence --source-format qcow2
+```
+
+The runner creates a disposable child disk and installs version 1 of a local
+fixture package. After a clean shutdown it creates an independent, flattened
+disk backup and verifies that backup against the stopped source. A separate
+child then upgrades the fixture to version 2. A test-only write interceptor
+allows part of its payload to be written and flushed before stopping pacman.
+The guest checks the stopped process, partial payload and held package lock
+before announcing a unique marker. Only that marker allows the runner to kill
+its own QEMU process abruptly.
+
+The torn disk is inspected separately. Recovery boots a new child of the saved
+backup and checks the original package contents, package database, document and
+configuration hashes. A normal version-2 update and another reboot must then
+succeed. Input disks, their backing files and the backup are checked for
+unexpected changes. Serial logs and the recovery receipt are retained for
+14 days; current run results are recorded in
+[PR #1](https://github.com/z4mbo/Omarchy-Windows/pull/1).
+
+This test exercises an actual package payload write and full-disk recovery on
+Linux KVM. It does not establish recovery from every possible interruption,
+automatic package rollback in the Windows product, or Windows snapshot UI
+behavior. The package fixture and interceptor must only run in the disposable
+test guest. The installed Omarchy disk is not an input to CI.

@@ -7,8 +7,10 @@ import json
 import os
 from pathlib import Path
 import posixpath
+import re
 import selectors
 import shlex
+import signal
 import subprocess
 import time
 
@@ -94,8 +96,31 @@ def qemu_command(artifacts, disk, disk_format):
     ]
 
 
-def boot(artifacts, disk, disk_format, phase, log, environment, timeout, checks=''):
+def completed_cut_line(transcript, scan_from, marker):
+    """Match a whole serial line; terminal echo or partial output is not proof."""
+    while (end := transcript.find(b'\n', scan_from)) != -1:
+        line = bytes(transcript[scan_from:end]).rstrip(b'\r')
+        scan_from = end + 1
+        if line == marker:
+            return True, scan_from
+    return False, scan_from
+
+
+def boot(artifacts, disk, disk_format, phase, log, environment, timeout, checks='',
+         fault_cut_nonce=None, preload_dir=None):
+    if fault_cut_nonce is not None:
+        if not re.fullmatch(r'[0-9a-f]{32}', fault_cut_nonce) or environment.get('PACKAGE_WRITE_NONCE') != fault_cut_nonce:
+            raise ValueError('fault cut requires the same 32-hex nonce in the guest environment')
+        marker = f'PACKAGE_WRITE_CUT_READY:{fault_cut_nonce}'.encode('ascii')
+    else:
+        marker = None
     command = qemu_command(artifacts, disk, disk_format)
+    if preload_dir is not None:
+        preload_dir = Path(preload_dir)
+        if not preload_dir.is_absolute() or not preload_dir.is_dir() or ',' in str(preload_dir):
+            raise ValueError('preload directory must be a real absolute QEMU-safe directory')
+        command += ['-fsdev', f'local,id=preload,path={preload_dir},security_model=none,readonly=on',
+                    '-device', 'virtio-9p-pci,fsdev=preload,mount_tag=preload']
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
@@ -103,6 +128,8 @@ def boot(artifacts, disk, disk_format, phase, log, environment, timeout, checks=
     login = password = -1
     sent = False
     password_at = None
+    scan_from = 0
+    cut_seen = False
     deadline = time.monotonic() + timeout
     try:
         with log.open('wb') as output:
@@ -114,6 +141,21 @@ def boot(artifacts, disk, disk_format, phase, log, environment, timeout, checks=
                     output.write(data)
                     output.flush()
                     transcript.extend(data)
+                    if marker is not None:
+                        found, scan_from = completed_cut_line(transcript, scan_from, marker)
+                        if found:
+                            if not sent:
+                                raise RuntimeError(f'fault cut marker arrived before fixture launch; see {log}')
+                            # The fixture has stopped pacman, verified the
+                            # partial write and synced before this line.
+                            # Crash only the QEMU child opened by this boot.
+                            process.kill()
+                            process.wait(timeout=30)
+                            if process.returncode != -signal.SIGKILL:
+                                raise RuntimeError(f'fault cut did not SIGKILL this QEMU; see {log}')
+                            cut_seen = True
+                        if cut_seen:
+                            break
                     pos = transcript.rfind(b'login:')
                     if not sent and pos > login:
                         process.stdin.write(b'omarchy\n')
@@ -139,7 +181,10 @@ def boot(artifacts, disk, disk_format, phase, log, environment, timeout, checks=
                     break
             else:
                 raise RuntimeError(f'guest test timed out; see {log}')
-        if process.returncode != 0 or f'UPGRADE_RESULT:{phase}:0'.encode() not in transcript:
+        if marker is not None:
+            if not cut_seen:
+                raise RuntimeError(f'fault cut marker was not observed; see {log}')
+        elif process.returncode != 0 or f'UPGRADE_RESULT:{phase}:0'.encode() not in transcript:
             raise RuntimeError(f'guest test failed; see {log}')
     finally:
         selector.close()

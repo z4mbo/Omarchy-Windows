@@ -34,6 +34,110 @@ def write_artifacts(directory: Path, *, baseline: bool) -> None:
 
 
 class UpgradeHarnessTests(unittest.TestCase):
+    def test_fault_cut_kills_only_owned_qemu_after_complete_nonce_line(self) -> None:
+        class Stream:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, data):
+                self.writes.append(data)
+
+            def flush(self):
+                pass
+
+            def fileno(self):
+                return 7
+
+            def close(self):
+                pass
+
+        class Process:
+            def __init__(self):
+                self.stdin = Stream()
+                self.stdout = Stream()
+                self.returncode = None
+                self.kills = 0
+                self.terminates = 0
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                self.kills += 1
+                self.returncode = -upgrade.signal.SIGKILL
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def terminate(self):
+                self.terminates += 1
+                self.returncode = 0
+        class Selector:
+            def register(self, fileobj, events):
+                self.fileobj = fileobj
+
+            def select(self, timeout=None):
+                return [(type('Key', (), {'fileobj': self.fileobj})(), None)]
+
+            def close(self):
+                pass
+        nonce = 'a' * 32
+        chunks = iter((b'login:\n', b'Password:\n', b'booting\n',
+                       b'PACKAGE_WRITE_CUT_READY:' + nonce.encode() + b'\r\n'))
+        proc = Process()
+        clock = iter(range(0, 100, 2))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preload = root / 'preload'
+            preload.mkdir()
+            with (mock.patch.object(upgrade, 'qemu_command', return_value=['qemu-system-x86_64']),
+                  mock.patch.object(upgrade.subprocess, 'Popen', return_value=proc) as popen,
+                  mock.patch.object(upgrade.selectors, 'DefaultSelector', return_value=Selector()),
+                  mock.patch.object(upgrade.os, 'read', side_effect=lambda fd, size: next(chunks)),
+                  mock.patch.object(upgrade.signal, 'SIGKILL', 9, create=True),
+                  mock.patch.object(upgrade.time, 'monotonic', side_effect=lambda: next(clock))):
+                upgrade.boot(root, root / 'fault.qcow2', 'qcow2', 'cut', root / 'cut.log',
+                             {'PACKAGE_WRITE_NONCE': nonce}, 60,
+                             fault_cut_nonce=nonce, preload_dir=preload)
+            self.assertEqual(proc.kills, 1)
+            self.assertEqual(proc.terminates, 0)
+            self.assertTrue(any(b'/mnt/host/cut.sh' in item for item in proc.stdin.writes))
+            self.assertIn('mount_tag=preload', ' '.join(popen.call_args.args[0]))
+
+            premature = Process()
+            early_chunks = iter((b'PACKAGE_WRITE_CUT_READY:' + nonce.encode() + b'\n',))
+            early_clock = iter(range(0, 100, 2))
+            with (mock.patch.object(upgrade, 'qemu_command', return_value=['qemu-system-x86_64']),
+                  mock.patch.object(upgrade.subprocess, 'Popen', return_value=premature),
+                  mock.patch.object(upgrade.selectors, 'DefaultSelector', return_value=Selector()),
+                  mock.patch.object(upgrade.os, 'read', side_effect=lambda fd, size: next(early_chunks)),
+                  mock.patch.object(upgrade.signal, 'SIGKILL', 9, create=True),
+                  mock.patch.object(upgrade.time, 'monotonic', side_effect=lambda: next(early_clock))):
+                with self.assertRaisesRegex(RuntimeError, 'before fixture launch'):
+                    upgrade.boot(root, root / 'fault.qcow2', 'qcow2', 'cut', root / 'early.log',
+                                 {'PACKAGE_WRITE_NONCE': nonce}, 60,
+                                 fault_cut_nonce=nonce, preload_dir=preload)
+            self.assertEqual(premature.kills, 0)
+            self.assertEqual(premature.terminates, 1)
+
+    def test_fault_cut_rejects_embedded_or_wrong_nonce(self) -> None:
+        nonce = 'a' * 32
+        marker = f'PACKAGE_WRITE_CUT_READY:{nonce}'.encode()
+        transcript = bytearray(b'echo PACKAGE_WRITE_CUT_READY:' + nonce.encode() + b'\n')
+        found, cursor = upgrade.completed_cut_line(transcript, 0, marker)
+        self.assertFalse(found)
+        transcript.extend(marker[:-1])
+        found, cursor = upgrade.completed_cut_line(transcript, cursor, marker)
+        self.assertFalse(found)
+        transcript.extend(marker[-1:] + b'\r\n')
+        found, cursor = upgrade.completed_cut_line(transcript, cursor, marker)
+        self.assertTrue(found)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, 'same 32-hex nonce'):
+                upgrade.boot(root, root / 'disk', 'qcow2', 'cut', root / 'cut.log',
+                             {'PACKAGE_WRITE_NONCE': 'b' * 32}, 5, fault_cut_nonce=nonce)
+
     def test_candidate_probe_uses_guest_paths_on_any_host(self) -> None:
         checks = upgrade.candidate_checks(35)
         self.assertIn('test -x /usr/local/bin/omarchy-windows-native', checks)

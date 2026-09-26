@@ -245,11 +245,11 @@ jobs:
         run: |
           test "$(readlink -f "$RUNNER_TOOL_CACHE")" = /opt/hostedtoolcache
           sudo rm -rf -- /opt/hostedtoolcache
-          test "$(df --output=avail -B1G "$RUNNER_TEMP" | tail -1)" -ge 20
+          test "$(df --output=avail -B1G "$RUNNER_TEMP" | tail -1)" -ge 35
           test -e /dev/kvm
           sudo chmod 666 /dev/kvm
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends qemu-system-x86 qemu-utils zstd
+          sudo apt-get install --yes --no-install-recommends qemu-system-x86 qemu-utils zstd gcc libc6-dev
 
       - name: Authenticate baseline and pinned candidate
         run: |
@@ -270,6 +270,23 @@ jobs:
         with:
           name: release-guest-upgrade-evidence
           path: ${{ runner.temp }}/guest-upgrade-evidence/*.log
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Recover from interrupted package writes
+        run: |
+          python3 scripts/release/smoke-package-write-recovery.py \
+            guest-upgrade-input "$RUNNER_TEMP/guest-upgrade-evidence/persistent.qcow2" \
+            "$RUNNER_TEMP/package-write-evidence" --source-format qcow2
+
+      - name: Retain package-write recovery evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-package-write-recovery-evidence
+          path: |
+            ${{ runner.temp }}/package-write-evidence/*.log
+            ${{ runner.temp }}/package-write-evidence/*.json
           retention-days: 14
           if-no-files-found: warn
 
