@@ -149,6 +149,21 @@ on the NVMe drive; its sparse Linux disk has a 200 GiB virtual capacity.
   `launcher-backup-20260926-before-latest`. The existing guest disk and current
   settings were retained. The replacement was not launched for another
   graphical acceptance test after the user stopped Computer Use.
+- After [CI run 36258064922](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36258064922)
+  passed the launcher, native Windows launcher, and full guest contract checks,
+  the adaptive-CPU launcher replaced the installed executable. It was built
+  from local commit `f82b3656a66ef60fed3dfa9076191b984eac9fcd`, whose source tree
+  matches GitHub commit `296d20b2c7ab566659b3e49a00de7032c21a6494`.
+  Installed SHA-256:
+  `51a40cac03d8d5cec4c30be25e3c3cf8f746a3627e6607495ce1537bad76b373`.
+  The previous executable is in
+  `launcher-backup-20260926-before-adaptive-cpu`. The existing guest disk,
+  runtime, and settings were retained; automatic upstream updates were already
+  disabled. The app was not relaunched because desktop control remains stopped
+  pending the user's reply. The revision-33 guest presenter fixes are committed
+  in source and pass contracts; they have not yet been installed and visually
+  retested in this existing guest. This is a launcher replacement, not a fresh
+  one-click installation or a new interactive acceptance pass.
 
 ## Limits of this check
 
