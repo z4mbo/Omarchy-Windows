@@ -4,7 +4,11 @@
 
 The active repository is `z4mbo/Omarchy-Windows`, branch
 `codex/native-windows-apps`, draft [PR #1](https://github.com/z4mbo/Omarchy-Windows/pull/1).
-Read [the fork's requested scope and current blocker](FORK-GOAL-STATUS.md) first.
+Read [the fork's requested scope and current architecture](FORK-GOAL-STATUS.md) first.
+The user subsequently accepted direct native Windows presentation in Omarchy
+tiles and allowed replacement technologies. Follow the
+[native-window plan](NATIVE-WINDOW-PRESENTATION.md); the former capture-only
+blocker does not justify stopping work on this newly accepted design.
 The upstream history below does not describe completion or release of this fork.
 
 ## Upstream history

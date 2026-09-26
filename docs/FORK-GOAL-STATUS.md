@@ -6,6 +6,17 @@ in draft [PR #1](https://github.com/z4mbo/Omarchy-Windows/pull/1). The goal is
 
 ## Accepted requirements
 
+The user restated the target as: **run Omarchy inside Windows with maximum
+performance like a native install, and run native Windows apps inside the
+Omarchy experience at full speed and quality**. Recreating the VM or using
+different technologies is explicitly allowed.
+
+The user then explicitly accepted **Windows drawing each app directly in its
+assigned Omarchy tile**, while Omarchy controls position, workspace, and
+fullscreen behavior. A window remaining technically on the Windows side is
+acceptable. This opens a direct-presentation architecture; the earlier
+capture-only design is no longer the required implementation.
+
 - Windows 11 remains the base operating system.
 - One app named **Omarchy** installs and manages the full experience.
 - Linux applications use the CPU, GPU, RAM, and SSD with native-like capability;
@@ -13,16 +24,35 @@ in draft [PR #1](https://github.com/z4mbo/Omarchy-Windows/pull/1). The goal is
 - Game development, games, 3D modeling, and rendering work in Omarchy.
 - Windows applications appear individually in Hyprland, with tiling, workspaces,
   normal input, and fullscreen games in the launching workspace.
-- **Every Windows surface is required, without exceptions**, including
-  capture-excluded windows, protected content, UAC, and sign-in. The user
-  explicitly rejected allowing these surfaces to remain outside Omarchy.
+- Windows apps keep their native rendering and input path while appearing in
+  Omarchy's layout. Direct Windows presentation is accepted; pixel capture
+  into Linux is not required.
 - Resolution and refresh rate follow the Windows monitor automatically.
 - Replace the old installed app and settings with the completed version, then
   update this repository's README.
 
-## Architectural blocker
+## Current architecture decision
 
-The current architecture runs Windows applications on the host and presents
+Keep the working QEMU Hyprland desktop for now. Prototype a guest layout proxy
+for each granted Windows window and a host controller that places the real
+Windows window in the corresponding tile. Only layout and lifecycle metadata
+cross the boundary. Windows renders the app and receives its ordinary input;
+the native mode must not poll frames or relay application keystrokes.
+
+The first prototype is opt-in and limited to one output. It needs physical
+verification of tiling, native input, workspace visibility, fullscreen, focus,
+popup ownership, DPI, and reliable restoration before installation or default
+use. Native rendering removes the existing PNG-stream bottleneck, but does not
+prove that all apps behave correctly or that performance equals bare metal.
+
+WSL remains the measured candidate for Linux GPU compute and selected graphics
+workloads. Existing Waypipe/CUDA evidence is insufficient to claim an
+interactive, fully accelerated Linux GPU desktop. See the
+[direct-presentation plan](NATIVE-WINDOW-PRESENTATION.md).
+
+## Why the prior capture-only design was blocked
+
+The installed capture architecture runs Windows applications on the host and presents
 their captured windows in Linux. It cannot meet the universal requirement.
 
 Windows applications can request exclusion from supported capture APIs through
@@ -37,9 +67,10 @@ as ordinary application windows. Privileged remoting can support some secure
 desktop transitions, but does not establish the requested universal per-window
 Hyprland behavior. No implementation demonstrating that guarantee is available.
 
-A tested subset or a whole Windows desktop stream would be a different scope.
-Neither has been accepted as satisfying this goal. More tests of ordinary
-applications cannot resolve this architectural blocker.
+The later acceptance of direct native Windows presentation changes this design
+constraint. The project must preserve that distinction and must not describe a
+host-rendered window as pixels rendered by the Linux compositor. Whole-desktop
+streaming remains different from the requested individual-window experience.
 
 ## Work preserved
 

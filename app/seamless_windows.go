@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -30,19 +31,19 @@ var errSeamlessGone = errors.New("window gone")
 
 var activeSeamlessBridge atomic.Pointer[seamlessWindowBridge]
 
-// This is a deliberately small, local-only prototype. Each Windows HWND is
-// enumerated and captured separately so the guest can create one Wayland
-// surface per application window. PrintWindow does not reliably capture GPU
-// applications or exclusive fullscreen games; those need a WGC transport.
-// Input is posted to an HWND without changing the host foreground window.
-// Some applications, especially games, ignore posted messages.
+// This is a deliberately small, local-only prototype. Capture mode gives the
+// guest one Wayland surface per granted Windows HWND. Native mode, explicitly
+// enabled for a boot, places those HWNDs directly over QEMU's client area.
+// Capture/input forwarding is disabled in native mode; no general game or
+// exclusive-fullscreen compatibility is implied.
 type seamlessWindowBridge struct {
-	token   string
-	backend seamlessWindowBackend
-	frames  chan struct{}
-	mu      sync.Mutex
-	grants  map[seamlessWindowKey]string
-	pending []seamlessLaunch
+	token      string
+	backend    seamlessWindowBackend
+	frames     chan struct{}
+	projection *nativeProjection
+	mu         sync.Mutex
+	grants     map[seamlessWindowKey]string
+	pending    []seamlessLaunch
 }
 
 type seamlessWindowKey struct {
@@ -135,6 +136,16 @@ func runSeamlessWindowBridge() (string, func(), error) {
 		return "", nil, fmt.Errorf("protect bearer token: %w", err)
 	}
 	bridge := &seamlessWindowBridge{token: token, backend: nativeSeamlessWindows{}, frames: make(chan struct{}, 2)}
+	if os.Getenv("OMARCHY_WINDOWS_PRESENTATION") == "native" {
+		restore, dpiErr := nativeDPIEnter()
+		if dpiErr != nil {
+			listener.Close()
+			os.Remove(path)
+			return "", nil, dpiErr
+		}
+		restore()
+		bridge.projection = newNativeProjection(bridge)
+	}
 	activeSeamlessBridge.Store(bridge)
 	server := &http.Server{
 		Handler:           bridge,
@@ -144,7 +155,9 @@ func runSeamlessWindowBridge() (string, func(), error) {
 		IdleTimeout:       15 * time.Second,
 		MaxHeaderBytes:    4096,
 	}
-	prewarmSeamlessWGC()
+	if bridge.projection == nil {
+		prewarmSeamlessWGC()
+	}
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logf("seamless Windows bridge stopped: %v", err)
@@ -155,7 +168,11 @@ func runSeamlessWindowBridge() (string, func(), error) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_ = server.Shutdown(ctx)
-		stopSeamlessWGC()
+		if bridge.projection != nil {
+			bridge.projection.Close()
+		} else {
+			stopSeamlessWGC()
+		}
 		_ = os.Remove(path)
 	}, nil
 }
@@ -165,6 +182,42 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	provided, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || subtle.ConstantTimeCompare([]byte(provided), []byte(b.token)) != 1 {
 		seamlessJSONError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if r.URL.Path == "/v1/presentation" && r.Method == http.MethodGet {
+		mode := "capture"
+		if b.projection != nil {
+			mode = "native"
+		}
+		seamlessJSON(w, http.StatusOK, map[string]any{"mode": mode, "protocol": 1})
+		return
+	}
+	if r.URL.Path == "/v1/layout" && r.Method == http.MethodPost {
+		if b.projection == nil {
+			seamlessJSONError(w, http.StatusConflict, "native_presentation_disabled")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		var layout nativeLayout
+		if err := dec.Decode(&layout); err != nil || dec.Decode(new(any)) != io.EOF {
+			seamlessJSONError(w, http.StatusBadRequest, "invalid_layout")
+			return
+		}
+		if err := validateNativeLayout(layout); err != nil {
+			seamlessJSONError(w, http.StatusBadRequest, "invalid_layout")
+			return
+		}
+		suspended, err := b.projection.Apply(layout)
+		if err != nil {
+			seamlessJSONError(w, http.StatusConflict, "layout_unavailable")
+			return
+		}
+		seamlessJSON(w, http.StatusOK, struct {
+			Accepted  bool   `json:"accepted"`
+			Suspended string `json:"suspended,omitempty"`
+		}{Accepted: true, Suspended: suspended})
 		return
 	}
 	if r.URL.Path == "/v1/windows" && r.Method == http.MethodGet {
@@ -198,6 +251,10 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	}
 	switch {
 	case action == "frame" && r.Method == http.MethodGet:
+		if b.projection != nil {
+			seamlessJSONError(w, http.StatusConflict, "native_presentation_active")
+			return
+		}
 		select {
 		case b.frames <- struct{}{}:
 			defer func() { <-b.frames }()
@@ -217,6 +274,10 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(png)
 	case action == "input" && r.Method == http.MethodPost:
+		if b.projection != nil {
+			seamlessJSONError(w, http.StatusConflict, "native_presentation_active")
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 4096)
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
@@ -255,7 +316,15 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 }
 
 func (b *seamlessWindowBridge) catalogue() []seamlessWindow {
-	windows := b.sharedWindows(b.backend.windows(), time.Now())
+	if b.projection != nil {
+		restore, err := nativeDPIEnter()
+		if err != nil {
+			return nil
+		}
+		defer restore()
+	}
+	items := b.backend.windows()
+	windows := b.sharedWindows(items, time.Now())
 	for i := range windows {
 		windows[i].ID = b.windowID(windows[i])
 	}
@@ -294,6 +363,9 @@ func (b *seamlessWindowBridge) revokeWindow(window seamlessWindow) {
 	b.mu.Lock()
 	delete(b.grants, seamlessKey(window))
 	b.mu.Unlock()
+	if b.projection != nil {
+		b.projection.Release(window)
+	}
 }
 
 // Only a window created by the fresh process returned by ShellExecuteEx may
@@ -316,6 +388,12 @@ func (b *seamlessWindowBridge) noteLaunch(pid uint32, before []seamlessWindow, n
 }
 
 func (b *seamlessWindowBridge) sharedWindows(windows []seamlessWindow, now time.Time) []seamlessWindow {
+	// Tray reconciliation also calls sharedWindows directly. Include hidden
+	// projected HWNDs there so changing Omarchy workspace cannot revoke a
+	// still-owned grant just because EnumWindows omits hidden windows.
+	if b.projection != nil {
+		windows = append(windows, b.projection.HiddenWindows(windows)...)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	current := make(map[seamlessWindowKey]string, len(windows))

@@ -53,19 +53,23 @@ def choose_window(windows: list[dict]) -> dict | None:
 
 def main() -> int:
     scripts = Path(__file__).resolve().parent
-    presenter = scripts / "omarchy-windows-present"
     picker = scripts / "omarchy-windows-app"
     if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
         message("Open this from the Omarchy desktop.")
         return 1
-    if not presenter.is_file() or not picker.is_file():
+    if not picker.is_file():
         message("The Windows app integration is incomplete. Update Omarchy.")
         return 1
     try:
         bridge = Bridge(load_token())
+        mode = bridge.presentation_mode()
+        presenter = scripts / ("omarchy-windows-native" if mode == "native" else "omarchy-windows-present")
         before = bridge.windows()
     except BridgeError as exc:
         message(str(exc))
+        return 1
+    if not presenter.is_file():
+        message("The selected Windows app integration is missing. Update the Omarchy guest integration.")
         return 1
     if subprocess.run([str(presenter), "--probe"], check=False).returncode != 0:
         message("The per-window presenter is unavailable. Check GTK4 and the Omarchy Windows launcher.")
@@ -94,13 +98,18 @@ def main() -> int:
             break
         time.sleep(0.3)
 
-    selected = choose_window(new_windows or all_windows)
+    # Native mode uses one controller for the complete granted layout. Starting
+    # separate controllers per app would make them restore each other's windows.
+    selected = (next(iter(new_windows or all_windows), None) if mode == "native"
+                else choose_window(new_windows or all_windows))
     if selected is None:
         message("The app opened on Windows, but no window was selected for the Omarchy preview. Use the host display or try again.")
         return 1
     try:
+        arguments = ([str(presenter)] if mode == "native" else
+                     [str(presenter), "--id", selected["id"], "--group", selected["appGroup"]])
         subprocess.Popen(
-            [str(presenter), "--id", selected["id"], "--group", selected["appGroup"]],
+            arguments,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

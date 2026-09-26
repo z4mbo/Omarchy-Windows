@@ -7,6 +7,8 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 script_dir = Path(__file__).resolve().parent
 protocol_dir = script_dir if (script_dir / "omarchy_windows_protocol.py").exists() else script_dir.parent / "factory-overlay/usr/local/bin"
@@ -48,6 +50,30 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_presentation_mode_requires_supported_explicit_protocol(self):
+        bridge = Bridge(TOKEN)
+        for mode in ("native", "capture"):
+            with patch.object(bridge, "request", return_value=(
+                    '{"mode":"' + mode + '","protocol":1}').encode()):
+                self.assertEqual(bridge.presentation_mode(), mode)
+        for data in (b'{}', b'[]', b'not json', b'{"mode":"native","protocol":true}',
+                     b'{"mode":"native","protocol":2}', b'{"mode":"unknown","protocol":1}'):
+            with self.subTest(data=data), patch.object(bridge, "request", return_value=data):
+                with self.assertRaises(BridgeError):
+                    bridge.presentation_mode()
+
+    def test_only_legacy_not_found_falls_back_to_capture(self):
+        bridge = Bridge(TOKEN)
+        for status in (404, 401, 409, 500):
+            error = BridgeError("host response")
+            error.__cause__ = HTTPError("http://127.0.0.1/v1/presentation", status, "test", {}, None)
+            with self.subTest(status=status), patch.object(bridge, "request", side_effect=error):
+                if status == 404:
+                    self.assertEqual(bridge.presentation_mode(), "capture")
+                else:
+                    with self.assertRaises(BridgeError):
+                        bridge.presentation_mode()
+
     def test_token_must_be_64_hex_digits(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "token"

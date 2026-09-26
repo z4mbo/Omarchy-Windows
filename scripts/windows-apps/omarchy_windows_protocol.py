@@ -111,15 +111,35 @@ class Bridge:
     def window_path(ident: str) -> str:
         return "/v1/windows/" + urllib.parse.quote(ident, safe="")
 
-    def windows(self) -> list[dict]:
+    def windows(self, *, timeout: float = 2) -> list[dict]:
         try:
-            document = json.loads(self.request("/v1/windows"))
+            document = json.loads(self.request("/v1/windows", timeout=timeout))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise BridgeError("The Windows bridge returned invalid window data.") from exc
         raw = document.get("windows") if isinstance(document, dict) else None
         if not isinstance(raw, list) or len(raw) > 64:
             raise BridgeError("The Windows bridge returned an invalid window list.")
         return [validate_window(item) for item in raw]
+
+    def presentation_mode(self) -> str:
+        """Select the host's transport; never silently capture in native mode."""
+        try:
+            document = json.loads(self.request("/v1/presentation"))
+        except BridgeError as exc:
+            # Older launchers predate negotiation and only support capture.
+            # Authentication, transport, and other errors must remain errors.
+            cause = exc.__cause__
+            if isinstance(cause, urllib.error.HTTPError) and cause.code == 404:
+                return "capture"
+            raise
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BridgeError("The Windows bridge returned an invalid presentation mode.") from exc
+        if (not isinstance(document, dict)
+                or type(document.get("protocol")) is not int
+                or document["protocol"] != 1
+                or document.get("mode") not in ("capture", "native")):
+            raise BridgeError("The Windows bridge presentation mode is unsupported. Update the guest integration.")
+        return document["mode"]
 
     def frame(self, ident: str) -> tuple[bytes, tuple[int, int]]:
         image = self.request(self.window_path(ident) + "/frame", limit=MAX_PNG, timeout=6)

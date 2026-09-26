@@ -1,5 +1,15 @@
 # Windows applications as Omarchy windows: architecture and limits
 
+## Current direction: direct native presentation
+
+The user has accepted Windows drawing each real application directly in an
+Omarchy-assigned tile while Hyprland controls its placement and workspace.
+The [native presentation prototype](NATIVE-WINDOW-PRESENTATION.md) therefore
+exchanges layout metadata rather than capturing and relaying application pixels
+and input. This decision changes the earlier requirement that every app surface
+cross into Linux. The capture architecture below remains the installed preview
+and explains the limitations that motivated the new direction.
+
 ## What the feature means
 
 Windows 11 remains the host. A Windows application, including a game, executes

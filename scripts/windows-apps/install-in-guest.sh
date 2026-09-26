@@ -13,9 +13,11 @@ applications_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p -- "$bin_dir" "$applications_dir"
 install -m 0755 -- "$script_dir/omarchy-windows-app" "$bin_dir/omarchy-windows-app"
 install -m 0755 -- "$script_dir/omarchy-windows-present" "$bin_dir/omarchy-windows-present"
+install -m 0755 -- "$script_dir/omarchy-windows-native" "$bin_dir/omarchy-windows-native"
 install -m 0755 -- "$script_dir/omarchy-windows-open" "$bin_dir/omarchy-windows-open"
 install -m 0644 -- "$script_dir/omarchy_windows_protocol.py" "$bin_dir/omarchy_windows_protocol.py"
 install -m 0644 -- "$script_dir/omarchy_windows_presenter_input.py" "$bin_dir/omarchy_windows_presenter_input.py"
+install -m 0644 -- "$script_dir/omarchy_windows_native_layout.py" "$bin_dir/omarchy_windows_native_layout.py"
 
 if ! command -v sudo >/dev/null 2>&1; then
   printf 'The Windows window preview needs sudo once to install its boot-time token service.\n' >&2
@@ -71,11 +73,11 @@ cat > "$applications_dir/omarchy-windows-open.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Windows Apps in Omarchy (Preview)
-Comment=Open a Windows app in a separate Omarchy window when capture supports it
+Comment=Open Windows applications in the Omarchy desktop
 Exec="$bin_dir/omarchy-windows-open"
 Icon=video-display
 Terminal=false
 Categories=System;
 EOF
 
-printf 'Installed Windows host launchers and the per-window preview.\n'
+printf 'Installed Windows app integration for the Omarchy desktop.\n'

@@ -83,7 +83,14 @@ Windows VM tests unless noted in the release checklist):
   launcher commits a guest-image update. Its explicit integration revision is
   bumped whenever those files must be reapplied without a kernel version change
 
-Patch 0085 bumps that integration revision to 33. It embeds the bounded input
+Patch 0086 bumps the integration revision to 34. It adds native Windows layout
+proxies and host presentation-mode negotiation to fresh images and persistent
+guest upgrades. Native mode is an opt-in prototype: Windows renders the actual
+app while Hyprland controls its proxy tile. See the
+[native presentation plan](../docs/NATIVE-WINDOW-PRESENTATION.md) for acceptance
+requirements and current limits.
+
+Patch 0085 bumped the integration revision to 33. It embeds the bounded input
 worker and frame-validity checks for Windows app previews in fresh images and
 copies the helper onto older guest disks during their normal image update.
 
