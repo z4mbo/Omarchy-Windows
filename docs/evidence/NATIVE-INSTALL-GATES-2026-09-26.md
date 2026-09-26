@@ -46,7 +46,8 @@ not a working native tile.
 2. **Version 35 image and old-disk upgrade.** The image build and automated
    desktop boot passed in CI #20 below. The new automatic upgrade gate uses the
    authenticated public `v0.0.20-preview` actual-user baseline and a disposable
-   QCOW2 overlay. It is awaiting its first CI result. Check native files and
+   QCOW2 overlay. Its first run caught the kernel-header conflict recorded in
+   [the upgrade evidence](UPGRADE-COMPATIBILITY-2026-09-26.md). Check native files and
    service, user-file hashes, edited system configuration, installed packages,
    backward-image boot, return to candidate, and repeated update. The current
    `docs/GUEST-UPGRADES.md` validation predates native revision 34.
@@ -133,7 +134,8 @@ It expires October 3, 2026. This artifact digest identifies the CI archive,
 not the internal release manifest. This is fresh-image evidence, not physical
 Windows interaction, native app performance, or old-disk upgrade proof.
 
-The next CI revision adds a packaged-source parity check, an automatic
-older-install upgrade test with authenticated inputs, and a required upgrade
-job before release publication. Those new checks remain pending until their
-own exact-source run succeeds.
+CI #21 added and passed packaged-source parity plus the existing source and
+fresh-image checks. Its new automatic older-install test caught a kernel-header
+conflict before any package was upgraded. The release publication path requires
+this upgrade job to pass. See the [upgrade evidence](UPGRADE-COMPATIBILITY-2026-09-26.md)
+and PR #1 for the correction and subsequent run results.

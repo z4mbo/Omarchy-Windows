@@ -3,6 +3,15 @@ set -euxo pipefail
 systemctl status try-omarchy-update-repository.service --no-pager
 [[ $(pacman -Q try-omarchy-runtime) == "try-omarchy-runtime $BASELINE_RUNTIME" ]]
 sha256sum -c "$HOME/upgrade-preserve.sha256"
+# The legacy module repair distinguishes an unowned file from a failed query.
+# Check that contract against real pacman as well as the mocked shell tests.
+unowned_probe=$(mktemp /tmp/try-omarchy-unowned.XXXXXX)
+if ownership=$(LC_ALL=C pacman -Qqo -- "$unowned_probe" 2>&1); then
+  rm -- "$unowned_probe"
+  exit 1
+fi
+rm -- "$unowned_probe"
+[[ $ownership == "error: No package owns $unowned_probe" ]]
 # Prove the compatibility payload supplied loadable modules before any package
 # update can mask a missing-module regression on the persistent disk.
 sudo modprobe tun

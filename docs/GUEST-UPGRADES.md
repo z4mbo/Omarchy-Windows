@@ -76,7 +76,15 @@ revision, native helper imports, and supported occlusion negotiation. These
 checks matter even when the baseline and candidate Omarchy package version is
 unchanged. Logs are retained for 14 days. A backward-image boot tests the older
 external kernel/initramfs against the upgraded disk; it does not undo installed
-packages or prove package rollback. The first run of this new gate is pending.
+packages or prove package rollback. The first run caught a real
+[kernel-header ownership conflict](evidence/UPGRADE-COMPATIBILITY-2026-09-26.md);
+repeat-test results are recorded in [PR #1](https://github.com/z4mbo/Omarchy-Windows/pull/1).
+
+Integration revision 36 excludes header-owned vDSO files from the module overlay
+and repairs exact unowned copies left by older revisions. Repair checks image
+hashes and ownership before deleting any file, and update-repository readiness
+depends on its success. Changed files and uncertain ownership are preserved for
+diagnosis. See the linked evidence for the original failure and repeat test.
 
 On a Linux machine with KVM, use verified release artifacts and a newly built
 candidate. Decompress the baseline `rootfs.ext4.zst` first. The work directory

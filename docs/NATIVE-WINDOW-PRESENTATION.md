@@ -110,9 +110,9 @@ CI now builds and boots a fresh image when a pull request or push changes guest
 patches or image test/build inputs. The existing manual image-build input is
 retained. [CI #20](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36263005169)
 built and booted revision 35 with native helpers and a clean package database.
-The next workflow revision adds an automatic old-disk upgrade and preservation
-test plus a packaged-source parity check. Its first result is pending. Rollback
-and physical Windows acceptance remain separate gates.
+CI #21 passed packaged-source parity and fresh-image validation, then its new
+old-disk test caught a [kernel-header ownership conflict](evidence/UPGRADE-COMPATIBILITY-2026-09-26.md).
+Rollback and physical Windows acceptance remain separate gates.
 
 ## Acceptance before replacing the installed app
 

@@ -1,0 +1,379 @@
+From 19a4c7d13ac173bbad36f92dff149106d8f927cf Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sat, 26 Sep 2026 21:08:42 +0200
+Subject: [PATCH] Repair legacy VDSO overlay before guest updates
+
+---
+ .../etc/initcpio/install/tryomarchy_compat    |  9 +-
+ .../try-omarchy-update-repository.service     |  3 +-
+ .../usr/local/lib/try-omarchy/catch-up        | 69 +++++++++++++-
+ guest/scripts/finalize-rootfs.sh              | 29 ++++--
+ guest/tests/test_kernel_module_delivery.py    |  7 +-
+ guest/tests/test_overlay_scripts.py           | 93 ++++++++++++++++++-
+ guest/tests/verify.py                         | 15 ++-
+ 7 files changed, 207 insertions(+), 18 deletions(-)
+
+diff --git a/guest/factory-overlay/etc/initcpio/install/tryomarchy_compat b/guest/factory-overlay/etc/initcpio/install/tryomarchy_compat
+index 71cd99701128fd0929fb2ac1a15561434fa24905..e9a9b5cadd89f6f53e3a1fdc8f39c9f4aaed4037 100755
+--- a/guest/factory-overlay/etc/initcpio/install/tryomarchy_compat
++++ b/guest/factory-overlay/etc/initcpio/install/tryomarchy_compat
+@@ -5,12 +5,15 @@ build() {
+     add_file /usr/share/try-omarchy/compat-version /tryomarchy-compat-version
+     # The external kernel needs its complete module tree after switch_root,
+     # including TUN and the DKMS camera module, not just early-boot drivers.
+-    # Keep build headers out of the initramfs and avoid a duplicate archive in
+-    # the factory rootfs. add_file copies the archive into the build tree.
++    # Keep package-owned headers and VDSO objects out of the unowned module
++    # overlay. linux-headers must be able to install its own vdso/*.so files
++    # later on an older persistent disk. add_file copies the archive into the
++    # build tree without leaving a duplicate in the factory rootfs.
+     local modules_archive
+     modules_archive=$(mktemp) || return 1
+     if ! tar --exclude="$KERNELVERSION/build" --exclude="$KERNELVERSION/source" \
+-        --exclude="$KERNELVERSION/vmlinuz" -C /usr/lib/modules \
++        --exclude="$KERNELVERSION/vmlinuz" --exclude="$KERNELVERSION/vdso" \
++        -C /usr/lib/modules \
+         -cf "$modules_archive" "$KERNELVERSION"; then
+         rm -f "$modules_archive"
+         return 1
+diff --git a/guest/factory-overlay/etc/systemd/system/try-omarchy-update-repository.service b/guest/factory-overlay/etc/systemd/system/try-omarchy-update-repository.service
+index 98fee90733dfedbc5b7e9ace5df60c87b9fc4d98..60f4df79b83b15d247f0805414c71c3b9062f834 100644
+--- a/guest/factory-overlay/etc/systemd/system/try-omarchy-update-repository.service
++++ b/guest/factory-overlay/etc/systemd/system/try-omarchy-update-repository.service
+@@ -1,6 +1,7 @@
+ [Unit]
+ Description=Publish the Try Omarchy guest package update
+-After=local-fs.target
++Requires=try-omarchy-catch-up.service
++After=local-fs.target try-omarchy-catch-up.service
+ Before=display-manager.service try-omarchy-ready.service
+ ConditionPathExists=/usr/share/try-omarchy/update-repository/manifest.json
+ 
+diff --git a/guest/factory-overlay/usr/local/lib/try-omarchy/catch-up b/guest/factory-overlay/usr/local/lib/try-omarchy/catch-up
+index 54aef806945a6c47175224e1b33e608e254377d9..8639f9dc133c97e62b9705e1b17d8194fd36d9b3 100755
+--- a/guest/factory-overlay/usr/local/lib/try-omarchy/catch-up
++++ b/guest/factory-overlay/usr/local/lib/try-omarchy/catch-up
+@@ -18,12 +18,79 @@ omarchy_default=${TRY_OMARCHY_OMARCHY_MONITORS:-/usr/share/omarchy/config/hypr/m
+ toggle_templates=${TRY_OMARCHY_TOGGLE_TEMPLATES:-/usr/share/omarchy/default/hypr/toggles}
+ omarchy_version=${TRY_OMARCHY_OMARCHY_VERSION:-/usr/share/omarchy/version}
+ homes=${TRY_OMARCHY_HOMES:-/home}
++module_root=${TRY_OMARCHY_MODULE_ROOT:-/usr/lib/modules}
++vdso_hashes=${TRY_OMARCHY_VDSO_HASHES:-/usr/share/try-omarchy/vdso-overlay.sha256}
+ 
+-revision=$(cut -d: -f1 "$revision_file" 2>/dev/null || echo 0)
++revision_file_version=$(cat "$revision_file" 2>/dev/null || echo '0:')
++revision=${revision_file_version%%:*}
+ marker="$state_dir/catch-up-revision"
+ [[ "$(cat "$marker" 2>/dev/null || true)" != "$revision" ]] || exit 0
+ mkdir -p "$state_dir"
+ 
++repair_compat_vdso() {
++  # Earlier initramfs overlays copied these three linux-headers files into
++  # older disks without pacman ownership. A later linux-headers transaction
++  # then refuses to overwrite them. Never remove an owned or modified file.
++  local kernel=${revision_file_version#*:} tree=$module_root/${revision_file_version#*:}
++  local dir=$tree/vdso name path expected actual ownership
++  local -a names=(vdso32.so vdso64.so vdsox32.so) lines removable=()
++  [[ $kernel =~ ^[A-Za-z0-9._+-]+$ && -f $vdso_hashes && ! -L $vdso_hashes ]] || {
++    echo "Cannot authenticate compatibility VDSO migration" >&2
++    return 1
++  }
++  mapfile -t lines < "$vdso_hashes"
++  [[ ${#lines[@]} -eq ${#names[@]} ]] || return 1
++  for i in "${!names[@]}"; do
++    [[ ${lines[$i]} =~ ^([0-9a-f]{64})[[:space:]][[:space:]](vdso32\.so|vdso64\.so|vdsox32\.so)$ ]] || return 1
++    [[ ${BASH_REMATCH[2]} == "${names[$i]}" ]] || return 1
++  done
++  [[ ! -L $module_root && ! -L $tree && ! -L $dir ]] || {
++    echo "Refusing symlinked compatibility module path" >&2
++    return 1
++  }
++  [[ -d $dir ]] || return 0
++  [[ -f $tree/.tryomarchy-complete && ! -L $tree/.tryomarchy-complete &&
++     $(cat "$tree/.tryomarchy-complete") == "$revision_file_version" ]] || {
++    echo "Cannot prove compatibility module overlay completed: $tree" >&2
++    return 1
++  }
++  # Check all three before removing any, so an unknown file never leaves the
++  # migration only partly applied. A later boot can retry after diagnosis.
++  for i in "${!names[@]}"; do
++    name=${names[$i]}
++    path=$dir/$name
++    [[ ! -e $path && ! -L $path ]] && continue
++    [[ -f $path && ! -L $path ]] || {
++      echo "Refusing non-regular compatibility VDSO: $path" >&2
++      return 1
++    }
++    if ownership=$(LC_ALL=C pacman -Qqo -- "$path" 2>&1); then
++      echo "Preserved package-owned VDSO: $path ($ownership)"
++      continue
++    fi
++    [[ $ownership == "error: No package owns $path" ]] || {
++      echo "Cannot prove VDSO is unowned: $path: $ownership" >&2
++      return 1
++    }
++    expected=${lines[$i]%% *}
++    actual=$(sha256sum -- "$path") || return 1
++    actual=${actual%% *}
++    [[ $actual == "$expected" ]] || {
++      echo "Preserved modified compatibility VDSO: $path" >&2
++      return 1
++    }
++    removable+=("$path")
++  done
++  for path in "${removable[@]}"; do
++    rm -- "$path"
++    echo "Removed old unowned compatibility VDSO: $path"
++  done
++}
++
++if [[ $revision =~ ^[0-9]+$ ]] && (( revision >= 36 )); then
++  repair_compat_vdso
++fi
++
+ strip_profile_block() {
+   # Drop our appended block so the remainder can be compared with Omarchy's own file.
+   sed '/^-- BEGIN OMARCHY QEMU PROFILE$/,/^-- END OMARCHY QEMU PROFILE$/d' "$1" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index 1a511ece6b1d58d21737476a51c0f32e8a2e42f8..8eb1e0fb74df02c6027db40c0089626256e663e8 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -72,11 +72,30 @@ version = subprocess.check_output(["pacman", "-Q", "try-omarchy-runtime"], text=
+ (root / "manifest.json").write_text(json.dumps({"schema": 1, "runtimeVersion": version, "files": files}, sort_keys=True) + "\n")
+ UPDATE_MANIFEST
+ 
++kernel_release=$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d -printf '%f\n')
++[[ -n $kernel_release && $kernel_release != *$'\n'* ]] || {
++  echo "Expected exactly one installed kernel module tree" >&2
++  exit 1
++}
++# Revision 36 can remove only old compatibility-copied VDSO objects whose
++# bytes match this authenticated image. The objects themselves stay owned by
++# linux-headers and are never placed in the compatibility module archive.
++vdso_dir=/usr/lib/modules/$kernel_release/vdso
++for name in vdso32.so vdso64.so vdsox32.so; do
++  [[ -f $vdso_dir/$name && ! -L $vdso_dir/$name ]] || {
++    echo "Missing packaged linux-headers VDSO object: $name" >&2
++    exit 1
++  }
++done
++(cd "$vdso_dir" && sha256sum vdso32.so vdso64.so vdsox32.so) \
++  > /usr/share/try-omarchy/vdso-overlay.sha256
++
+ compat_paths=(
+   usr/local/lib/try-omarchy/vulkan-env
+   usr/share/uwsm/env.d/20-try-omarchy-vulkan
+   etc/profile.d/try-omarchy-vulkan.sh
+   usr/share/try-omarchy/system-owned-paths
++  usr/share/try-omarchy/vdso-overlay.sha256
+   usr/local/lib/try-omarchy/repair-icon-names
+   usr/local/lib/try-omarchy/repair-system-ownership
+   etc/systemd/system/try-omarchy-system-ownership.service
+@@ -153,11 +172,6 @@ compat_paths=(
+   usr/local/lib/try-omarchy/show-factory-update-notice
+ )
+ tar -C / -cf /usr/share/try-omarchy/compat-overlay.tar "${compat_paths[@]}"
+-kernel_release=$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d -printf '%f\n')
+-[[ -n $kernel_release && $kernel_release != *$'\n'* ]] || {
+-  echo "Expected exactly one installed kernel module tree" >&2
+-  exit 1
+-}
+ # Bump this revision whenever compat-overlay.tar changes in a way that must be
+ # applied to persistent disks created by an earlier launcher release. Revision
+ # 22 carries the packaged Neovim theme symlink and its catch-up repair.
+@@ -170,8 +184,9 @@ kernel_release=$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d -printf '
+ # the transfer fallback when a direct paste cannot be confirmed.
+ # Revision 28 receives file drops in the background directly into folders.
+ # Revision 30 adds Windows Apps and first-run Moonlight launchers.
+-# Revision 35 adds capability-negotiated native window clipping.
+-compat_revision=35
++# Revision 35 adds capability-negotiated native window clipping. Revision 36
++# excludes package-owned VDSOs from the module overlay and repairs old copies.
++compat_revision=36
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Fail the build if DKMS or networking modules were not packaged for this kernel.
+diff --git a/guest/tests/test_kernel_module_delivery.py b/guest/tests/test_kernel_module_delivery.py
+index c1fd42cb4e1af9a0c7a97353251226268eaa4af2..455c1b9b57b436cf106f83717b14fa78a6493c1c 100644
+--- a/guest/tests/test_kernel_module_delivery.py
++++ b/guest/tests/test_kernel_module_delivery.py
+@@ -74,7 +74,9 @@ command tar "$@"
+ 
+     def test_install_archive_includes_modules_and_excludes_headers(self):
+         source = self.root / 'source'
+-        for name in ['modules.order', 'kernel/drivers/net/tun.ko', 'updates/dkms/v4l2loopback.ko', 'build/header.h', 'source/source.c', 'vmlinuz']:
++        for name in ['modules.order', 'kernel/drivers/net/tun.ko', 'updates/dkms/v4l2loopback.ko',
++                     'build/header.h', 'source/source.c', 'vmlinuz',
++                     'vdso/vdso32.so', 'vdso/vdso64.so', 'vdso/vdsox32.so']:
+             file = source / self.kernel / name
+             file.parent.mkdir(parents=True, exist_ok=True)
+             file.write_text(name)
+@@ -88,7 +90,8 @@ command tar "$@"
+             names = archive.getnames()
+         self.assertIn(self.kernel + '/kernel/drivers/net/tun.ko', names)
+         self.assertIn(self.kernel + '/updates/dkms/v4l2loopback.ko', names)
+-        self.assertFalse(any('/build' in name or '/source' in name or name.endswith('/vmlinuz') for name in names))
++        self.assertFalse(any('/build' in name or '/source' in name or '/vdso' in name
++                             or name.endswith('/vmlinuz') for name in names))
+ 
+     def test_readiness_waits_for_complete_module_delivery(self):
+         ready = (GUEST / 'factory-overlay/usr/local/lib/try-omarchy/guest-ready').read_text()
+diff --git a/guest/tests/test_overlay_scripts.py b/guest/tests/test_overlay_scripts.py
+index c0d5fea0d8705f3799e7774a80f39ea7f6b2fac1..5f9a051e89be64a0478ad7669e89f9a6798ee6ed 100644
+--- a/guest/tests/test_overlay_scripts.py
++++ b/guest/tests/test_overlay_scripts.py
+@@ -5,6 +5,7 @@ export time without needing a booted image."""
+ from __future__ import annotations
+ 
+ import base64
++import hashlib
+ import json
+ import os
+ import shutil
+@@ -580,12 +581,100 @@ class CatchUpTests(OverlayCase):
+         self.omarchy_version = self.share / "version"
+         self.omarchy_version.write_text("4.0.3\n")
+         self.state = self.root / "state"
++        self.module_root = self.root / "modules"
++        self.module_root.mkdir()
++        self.vdso_hashes = self.root / "vdso-overlay.sha256"
+ 
+-    def run_catch_up(self) -> subprocess.CompletedProcess:
++    def run_catch_up(self, pacman_mode: str = "unowned") -> subprocess.CompletedProcess:
+         return self.run_script(CATCH_UP, TRY_OMARCHY_COMPAT_VERSION=str(self.version), TRY_OMARCHY_STATE_DIR=str(self.state),
+                                TRY_OMARCHY_QEMU_FRAGMENT=str(FRAGMENT), TRY_OMARCHY_OMARCHY_MONITORS=str(self.default),
+                                TRY_OMARCHY_TOGGLE_TEMPLATES=str(self.templates), TRY_OMARCHY_HOMES=str(self.homes),
+-                               TRY_OMARCHY_OMARCHY_VERSION=str(self.omarchy_version))
++                               TRY_OMARCHY_OMARCHY_VERSION=str(self.omarchy_version),
++                               TRY_OMARCHY_MODULE_ROOT=str(self.module_root), TRY_OMARCHY_VDSO_HASHES=str(self.vdso_hashes),
++                               PACMAN_MODE=pacman_mode)
++
++    def seed_old_compat_vdso(self) -> Path:
++        kernel = "7.2.7-arch1-1"
++        self.version.write_text(f"36:{kernel}\n")
++        tree = self.module_root / kernel
++        vdso = tree / "vdso"
++        vdso.mkdir(parents=True)
++        (tree / ".tryomarchy-complete").write_text(f"36:{kernel}\n")
++        hashes = []
++        for name in ("vdso32.so", "vdso64.so", "vdsox32.so"):
++            data = f"packaged {name}".encode()
++            (vdso / name).write_bytes(data)
++            hashes.append(f"{hashlib.sha256(data).hexdigest()}  {name}\n")
++        self.vdso_hashes.write_text("".join(hashes))
++        self.fake("pacman", '''case "$PACMAN_MODE" in
++  owned) echo linux-headers; exit 0 ;;
++  error) echo 'error: database unavailable' >&2; exit 2 ;;
++  unowned) printf 'error: No package owns %s\\n' "${@: -1}" >&2; exit 1 ;;
++esac
++exit 3''')
++        return vdso
++
++    def test_revision_36_removes_only_authenticated_unowned_vdso(self) -> None:
++        vdso = self.seed_old_compat_vdso()
++        self.state.mkdir()
++        (self.state / "catch-up-revision").write_text("35\n")
++        (vdso.parent / "keep-user-module").write_text("preserve")
++        result = self.run_catch_up()
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual((self.state / "catch-up-revision").read_text().strip(), "36")
++        self.assertEqual((vdso.parent / "keep-user-module").read_text(), "preserve")
++        self.assertEqual(list(vdso.iterdir()), [])
++
++    def test_revision_36_preserves_package_owned_vdso(self) -> None:
++        vdso = self.seed_old_compat_vdso()
++        result = self.run_catch_up("owned")
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(len(list(vdso.iterdir())), 3)
++        self.assertEqual((self.state / "catch-up-revision").read_text().strip(), "36")
++
++    def test_revision_36_preserves_all_files_when_one_hash_differs(self) -> None:
++        vdso = self.seed_old_compat_vdso()
++        (vdso / "vdsox32.so").write_text("user changed")
++        result = self.run_catch_up()
++        self.assertNotEqual(result.returncode, 0)
++        self.assertEqual(len(list(vdso.iterdir())), 3)
++        self.assertFalse((self.state / "catch-up-revision").exists())
++
++    def test_revision_36_refuses_ambiguous_ownership_query(self) -> None:
++        vdso = self.seed_old_compat_vdso()
++        result = self.run_catch_up("error")
++        self.assertNotEqual(result.returncode, 0)
++        self.assertEqual(len(list(vdso.iterdir())), 3)
++        self.assertFalse((self.state / "catch-up-revision").exists())
++
++    def test_revision_36_refuses_symlinked_vdso_path(self) -> None:
++        vdso = self.seed_old_compat_vdso()
++        original = vdso / "vdsox32.so"
++        original.rename(vdso / "custom.so")
++        original.symlink_to("custom.so")
++        result = self.run_catch_up()
++        self.assertNotEqual(result.returncode, 0)
++        self.assertTrue(original.is_symlink())
++        self.assertEqual(len(list(vdso.iterdir())), 4)
++        self.assertFalse((self.state / "catch-up-revision").exists())
++
++    def test_revision_36_requires_completed_overlay_marker(self) -> None:
++        vdso = self.seed_old_compat_vdso()
++        (vdso.parent / ".tryomarchy-complete").unlink()
++        result = self.run_catch_up()
++        self.assertNotEqual(result.returncode, 0)
++        self.assertEqual(len(list(vdso.iterdir())), 3)
++        self.assertFalse((self.state / "catch-up-revision").exists())
++
++    def test_revision_36_refuses_symlinked_vdso_directory(self) -> None:
++        vdso = self.seed_old_compat_vdso()
++        real_dir = vdso.parent / "vdso-original"
++        vdso.rename(real_dir)
++        vdso.symlink_to(real_dir, target_is_directory=True)
++        result = self.run_catch_up()
++        self.assertNotEqual(result.returncode, 0)
++        self.assertEqual(len(list(real_dir.iterdir())), 3)
++        self.assertFalse((self.state / "catch-up-revision").exists())
+ 
+     def seed_toggles(self) -> None:
+         for name in ("flags", "window-no-gaps", "single-window-aspect-ratio"):
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index 0cb6fefa78ce0afc4d933489cb67ed76b5bf7861..6e35aac777122e088bd604e01f23edb02bf36c7f 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -266,8 +266,9 @@ def main() -> None:
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     compat_paths = finalize_rootfs.split("compat_paths=(", 1)[1].split(")", 1)[0]
+     check(
+-        "compat_revision=35" in finalize_rootfs
++        "compat_revision=36" in finalize_rootfs
+         and "usr/local/lib/try-omarchy/catch-up" in compat_paths
++        and "usr/share/try-omarchy/vdso-overlay.sha256" in compat_paths
+         and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
+         and "etc/skel/.config/nvim/lua/plugins/theme.lua" in compat_paths
+         and "etc/systemd/user/omarchy-fcitx5.service.d/10-try-omarchy.conf" in compat_paths
+@@ -372,6 +373,15 @@ def main() -> None:
+         "Windows app and desktop launchers reach fresh and upgraded guests",
+     )
+     catch_up = read(GUEST / "factory-overlay/usr/local/lib/try-omarchy/catch-up")
++    update_repository_unit = read(GUEST / "factory-overlay/etc/systemd/system/try-omarchy-update-repository.service")
++    check(
++        "repair_compat_vdso" in catch_up
++        and "pacman -Qqo" in catch_up
++        and "sha256sum" in catch_up
++        and "Requires=try-omarchy-catch-up.service" in update_repository_unit
++        and "After=local-fs.target try-omarchy-catch-up.service" in update_repository_unit,
++        "old-disk VDSO migration finishes before guest updates become available",
++    )
+     check(
+         "restore_nvim_theme_link" in catch_up
+         and 'ln -snf "../../../../${theme_dir}/neovim.lua" "$link"' in catch_up
+@@ -404,7 +414,8 @@ def main() -> None:
+     check(
+         'kernel=$(uname -r)' in read(compat_hook)
+         and '.tryomarchy-complete' in read(compat_hook)
+-        and 'tar -xf /tryomarchy-kernel-modules.tar' in read(compat_hook),
++        and 'tar -xf /tryomarchy-kernel-modules.tar' in read(compat_hook)
++        and '--exclude="$KERNELVERSION/vdso"' in read(compat_install),
+         "persistent older disks receive modules matching the external release kernel",
+     )
+     update_notice = read(GUEST / "factory-overlay/usr/local/lib/try-omarchy/show-factory-update-notice")
+-- 
+2.53.0.windows.3
+
