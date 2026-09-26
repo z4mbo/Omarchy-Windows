@@ -20,7 +20,7 @@ import (
 
 // Only this physically tested, separately built runtime may be used by the
 // experimental controller. Rebuilds need their own validation and hash change.
-const experimentalBalloonQEMUSHA256 = "6057e8814dc4f0e33ccca0871ef7a223c9e0bb542462d5b6ba27485bd502946f"
+const experimentalBalloonQEMUSHA256 = "43160f86cbf28a67df6f529b104dd03f63a37ca5d3d2a9148f11358fbc559b0a"
 
 type experimentalBalloonOptions struct {
 	QEMUPath          string

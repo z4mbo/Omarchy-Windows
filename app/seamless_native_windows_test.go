@@ -7,10 +7,14 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"net"
+	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -160,4 +164,91 @@ func TestSeamlessNativeInputTargetsChildWithoutHostFocus(t *testing.T) {
 	if selected := seamlessSelectedTarget(window); selected.target != 0 {
 		t.Fatalf("destroyed child remained selected: %#x", selected.target)
 	}
+}
+
+// Opt-in physical diagnostic for the custom Character Map grid. The window
+// must already be open on the interactive desktop; this test never launches
+// an app or changes the host foreground window.
+func TestSeamlessPhysicalCharacterMapGridClick(t *testing.T) {
+	if os.Getenv("OMARCHY_TEST_CHARMAP_INPUT") != "1" {
+		t.Skip("set OMARCHY_TEST_CHARMAP_INPUT=1 for a local Character Map input check")
+	}
+	var matches []seamlessWindow
+	for _, window := range (nativeSeamlessWindows{}).windows() {
+		if strings.EqualFold(window.Process, "charmap.exe") && window.Title == "Character Map" {
+			matches = append(matches, window)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one open Character Map window; found %d", len(matches))
+	}
+	window := matches[0]
+	grid, _, _ := user32.NewProc("GetDlgItem").Call(window.handle, 108)
+	if !seamlessValidInputTarget(window, grid) {
+		t.Fatal("Character Map grid is not a valid input target")
+	}
+	var rect seamlessRect
+	if ok, _, _ := seamlessGetRect.Call(grid, uintptr(unsafe.Pointer(&rect))); ok == 0 {
+		t.Fatal("cannot locate Character Map grid")
+	}
+	// Arial starts with U+0021; B is 33 cells later, on row 1, column 13.
+	x := rect.left + (rect.right-rect.left)*27/40
+	y := rect.top + (rect.bottom-rect.top)*3/20
+	if target := seamlessPointerTarget(window, seamlessPoint{x, y}); target != grid {
+		t.Fatalf("B cell hit test selected %#x instead of grid %#x", target, grid)
+	}
+	input := seamlessInput{Type: "pointer", X: x - window.X, Y: y - window.Y, Button: 1, Down: true}
+	if err := (nativeSeamlessWindows{}).input(window, input); err != nil {
+		t.Fatal(err)
+	}
+	input.Down = false
+	if err := (nativeSeamlessWindows{}).input(window, input); err != nil {
+		t.Fatal(err)
+	}
+	selected, _, _ := user32.NewProc("GetDlgItem").Call(window.handle, 501)
+	if selected == 0 {
+		t.Fatal("Character Map selected-character label is unavailable")
+	}
+	var value [128]uint16
+	procGetWindowTextW.Call(selected, uintptr(unsafe.Pointer(&value[0])), uintptr(len(value)))
+	if got := syscall.UTF16ToString(value[:]); !strings.Contains(got, "U+0042") {
+		t.Fatalf("posted click selected %q instead of U+0042", got)
+	}
+	t.Logf("posted B click to Character Map grid at window-local (%d,%d), grid %#x", input.X, input.Y, grid)
+}
+
+// Disposable second bridge for a guest UI check against this source tree. It
+// shares only an already open Character Map window and never touches the
+// installed launcher, production bridge port, or guest disk image.
+func TestSeamlessPhysicalIsolatedBridge(t *testing.T) {
+	if os.Getenv("OMARCHY_TEST_ISOLATED_BRIDGE") != "1" {
+		t.Skip("set OMARCHY_TEST_ISOLATED_BRIDGE=1 for a 90-second guest UI check")
+	}
+	var matches []seamlessWindow
+	for _, window := range (nativeSeamlessWindows{}).windows() {
+		if strings.EqualFold(window.Process, "charmap.exe") && window.Title == "Character Map" {
+			matches = append(matches, window)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one open Character Map window; found %d", len(matches))
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:4458")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	// This temporary token has no authority on the normal port 4457 bridge.
+	bridge := &seamlessWindowBridge{token: strings.Repeat("a", 64), backend: nativeSeamlessWindows{}, frames: make(chan struct{}, 2)}
+	if !bridge.grantWindow(matches[0]) {
+		t.Fatal("Character Map grant failed")
+	}
+	server := &http.Server{Handler: bridge, ReadHeaderTimeout: 2 * time.Second, WriteTimeout: 12 * time.Second}
+	defer server.Close()
+	go func() { _ = server.Serve(listener) }()
+	t.Setenv(seamlessWGCEnv, "1")
+	prewarmSeamlessWGC()
+	defer stopSeamlessWGC()
+	t.Logf("isolated bridge on 127.0.0.1:4458, Character Map ID %s; expires in 90 seconds", bridge.windowID(matches[0]))
+	time.Sleep(90 * time.Second)
 }

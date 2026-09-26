@@ -73,10 +73,9 @@ on the NVMe drive; its sparse Linux disk has a 200 GiB virtual capacity.
   click, but selecting the visually indicated B cell repeatedly appended an
   exclamation mark in the copied-characters field. Windows accessibility
   reported `Selected Character: U+0021: Exclamation Mark` and field value
-  `!!` after two attempts. This is an end-to-end
-  input mismatch; its cause (bridge input, window scaling, or the test input
-  layer) is not isolated yet. The preview cannot be claimed dependable for
-  arbitrary applications on this evidence.
+  `!!` after two attempts. This remains a failed guest GTK presenter test;
+  later isolated checks below narrowed the cause but did not repeat the
+  visible in-Omarchy click.
 - With the VM temporarily in a 722×432 host window, `hyprctl monitors -j`
   reported a 720×400 guest mode at about 360 Hz. When the VM was maximized,
   the guest had previously reported 2560×1417 at 360 Hz, matching the host
@@ -101,6 +100,29 @@ on the NVMe drive; its sparse Linux disk has a 200 GiB virtual capacity.
   client on workspace 1. The guest was locked during screenshot inspection,
   so this test verifies frame transport and window creation, not a visual
   usability or input pass.
+- A later isolated input check used a second bridge on host loopback port
+  4458, with only an already open Character Map window granted. The installed
+  launcher, its port 4457 bridge, and the guest disk image were not replaced.
+  The revised host code padded a 487×435 Windows Graphics Capture frame to
+  the full 491×437 window rectangle. The guest fetched that 491×437 PNG over
+  its normal QEMU host network route and posted a B-cell click at window-local
+  (316,117); Windows accessibility changed from `U+0021: Exclamation Mark`
+  to `U+0042: Latin Capital Letter B`. A direct host bridge input test made
+  the same selection. This verifies capture alignment, authenticated network
+  transport, and posted input for this Win32 grid control. The guest GTK
+  presenter itself was not clicked in this pass because Omarchy had entered
+  its password lock screen. The earlier visual mismatch is therefore still
+  unresolved. Modern Notepad text input and games remain unverified.
+- A later attempt to repeat the visible GTK presenter click encountered the
+  Omarchy screensaver and then a user-stopped Computer Use session. The test
+  made no visual click or password entry. The isolated bridge B selection
+  above remains the latest positive input result; the in-Omarchy presenter
+  click has not passed.
+- Two initial direct WGC probes of PowerShell-launched Character Map windows
+  timed out. A Character Map window launched through Computer Use yielded a
+  487×435 WGC frame in under one second, including while occluded by QEMU.
+  The capture timeout was not reproduced with that interactive launch; the
+  reason for the earlier window-specific delay was not established.
 - A temporary Windows Forms app opened a borderless 2560x1440 host window. The
   bridge identified it as fullscreen and the guest presenter filled the
   2560x1417 Omarchy output in a compositor screenshot. The test app closed
