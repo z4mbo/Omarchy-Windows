@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"net"
 	"os"
 	"path/filepath"
@@ -100,7 +101,7 @@ func TestQMPControlPrivateDirectoryACL(t *testing.T) {
 	}
 }
 
-func TestQMPControlSocketRejectsNullDACL(t *testing.T) {
+func TestQMPControlSocketRejectsInheritedBroadDACL(t *testing.T) {
 	dir, err := os.MkdirTemp(os.TempDir(), "tom-acl-")
 	if err != nil {
 		t.Fatal(err)
@@ -110,9 +111,7 @@ func TestQMPControlSocketRejectsNullDACL(t *testing.T) {
 	previous := qmpControlDirectory
 	qmpControlDirectory = func() (string, error) { return dir, nil }
 	defer func() { qmpControlDirectory = previous }()
-	if err := ensureQMPControlDirectoryACL(dir); err != nil {
-		t.Fatal(err)
-	}
+	setQMPTestBroadInheritableDACL(t, dir)
 	path, err := qmpControlPath(qmpNativePort)
 	if err != nil {
 		t.Fatal(err)
@@ -122,30 +121,76 @@ func TestQMPControlSocketRejectsNullDACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	setQMPTestCurrentUserOwner(t, path, qmpOpenReparsePoint)
-	if err := verifyQMPControlSocketACL(path); err != nil {
-		t.Fatalf("test socket was not private before tampering: %v", err)
+	if !isQMPControlSocket(path) {
+		t.Fatal("test fixture did not create a Windows AF_UNIX socket")
 	}
 	name, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	const writeDAC = 0x00040000
-	handle, err := syscall.CreateFile(name, writeDAC,
+	handle, err := syscall.CreateFile(name, qmpReadControl,
 		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
 		nil, syscall.OPEN_EXISTING, qmpOpenReparsePoint, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer syscall.CloseHandle(handle)
-	setSecurity := advapi32.NewProc("SetSecurityInfo")
-	status, _, _ := setSecurity.Call(uintptr(handle), qmpSEFileObject,
-		qmpDACLInformation|qmpProtectedDACLInfo, 0, 0, 0, 0)
+	var dacl, descriptor uintptr
+	status, _, _ := qmpGetHandleSecurity.Call(uintptr(handle), qmpSEFileObject,
+		qmpDACLInformation, 0, 0, uintptr(unsafe.Pointer(&dacl)), 0,
+		uintptr(unsafe.Pointer(&descriptor)))
 	if status != 0 {
 		t.Fatal(syscall.Errno(status))
 	}
+	defer qmpLocalFree.Call(descriptor)
+	if dacl == 0 || binary.LittleEndian.Uint16(unsafe.Slice((*byte)(unsafe.Pointer(dacl)), 8)[4:6]) < 2 {
+		t.Fatal("real AF_UNIX socket did not inherit the deliberately broad directory ACL")
+	}
+	if err := verifyQMPUserOnlyDACL(dacl, descriptor, false); err == nil {
+		t.Fatal("accepted a real AF_UNIX socket that inherited an Everyone ACE")
+	}
 	if err := verifyQMPControlSocketACL(path); err == nil {
-		t.Fatal("accepted a QMP socket with a null DACL")
+		t.Fatal("accepted a QMP socket beneath a broadly accessible directory")
+	}
+}
+
+func setQMPTestBroadInheritableDACL(t *testing.T, path string) {
+	t.Helper()
+	current, freeCurrent, err := qmpUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer freeCurrent()
+	text, err := syscall.UTF16PtrFromString("S-1-1-0") // Everyone
+	if err != nil {
+		t.Fatal(err)
+	}
+	var everyone uintptr
+	if ok, _, callErr := qmpSIDFromString.Call(uintptr(unsafe.Pointer(text)), uintptr(unsafe.Pointer(&everyone))); ok == 0 {
+		t.Fatal(callErr)
+	}
+	defer qmpLocalFree.Call(everyone)
+	acl := make([]byte, 8+2*(8+256+4))
+	if ok, _, callErr := qmpInitializeACL.Call(uintptr(unsafe.Pointer(&acl[0])), uintptr(len(acl)), 2); ok == 0 {
+		t.Fatal(callErr)
+	}
+	flags := uintptr(qmpObjectInheritACE | qmpContainerInheritACE)
+	if ok, _, callErr := qmpAddAllowedACEEx.Call(uintptr(unsafe.Pointer(&acl[0])), 2,
+		flags, qmpFileAllAccess, current); ok == 0 {
+		t.Fatal(callErr)
+	}
+	if ok, _, callErr := qmpAddAllowedACEEx.Call(uintptr(unsafe.Pointer(&acl[0])), 2,
+		flags, qmpFileAllAccess, everyone); ok == 0 {
+		t.Fatal(callErr)
+	}
+	name, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, _, _ := qmpSetNamedSecurity.Call(uintptr(unsafe.Pointer(name)), qmpSEFileObject,
+		qmpDACLInformation|qmpProtectedDACLInfo, 0, 0, uintptr(unsafe.Pointer(&acl[0])), 0)
+	if status != 0 {
+		t.Fatal(syscall.Errno(status))
 	}
 }
 

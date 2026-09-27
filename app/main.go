@@ -32,10 +32,6 @@ const appTitle = "Omarchy"
 // process. Advance only after Process.Start succeeds.
 var qemuProcessGeneration atomic.Uint64
 
-func nativeForegroundExperimentSupported(cfg *config, presentation string) bool {
-	return !cfg.experimentalNativeForeground || (presentation == "native" && cfg.displays == 1)
-}
-
 type config struct {
 	desktop                     desktopPreferences
 	dir, hostDir, payloadDir    string
