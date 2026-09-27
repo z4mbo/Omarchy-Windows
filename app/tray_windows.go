@@ -266,28 +266,21 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		if bridge != nil {
 			windows := bridge.backend.windows()
 			shared := bridge.sharedWindows(windows, time.Now())
-			sharedKeys := make(map[seamlessWindowKey]bool, len(shared))
-			for _, window := range shared {
-				sharedKeys[seamlessKey(window)] = true
-			}
+			shareChoices, stopChoices = traySeamlessWindowChoices(windows, shared)
 			shareMenu, _, _ := procCreatePopupMenu.Call()
 			stopMenu, _, _ := procCreatePopupMenu.Call()
 			if shareMenu != 0 && stopMenu != 0 {
-				for _, window := range windows {
-					label := fmt.Sprintf("%s — %s (PID %d)", window.Title, window.Process, window.PID)
-					if len([]rune(label)) > 90 {
-						label = string([]rune(label)[:87]) + "..."
-					}
-					if sharedKeys[seamlessKey(window)] {
-						if len(stopChoices) < 64 {
-							appendTo(stopMenu, mfString, trayStopWindowBase+uintptr(len(stopChoices)), label)
-							stopChoices = append(stopChoices, window)
+				appendChoices := func(target, base uintptr, choices []seamlessWindow) {
+					for index, window := range choices {
+						label := fmt.Sprintf("%s — %s (PID %d)", window.Title, window.Process, window.PID)
+						if len([]rune(label)) > 90 {
+							label = string([]rune(label)[:87]) + "..."
 						}
-					} else if len(shareChoices) < 64 {
-						appendTo(shareMenu, mfString, trayShareWindowBase+uintptr(len(shareChoices)), label)
-						shareChoices = append(shareChoices, window)
+						appendTo(target, mfString, base+uintptr(index), label)
 					}
 				}
+				appendChoices(shareMenu, trayShareWindowBase, shareChoices)
+				appendChoices(stopMenu, trayStopWindowBase, stopChoices)
 				if len(shareChoices) == 0 {
 					appendTo(shareMenu, mfString|mfGray, 0, "No windows available")
 				}
@@ -496,4 +489,33 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&message)))
 	}
 	logf("tray: stopped")
+}
+
+// Hidden projected windows remain in shared after leaving their Omarchy
+// workspace. They must stay revocable from the tray, but cannot be offered as
+// new grants because they are absent from the current visible enumeration.
+func traySeamlessWindowChoices(visible, shared []seamlessWindow) (share, stop []seamlessWindow) {
+	sharedKeys := make(map[seamlessWindowKey]bool, len(shared))
+	for _, window := range shared {
+		key := seamlessKey(window)
+		if sharedKeys[key] {
+			continue
+		}
+		sharedKeys[key] = true
+		if len(stop) < 64 {
+			stop = append(stop, window)
+		}
+	}
+	seen := make(map[seamlessWindowKey]bool, len(visible))
+	for _, window := range visible {
+		key := seamlessKey(window)
+		if sharedKeys[key] || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if len(share) < 64 {
+			share = append(share, window)
+		}
+	}
+	return share, stop
 }

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -47,6 +48,7 @@ type seamlessWindowBridge struct {
 	mu           sync.Mutex
 	grants       map[seamlessWindowKey]string
 	pending      []seamlessLaunch
+	closed       bool
 }
 
 type seamlessWindowKey struct {
@@ -56,6 +58,8 @@ type seamlessWindowKey struct {
 
 type seamlessLaunch struct {
 	pid      uint32
+	created  uint64 // FILETIME of the ShellExecuteEx process; zero only in legacy tests
+	handle   syscall.Handle // retained until grant, expiry, or bridge shutdown
 	until    time.Time
 	previous map[seamlessWindowKey]bool
 }
@@ -171,6 +175,7 @@ func runSeamlessWindowBridge() (string, func(), error) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_ = server.Shutdown(ctx)
+		bridge.closePendingLaunches()
 		if bridge.projection != nil {
 			bridge.projection.Close()
 		}
@@ -394,9 +399,14 @@ func (b *seamlessWindowBridge) revokeWindow(window seamlessWindow) {
 	}
 }
 
-// Only a window created by the fresh process returned by ShellExecuteEx may
-// be auto-granted. A single-instance app and an existing HWND need host choice.
+// A single-instance app and an existing HWND need host choice. The legacy
+// wrapper keeps direct-PID tests independent of host process enumeration.
 func (b *seamlessWindowBridge) noteLaunch(pid uint32, before []seamlessWindow, now time.Time) bool {
+	return b.noteLaunchProcess(pid, 0, 0, before, now)
+}
+
+// The caller transfers ownership of handle only when this returns true.
+func (b *seamlessWindowBridge) noteLaunchProcess(pid uint32, created uint64, handle syscall.Handle, before []seamlessWindow, now time.Time) bool {
 	if pid == 0 {
 		return false
 	}
@@ -408,9 +418,24 @@ func (b *seamlessWindowBridge) noteLaunch(pid uint32, before []seamlessWindow, n
 		previous[seamlessKey(window)] = true
 	}
 	b.mu.Lock()
-	b.pending = append(b.pending, seamlessLaunch{pid: pid, until: now.Add(12 * time.Second), previous: previous})
-	b.mu.Unlock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return false
+	}
+	b.pending = append(b.pending, seamlessLaunch{pid: pid, created: created, handle: handle, until: now.Add(12 * time.Second), previous: previous})
 	return true
+}
+
+func (b *seamlessWindowBridge) closePendingLaunches() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closed = true
+	for _, launch := range b.pending {
+		if launch.handle != 0 {
+			_ = syscall.CloseHandle(launch.handle)
+		}
+	}
+	b.pending = nil
 }
 
 func (b *seamlessWindowBridge) sharedWindows(windows []seamlessWindow, now time.Time) []seamlessWindow {
@@ -431,17 +456,51 @@ func (b *seamlessWindowBridge) sharedWindows(windows []seamlessWindow, now time.
 			delete(b.grants, key)
 		}
 	}
+	var parents map[uint32]uint32
+	for _, launch := range b.pending {
+		if launch.created != 0 && launch.handle != 0 {
+			parents, _ = seamlessProcessParents() // failure leaves descendants ungranted
+			break
+		}
+	}
 	pending := b.pending[:0]
 	for _, launch := range b.pending {
 		if now.After(launch.until) {
+			if launch.handle != 0 {
+				_ = syscall.CloseHandle(launch.handle)
+			}
 			logf("Windows app window was not found after launch; choose Show Windows app in Omarchy from the tray")
 			continue
 		}
 		granted := false
 		for _, window := range windows {
 			key := seamlessKey(window)
-			if window.PID != launch.pid || launch.previous[key] {
+			if launch.previous[key] {
 				continue
+			}
+			if launch.created == 0 {
+				if window.PID != launch.pid {
+					continue
+				}
+			} else {
+				created, err := nativeProcessCreated(window.PID)
+				if err != nil {
+					continue
+				}
+				var rootExit uint64
+				if window.PID != launch.pid {
+					var valid bool
+					rootExit, valid = seamlessProcessExit(launch.handle)
+					if !valid {
+						continue
+					}
+				}
+				if !launchedProcessEligible(launch, window.PID, parents[window.PID], created, rootExit) {
+					continue
+				}
+				if !seamlessWindowStillMatches(window) {
+					continue
+				}
 			}
 			if b.grants == nil {
 				b.grants = make(map[seamlessWindowKey]string)
@@ -452,6 +511,8 @@ func (b *seamlessWindowBridge) sharedWindows(windows []seamlessWindow, now time.
 		}
 		if !granted {
 			pending = append(pending, launch)
+		} else if launch.handle != 0 {
+			_ = syscall.CloseHandle(launch.handle)
 		}
 	}
 	b.pending = pending

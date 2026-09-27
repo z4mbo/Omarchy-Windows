@@ -3,6 +3,8 @@ set -euxo pipefail
 systemctl is-active try-omarchy-update-repository.service
 systemctl is-active try-omarchy-system-ownership.service
 [[ $(pacman -Q try-omarchy-runtime) == "try-omarchy-runtime $CANDIDATE_RUNTIME" ]]
+command -v zenity
+pacman -Qq zenity
 [[ $(cat /usr/share/omarchy/version) == "$CANDIDATE_VERSION" ]]
 sha256sum -c "$HOME/upgrade-preserve.sha256"
 for path in /etc /usr /usr/lib /usr/share; do

@@ -38,6 +38,33 @@ class ParseFactsTests(unittest.TestCase):
 
 
 class NativeGuestFactsTests(unittest.TestCase):
+    def test_fresh_image_requires_runtime_picker_dependency(self) -> None:
+        self.assertEqual(smoke_guest.EXPECTED_FACTS["runtime-package"], "4.0.3-5")
+        self.assertIn("pacman -Qq zenity", smoke_guest.FACT_CHECKS["windows-app-picker"])
+
+    def test_revision38_lua_probe_rejects_a_broken_guest_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            helper = target / "omarchy_windows_native_layout.py"
+            source = MODULE_PATH.resolve().parents[2] / "scripts" / "windows-apps" / helper.name
+            shutil.copy2(source, helper)
+            facts, expected = {}, {}
+            smoke_guest.add_native_guest_facts(38, facts, expected, target)
+            self.assertEqual(expected["windows-apps-lua-dispatch"], "yes")
+            command = facts["windows-apps-lua-dispatch"]
+            code = shlex.split(command.split("python3 -c ", 1)[1].split(" && echo", 1)[0])[0]
+            environment = dict(os.environ, PYTHONPATH=str(target), PYTHONDONTWRITEBYTECODE="1")
+            self.assertEqual(subprocess.run([sys.executable, "-c", code], env=environment,
+                                            capture_output=True, check=False).returncode, 0)
+            helper.write_text("class LayoutError(ValueError): pass\n"
+                              "def workspace_move_command(*_args): return ['hyprctl', 'dispatch', 'wrong']\n"
+                              "def legacy_dispatch_needs_lua(_text): return True\n")
+            self.assertNotEqual(subprocess.run([sys.executable, "-c", code], env=environment,
+                                               capture_output=True, check=False).returncode, 0)
+            old_facts, old_expected = {}, {}
+            smoke_guest.add_native_guest_facts(37, old_facts, old_expected, target)
+            self.assertNotIn("windows-apps-lua-dispatch", old_facts)
+
     def test_revision37_fullscreen_probe_detects_wrong_workspace_inheritance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory)

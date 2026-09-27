@@ -52,6 +52,7 @@ FACT_CHECKS = {
     "browser-theme-unprivileged": "sudo useradd -r -M -G wheel tryomarchy-policy-check && sudo -u tryomarchy-policy-check sudo -n /usr/bin/omarchy-theme-set-browser-policy 123abc >/dev/null && grep -q 123abc /etc/chromium/policies/managed/color.json && echo yes || echo no; sudo userdel tryomarchy-policy-check >/dev/null 2>&1",
     "browser-repair": "sudo rm /etc/sudoers.d/omarchy-theme-browser && sudo mv /etc/chromium/policies/managed /etc/chromium/policies/managed.before-test && sudo /usr/local/lib/try-omarchy/repair-browser-policy >/dev/null && sudo cmp /etc/sudoers.d/omarchy-theme-browser /usr/share/try-omarchy/omarchy-theme-browser && test -d /etc/chromium/policies/managed && echo yes || echo no",
     "media-tools": "command -v pamixer >/dev/null && command -v playerctl >/dev/null && echo yes || echo no",
+    "windows-app-picker": "command -v zenity >/dev/null && pacman -Qq zenity >/dev/null && echo yes || echo no",
     "clang": "command -v clang >/dev/null 2>&1 && echo present || echo missing",
     "yay": "pacman -Q yay >/dev/null 2>&1 && echo present || echo missing",
     "omarchy-nvim": "pacman -Q omarchy-nvim >/dev/null 2>&1 && echo present || echo missing",
@@ -73,13 +74,14 @@ EXPECTED_FACTS = {
     "icon-cache": "yes",
     "system-ownership": "yes",
     "update-repository": "active",
-    "runtime-package": "4.0.3-4",
+    "runtime-package": "4.0.3-5",
     "package-database": "clean",
     "lock-pam": "yes",
     "pacman-unlocked": "yes",
     "omarchy-version": "4.0.3",
     "browser-policy": "yes",
     "media-tools": "yes",
+    "windows-app-picker": "yes",
     "browser-repair": "yes",
     "browser-theme-unprivileged": "yes",
     "clang": "present",
@@ -142,6 +144,11 @@ def add_native_guest_facts(revision: int, facts: dict[str, str], expected: dict[
             f"{native_fullscreen_workspace_probe(bin_dir)} && echo yes || echo no"
         )
         expected["windows-apps-fullscreen-workspace"] = "yes"
+    if revision >= 38:
+        facts["windows-apps-lua-dispatch"] = (
+            f"{native_lua_dispatch_probe(bin_dir)} && echo yes || echo no"
+        )
+        expected["windows-apps-lua-dispatch"] = "yes"
 
 
 def native_fullscreen_workspace_probe(bin_dir: Path | str = Path("/usr/local/bin")) -> str:
@@ -153,6 +160,24 @@ def native_fullscreen_workspace_probe(bin_dir: Path | str = Path("/usr/local/bin
         "'workspace':{'id':3}}]; known={ident:'league'}; "
         "assert inherited_workspace('league',known,clients,pid,{}) == 3; "
         "assert inherited_workspace('other',known,clients,pid,{}) is None"
+    )
+    return (f"PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={shlex.quote(str(bin_dir))} "
+            f"python3 -c {shlex.quote(code)}")
+
+
+def native_lua_dispatch_probe(bin_dir: Path | str = Path("/usr/local/bin")) -> str:
+    """Exercise revision 38's validated Lua and old-config command selection."""
+    code = (
+        "from omarchy_windows_native_layout import LayoutError, legacy_dispatch_needs_lua, workspace_move_command; "
+        "old=workspace_move_command(3,'0x1234','legacy'); "
+        "new=workspace_move_command(3,'0x1234','lua'); "
+        "assert old == ['hyprctl','dispatch','movetoworkspacesilent','3,address:0x1234']; "
+        "assert new == ['hyprctl','dispatch','hl.dsp.window.move({ workspace = 3, follow = false, window = \"address:0x1234\" })']; "
+        "assert legacy_dispatch_needs_lua('Note: dispatch in lua is a shorthand for hl.dispatch(...)'); "
+        "assert not legacy_dispatch_needs_lua('invalid window address')\n"
+        "try:\n workspace_move_command(3,'0x1234!','lua')\n"
+        "except LayoutError:\n pass\n"
+        "else:\n raise AssertionError('invalid address accepted')"
     )
     return (f"PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={shlex.quote(str(bin_dir))} "
             f"python3 -c {shlex.quote(code)}")

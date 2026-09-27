@@ -18,7 +18,7 @@ import threading
 import time
 import urllib.error
 
-from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked, proxy_location
+from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, legacy_dispatch_needs_lua, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked, proxy_location, workspace_move_command
 from omarchy_windows_protocol import Bridge, BridgeError, load_token
 
 POLL_SECONDS = 0.4
@@ -39,6 +39,28 @@ def hyprctl_json(command: str) -> object:
         return json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise LayoutError(f"Hyprland {command} state is unavailable.") from exc
+
+
+def dispatch_workspace_move(workspace: int, address: str, syntax: str | None) -> str | None:
+    """Cache the working syntax; only a Lua parser hint triggers fallback."""
+    primary = syntax or "legacy"
+    try:
+        result = subprocess.run(workspace_move_command(workspace, address, primary),
+                                capture_output=True, text=True,
+                                timeout=HYPRCTL_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return syntax
+    if result.returncode == 0:
+        return primary
+    if primary != "legacy" or not legacy_dispatch_needs_lua(result.stdout + result.stderr):
+        return syntax
+    try:
+        result = subprocess.run(workspace_move_command(workspace, address, "lua"),
+                                capture_output=True, text=True,
+                                timeout=HYPRCTL_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return syntax
+    return "lua" if result.returncode == 0 else syntax
 
 
 def presentation_probe(bridge: Bridge) -> int:
@@ -151,13 +173,8 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
                 self.update(self.metadata)
                 return False
             if location is not None:
-                try:
-                    subprocess.run(
-                        ["hyprctl", "dispatch", "movetoworkspacesilent",
-                         f"{target},address:{location[1]}"],
-                        capture_output=True, timeout=HYPRCTL_TIMEOUT, check=True)
-                except (OSError, subprocess.SubprocessError):
-                    pass  # Retry only while the bounded move is pending.
+                self.controller.move_syntax = dispatch_workspace_move(
+                    target, location[1], self.controller.move_syntax)
             if self.move.retry():
                 return True
             self.move.fail()
@@ -196,6 +213,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
             self.status_label = None
             self.error = ""
             self.workspace_warning = ""
+            self.move_syntax: str | None = None
 
         def do_activate(self):
             if self.worker is not None:

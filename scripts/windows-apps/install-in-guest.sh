@@ -7,6 +7,11 @@ if [[ $EUID == 0 ]]; then
   exit 1
 fi
 
+if ! command -v zenity >/dev/null 2>&1; then
+  printf 'The Windows app picker needs zenity. Update Omarchy with `sudo pacman -Syu zenity`, then run this installer again.\n' >&2
+  exit 1
+fi
+
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 bin_dir="$HOME/.local/bin"
 applications_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"

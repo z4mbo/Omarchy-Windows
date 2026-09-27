@@ -45,6 +45,28 @@ def proxy_location(ident: str, clients: object, pid: int) -> tuple[int, str] | N
     return workspace["id"], address
 
 
+def workspace_move_command(workspace: int, address: str, syntax: str) -> list[str]:
+    """Build one validated legacy or Lua Hyprland move command."""
+    if (not _integer(workspace) or not 0 < workspace < 2**31
+            or not isinstance(address, str)
+            or not re.fullmatch(r"0x[0-9a-fA-F]+", address)):
+        raise LayoutError("The native proxy has an invalid workspace or address.")
+    if syntax == "legacy":
+        return ["hyprctl", "dispatch", "movetoworkspacesilent",
+                f"{workspace},address:{address}"]
+    if syntax == "lua":
+        expression = ("hl.dsp.window.move({ workspace = " + str(workspace)
+                      + ', follow = false, window = "address:' + address + '" })')
+        return ["hyprctl", "dispatch", expression]
+    raise LayoutError("The Hyprland dispatch syntax is unknown.")
+
+
+def legacy_dispatch_needs_lua(output: str) -> bool:
+    """Retry with Lua only when Hyprland explicitly identifies Lua dispatch."""
+    return (isinstance(output, str)
+            and "dispatch in lua is a shorthand for hl.dispatch" in output)
+
+
 def inherited_workspace(group: str, known: dict[str, str], clients: object,
                         pid: int, history: dict[str, int]) -> int | None:
     """Prefer the one current group workspace, then its last verified workspace."""

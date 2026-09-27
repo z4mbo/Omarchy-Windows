@@ -86,16 +86,17 @@ static analysis passes. Automated checks
 cover bounds, host grants, hidden-window retention, layout acknowledgements,
 key routing, transport recovery, and bounded restoration bookkeeping. These
 checks do not prove actual window placement, text entry, gameplay, or latency.
-Desktop validation remains pending in an isolated portable copy.
+A [September 27 isolated physical test](evidence/NATIVE-DESKTOP-2026-09-27.md)
+now verifies Character Map input, tiling beside a Linux picker, and workspace
+hide/restore. Native frame capture was rejected after activation. The test uses
+candidate 4 plus development guest helpers, not a complete released image.
+Blender launch tracking, fullscreen, broad application coverage and performance
+remain open.
 
-The September 26 second candidate executable has SHA256
-`3720313ff51220f1470375712e080b63b36da3219766bb23d49fc07811acb939`.
-It was built locally after the host implementation at `d79c914`; it has not
-replaced the normal installation. The isolated writable overlay and separate
-runtime are prepared. The user has since explicitly resumed Computer Use.
-Automatic approval review still rejected the isolated VM launch with only
-`blocked by policy`; the VM has not been started. This is a tool execution
-block, not a withdrawn user authorization.
+Revision 38 adds support for Hyprland's Lua workspace dispatch while preserving
+legacy syntax for older configurations. A real compositor test confirmed moving
+a proxy from workspace 2 to 3 and back. Fresh-image and old-disk checks exercise
+the packaged helper, with dependency delivery validated separately.
 
 Current scope is one unrotated guest output at 100% guest scale and at most eight
 host-granted windows. Host coordinates use per-monitor DPI awareness. Topmost

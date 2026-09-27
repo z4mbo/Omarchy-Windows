@@ -6,6 +6,24 @@ workspace. A game that opens a separate fullscreen window should occupy the
 same workspace as its launcher. This is an **experimental target**, not a
 completed gaming feature.
 
+## Direct native presentation (opt-in)
+
+With `OMARCHY_WINDOWS_PRESENTATION=native` on the host launcher, the guest picker
+uses a Hyprland proxy for each granted app. Windows draws the real app over that
+tile and receives normal input. After the first accepted native layout, the
+capture and posted-input endpoints are disabled for that boot.
+
+The [September 27 physical test](evidence/NATIVE-DESKTOP-2026-09-27.md) passed
+Character Map launch, real text input, tiling beside the Linux picker, and
+workspace hide/restore. It also found a Blender launcher-to-child tracking
+failure. Games, fullscreen transitions, popup behavior, monitor changes and
+performance comparisons remain open. The current prototype supports one guest
+output at scale 1 and at most eight granted windows.
+
+See the [native presentation design](NATIVE-WINDOW-PRESENTATION.md) for the
+protocol, compatibility and restoration requirements. The capture preview
+below is a separate, older presentation path with different limits.
+
 ## Per-window preview
 
 **Windows Apps in Omarchy (Preview)** opens a Windows Start Menu app through

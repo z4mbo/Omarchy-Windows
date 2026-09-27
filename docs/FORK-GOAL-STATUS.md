@@ -1,6 +1,6 @@
 # Requested Omarchy for Windows product
 
-Updated September 26, 2026. Development remains on `codex/native-windows-apps`
+Updated September 27, 2026. Development remains on `codex/native-windows-apps`
 in draft [PR #1](https://github.com/z4mbo/Omarchy-Windows/pull/1). The goal is
 **not complete** and no complete installer has been released.
 
@@ -46,10 +46,10 @@ Windows window in the corresponding tile. Only layout and lifecycle metadata
 cross the boundary. Windows renders the app and receives its ordinary input;
 the native mode must not poll frames or relay application keystrokes.
 
-The first prototype is opt-in and limited to one output. It needs physical
-verification of tiling, native input, workspace visibility, fullscreen, focus,
-popup ownership, DPI, and reliable restoration before installation or default
-use. Native rendering removes the existing PNG-stream bottleneck, but does not
+The first prototype is opt-in and limited to one output. Character Map has
+passed a [physical native input, tiling and workspace test](evidence/NATIVE-DESKTOP-2026-09-27.md).
+Fullscreen, broader app coverage, focus, popup ownership, DPI and reliable
+restoration still need validation before installation or default use. Native rendering removes the existing PNG-stream bottleneck, but does not
 prove that all apps behave correctly or that performance equals bare metal.
 
 WSL remains the measured candidate for Linux GPU compute and selected graphics

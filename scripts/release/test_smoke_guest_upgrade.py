@@ -34,6 +34,12 @@ def write_artifacts(directory: Path, *, baseline: bool) -> None:
 
 
 class UpgradeHarnessTests(unittest.TestCase):
+    def test_upgrade_and_reboots_require_picker_after_runtime_transaction(self) -> None:
+        fixture = SOURCE.with_name('guest-upgrade')
+        self.assertNotIn('pacman -Qq zenity', (fixture / 'seed.sh').read_text())
+        self.assertIn('pacman -Qq zenity', (fixture / 'upgrade.sh').read_text())
+        self.assertIn('pacman -Qq zenity', (fixture / 'reboot.sh').read_text())
+
     def test_fault_cut_kills_only_owned_qemu_after_complete_nonce_line(self) -> None:
         class Stream:
             def __init__(self):
@@ -142,6 +148,10 @@ class UpgradeHarnessTests(unittest.TestCase):
         checks = upgrade.candidate_checks(35)
         self.assertIn('test -x /usr/local/bin/omarchy-windows-native', checks)
         self.assertNotIn('\\usr\\local\\bin', checks)
+
+    def test_revision38_upgrade_checks_include_lua_move_probe(self) -> None:
+        self.assertNotIn('legacy_dispatch_needs_lua', upgrade.candidate_checks(37))
+        self.assertIn('legacy_dispatch_needs_lua', upgrade.candidate_checks(38))
 
     def test_qcow2_overlay_uses_raw_backing_without_copying_or_mutating_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

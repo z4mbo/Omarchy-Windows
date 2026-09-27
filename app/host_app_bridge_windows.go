@@ -204,7 +204,12 @@ func shellOpenWindowApp(path string) error {
 		}
 		return nil
 	}
-	defer procCloseHandle.Call(si.hProcess)
+	handle := syscall.Handle(si.hProcess)
+	defer func() {
+		if handle != 0 {
+			_ = syscall.CloseHandle(handle)
+		}
+	}()
 	if bridge == nil {
 		return nil
 	}
@@ -214,7 +219,9 @@ func shellOpenWindowApp(path string) error {
 		uintptr(unsafe.Pointer(&created)), uintptr(unsafe.Pointer(&exited)),
 		uintptr(unsafe.Pointer(&kernelTime)), uintptr(unsafe.Pointer(&userTime)))
 	if gotTimes != 0 && pid != 0 && !time.Unix(0, created.Nanoseconds()).Before(started) {
-		if bridge.noteLaunch(uint32(pid), before, time.Now()) {
+		creation := uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime)
+		if bridge.noteLaunchProcess(uint32(pid), creation, handle, before, time.Now()) {
+			handle = 0 // the bridge owns the exact launcher process lifetime now
 			return nil
 		}
 	}

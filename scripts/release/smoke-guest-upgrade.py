@@ -52,6 +52,8 @@ def candidate_checks(revision, compat_path='/usr/share/try-omarchy/compat-versio
                       f'python3 -c {shlex.quote(probe)}')
     if revision >= 37:
         checks.append(source_smoke_guest().native_fullscreen_workspace_probe(bin_dir))
+    if revision >= 38:
+        checks.append(source_smoke_guest().native_lua_dispatch_probe(bin_dir))
     return ' && '.join(checks)
 
 

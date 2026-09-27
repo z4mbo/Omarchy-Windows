@@ -4,6 +4,7 @@ import copy
 import os
 from pathlib import Path
 import runpy
+import subprocess
 import sys
 import types
 import unittest
@@ -13,7 +14,7 @@ script_dir = Path(__file__).resolve().parent
 helper_dir = script_dir if (script_dir / "omarchy_windows_native_layout.py").exists() else script_dir.parent / "factory-overlay/usr/local/bin"
 sys.path.insert(0, str(helper_dir))
 
-from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation, proxy_location
+from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, legacy_dispatch_needs_lua, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation, proxy_location, workspace_move_command
 
 WINDOW_ID = "a" * 32
 PID = 4607
@@ -124,7 +125,8 @@ class NativeLayoutTest(unittest.TestCase):
             location = {"pid": os.getpid(), "title": "League game" + marker_for(game_id),
                         "address": "0x1234", "mapped": True, "workspace": {"id": 1, "name": "1"}}
             view.move_to_inherited_workspace.__func__.__globals__["hyprctl_json"] = lambda _command: [location]
-            with mock.patch.object(script["subprocess"], "run") as dispatch:
+            with mock.patch.object(script["subprocess"], "run",
+                                   return_value=subprocess.CompletedProcess([], 0, "ok", "")) as dispatch:
                 self.assertTrue(view.move_to_inherited_workspace())
                 self.assertEqual(dispatch.call_args.args[0], [
                     "hyprctl", "dispatch", "movetoworkspacesilent", "3,address:0x1234"])
@@ -166,6 +168,38 @@ class NativeLayoutTest(unittest.TestCase):
         self.assertEqual(proxy_location(WINDOW_ID, clients, PID), (4, "0x563190857090"))
         self.assertEqual(inherited_workspace("league", known, clients, PID, {}), 4)
         self.assertIsNone(inherited_workspace("explorer", known, clients, PID, {}))
+
+    def test_hyprland_move_selects_lua_only_on_specific_parser_hint(self):
+        self.assertEqual(workspace_move_command(3, "0x1234", "lua"), [
+            "hyprctl", "dispatch",
+            'hl.dsp.window.move({ workspace = 3, follow = false, window = "address:0x1234" })'])
+        self.assertEqual(workspace_move_command(3, "0x1234", "legacy"), [
+            "hyprctl", "dispatch", "movetoworkspacesilent", "3,address:0x1234"])
+        for workspace, address in ((True, "0x1234"), (0, "0x1234"),
+                                   (3, '0x1234" }) ; os.execute("bad")')):
+            with self.assertRaises(LayoutError):
+                workspace_move_command(workspace, address, "lua")
+        hint = "Note: dispatch in lua is a shorthand for hl.dispatch(...), your syntax might need to be updated."
+        self.assertTrue(legacy_dispatch_needs_lua(hint))
+        self.assertFalse(legacy_dispatch_needs_lua("invalid window address"))
+        fcntl = types.ModuleType("fcntl")
+        with mock.patch.dict(sys.modules, {"fcntl": fcntl}):
+            script = runpy.run_path(str(helper_dir / "omarchy-windows-native"), run_name="native_test")
+        failed = subprocess.CompletedProcess([], 7, "", hint)
+        ok = subprocess.CompletedProcess([], 0, "ok", "")
+        with mock.patch.object(script["subprocess"], "run", side_effect=[failed, ok, ok]) as dispatch:
+            syntax = script["dispatch_workspace_move"](3, "0x1234", None)
+            self.assertEqual(syntax, "lua")
+            self.assertEqual(dispatch.call_args_list[0].args[0],
+                             workspace_move_command(3, "0x1234", "legacy"))
+            self.assertEqual(dispatch.call_args_list[1].args[0],
+                             workspace_move_command(3, "0x1234", "lua"))
+            self.assertEqual(script["dispatch_workspace_move"](3, "0x1234", syntax), "lua")
+            self.assertEqual(dispatch.call_count, 3)
+        with mock.patch.object(script["subprocess"], "run",
+                               return_value=subprocess.CompletedProcess([], 7, "", "invalid window address")) as dispatch:
+            self.assertIsNone(script["dispatch_workspace_move"](3, "0x1234", None))
+            dispatch.assert_called_once()
 
     def test_gone_client_uses_history_but_ambiguous_proxy_is_rejected(self):
         _, clients, _ = state()
