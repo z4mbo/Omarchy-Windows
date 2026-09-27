@@ -279,3 +279,41 @@ Its receipt passed seed, cut, torn, restore and reboot: an independent stopped
 backup restored the old payload, the retry installed the new payload, and the
 source backing chain remained unchanged. This is a disposable Linux CI fixture;
 automatic rollback in the installed Windows product is still unfinished.
+
+## Candidate 7: foreground failure before fullscreen retest
+
+The launcher from the successful Linux cross-build in
+[CI run 30](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36324374711),
+source `9f8713c438ad8a8f3121d58542494847be6c9bc3`, was tested against a fresh
+revision-41 disk and the normal runtime. The native Windows test job in that
+run failed on a negative socket-ACL test fixture; this was not a fully green
+release candidate. Launcher artifact `10933411796` matched ZIP SHA256
+`c298fd3ec41a9de98956ca498bfa6ffb11b7f74a6ae8c0cfd682089b10746ff9`.
+The executable matched SHA256
+`512ae7b5fc4a4f84241346b276d90c1bcf3ed0146d0c3775e0de73994f11649f`.
+The revision-41 guest and combined manifest were the same verified inputs as
+the preceding fresh Candidate 6 test. No experimental QMP runtime was used.
+
+This build includes the Blender fullscreen classifier adjustment: Blender
+removes its caption while retaining the thick frame style. The previous check
+incorrectly required that thick frame style to disappear too. The adjustment
+still needs a successful physical fullscreen retest.
+
+The desktop signed in automatically, and the packaged picker launched and
+granted Blender. Computer Use observed Blender's splash screen inside its
+tile. Before the next click, Computer Use reported other input, and a fresh
+observation could no longer access Blender as a visible app window. The host
+recorded the same QEMU-foreground ordering failure. No fullscreen toggle was
+performed during this test, so it neither validates nor disproves the new
+fullscreen classifier.
+
+Opt-in fullscreen diagnostics also exposed a logging defect: identical
+diagnostics repeated on consecutive layout retries because their limiter was
+stored on a discarded window snapshot. A subsequent source change moves the
+limiter to the projection lifetime, with bounded retention and a regression
+test. This is a diagnostics fix, not a repair for the window-order failure.
+
+Graceful guest shutdown restored Blender on Windows. Its viewport then changed
+between observations without a test action, so further desktop actions were
+paused pending confirmation that the desktop was free. Blender was left open;
+the test VM was stopped. The personalized installation was not changed.

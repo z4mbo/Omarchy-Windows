@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 	"unsafe"
 )
@@ -12,6 +13,71 @@ import (
 // This is deliberately off by default. It records only Win32 presentation
 // measurements for an already granted HWND, never titles or grant properties.
 var nativeFullscreenDiagnosticsEnabled = os.Getenv("OMARCHY_NATIVE_FULLSCREEN_DIAGNOSTICS") == "1"
+
+const (
+	nativeFullscreenDiagnosticTTL = 2 * time.Minute
+	nativeFullscreenDiagnosticCap = 32
+)
+
+type nativeFullscreenDiagnosticKey struct {
+	pid         uint32
+	hwnd        uintptr
+	created     uint64
+	incarnation uintptr
+}
+
+func nativeFullscreenDiagnosticIdentity(state *nativeProjectedWindow) nativeFullscreenDiagnosticKey {
+	return nativeFullscreenDiagnosticKey{pid: state.window.PID, hwnd: state.window.handle,
+		created: state.created, incarnation: state.window.incarnation}
+}
+
+type nativeFullscreenDiagnosticRecord struct {
+	signature string
+	logged    time.Time
+	seen      time.Time
+}
+
+// A projected-window snapshot can be recreated on every rejected layout.
+// Keep the rate gate on the bridge projection, keyed to the verified grant
+// identity, so those replacements cannot reset it.
+type nativeFullscreenDiagnosticLimiter struct {
+	mu      sync.Mutex
+	records map[nativeFullscreenDiagnosticKey]nativeFullscreenDiagnosticRecord
+}
+
+func (l *nativeFullscreenDiagnosticLimiter) allow(key nativeFullscreenDiagnosticKey, signature string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.records == nil {
+		l.records = make(map[nativeFullscreenDiagnosticKey]nativeFullscreenDiagnosticRecord)
+	}
+	for candidate, record := range l.records {
+		if now.Sub(record.seen) >= nativeFullscreenDiagnosticTTL {
+			delete(l.records, candidate)
+		}
+	}
+	if record, ok := l.records[key]; ok {
+		due := nativeFullscreenDiagnosticDue(record.signature, signature, record.logged, now)
+		record.seen = now
+		if due {
+			record.signature, record.logged = signature, now
+		}
+		l.records[key] = record
+		return due
+	}
+	if len(l.records) >= nativeFullscreenDiagnosticCap {
+		var oldestKey nativeFullscreenDiagnosticKey
+		var oldest time.Time
+		for candidate, record := range l.records {
+			if oldest.IsZero() || record.seen.Before(oldest) {
+				oldestKey, oldest = candidate, record.seen
+			}
+		}
+		delete(l.records, oldestKey)
+	}
+	l.records[key] = nativeFullscreenDiagnosticRecord{signature: signature, logged: now, seen: now}
+	return true
+}
 
 func nativeFullscreenDiagnosticDue(previous, current string, last, now time.Time) bool {
 	if now.Sub(last) < 2*time.Second {
@@ -22,7 +88,7 @@ func nativeFullscreenDiagnosticDue(previous, current string, last, now time.Time
 
 func nativeLogFullscreenDiagnostic(state *nativeProjectedWindow, outer seamlessRect,
 	previous, presentation nativeWindowPresentation, shown bool, reason string) {
-	if !nativeFullscreenDiagnosticsEnabled || state == nil {
+	if !nativeFullscreenDiagnosticsEnabled || state == nil || state.fullscreenDiagnostics == nil {
 		return
 	}
 	hwnd := state.window.handle
@@ -44,9 +110,9 @@ func nativeLogFullscreenDiagnostic(state *nativeProjectedWindow, outer seamlessR
 	now := time.Now()
 	// One changed measurement at most every two seconds, with a periodic
 	// sample no more often than every thirty seconds if the state is steady.
-	if !nativeFullscreenDiagnosticDue(state.lastFullscreenDiag, signature, state.lastFullscreenDiagAt, now) {
+	key := nativeFullscreenDiagnosticIdentity(state)
+	if !state.fullscreenDiagnostics.allow(key, signature, now) {
 		return
 	}
-	state.lastFullscreenDiag, state.lastFullscreenDiagAt = signature, now
 	logf("native fullscreen diagnostic: %s", signature)
 }

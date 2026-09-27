@@ -92,6 +92,7 @@ type nativeProjection struct {
 	foreground                atomic.Pointer[nativeForegroundSnapshot]
 	experimentalForeground    bool
 	handoffAttempts           map[seamlessWindowKey]nativeHandoffAttempt
+	fullscreenDiagnostics     nativeFullscreenDiagnosticLimiter
 	hiddenWindowSourceForTest func([]seamlessWindow) []seamlessWindow
 }
 
@@ -145,12 +146,11 @@ type nativeProjectedWindow struct {
 	uncertainMutation bool
 	// SetWindowRgn transfers ownership of the region. We retain our own copy
 	// to detect a later application-owned region change before restoring NULL.
-	lastRegion           uintptr
-	lastZOrderLog        time.Time
-	ownedPopups          map[uintptr]nativeOwnedPopup
-	lastPopupLog         time.Time
-	lastFullscreenDiag   string
-	lastFullscreenDiagAt time.Time
+	lastRegion            uintptr
+	lastZOrderLog         time.Time
+	ownedPopups           map[uintptr]nativeOwnedPopup
+	lastPopupLog          time.Time
+	fullscreenDiagnostics *nativeFullscreenDiagnosticLimiter
 }
 
 var (
@@ -952,6 +952,7 @@ func (p *nativeProjection) Apply(l nativeLayout, requestGeneration uint64) (stri
 			if err != nil {
 				return "", err
 			}
+			state.fullscreenDiagnostics = &p.fullscreenDiagnostics
 		} else if !nativeIdentityMatches(state) {
 			return "", errors.New("window identity changed")
 		}
