@@ -113,6 +113,20 @@ func fatal(format string, a ...any) {
 	os.Exit(1)
 }
 
+// A failed relaunch can happen while the previous guest's native HWNDs are
+// still being restored. fatal calls os.Exit, so normal deferred bridge cleanup
+// would not run. Keep the projection watcher alive during the error dialog,
+// then make final bounded attempts on only its tracked HWNDs before exit.
+func fatalSupervisedStart(format string, a ...any) {
+	msg := fmt.Sprintf(format, a...)
+	logf("FATAL %s", msg)
+	errorBox(msg)
+	if !nativeProjectionRestoreBeforeFatal() {
+		logf("native Windows placement did not finish restoring before startup failure")
+	}
+	os.Exit(1)
+}
+
 func finishSetupCancellation(cfg *config, err error) bool {
 	if !setupCancelled() && !errors.Is(err, errSetupCancelled) {
 		return false
@@ -826,12 +840,12 @@ func supervise(cfg *config, cmdline string) bool {
 		nativeHandoffGuestReady.Store(false)
 		controlDir, err := prepareQMPControl()
 		if err != nil {
-			fatal("Cannot prepare private VM controls: %v", err)
+			fatalSupervisedStart("Cannot prepare private VM controls: %v", err)
 		}
 		cfg.qmpDir = controlDir
 		if cfg.experimentalNativeForeground {
 			if err := ensureQMPControlDirectoryACL(controlDir); err != nil {
-				fatal("Cannot protect the experimental native QMP control: %v", err)
+				fatalSupervisedStart("Cannot protect the experimental native QMP control: %v", err)
 			}
 		}
 		proc = exec.Command(cfg.qemu, buildQemuArgs(cfg, cmdline)...)
@@ -849,10 +863,10 @@ func supervise(cfg *config, cmdline string) bool {
 		nextGeneration := qemuProcessGeneration.Load() + 1
 		nativeProjectionQemuGenerationPreparing(nextGeneration)
 		if err := prepareSeamlessSessionToken(cfg.windowTokenPath, nextGeneration); err != nil {
-			fatal("Cannot prepare the seamless guest session: %v", err)
+			fatalSupervisedStart("Cannot prepare the seamless guest session: %v", err)
 		}
 		if err := proc.Start(); err != nil {
-			fatal("QEMU failed to start: %v", err)
+			fatalSupervisedStart("QEMU failed to start: %v", err)
 		}
 		qemuPid.Store(uint32(proc.Process.Pid))
 		nativeProjectionQemuGenerationStarted(qemuProcessGeneration.Add(1))

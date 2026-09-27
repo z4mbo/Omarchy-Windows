@@ -599,3 +599,46 @@ func TestQemuGenerationRestoresBeforeResettingNativeSequence(t *testing.T) {
 		t.Fatal("second confirmed QEMU process did not reset the sequence")
 	}
 }
+
+func TestNativeFatalRestoreClosesOnlyTrackedProjection(t *testing.T) {
+	trackedKey := seamlessWindowKey{pid: 123, handle: 0}
+	unrelatedKey := seamlessWindowKey{pid: 456, handle: 0x456}
+	p := &nativeProjection{stop: make(chan struct{}), tracked: map[seamlessWindowKey]*nativeProjectedWindow{
+		trackedKey: {window: seamlessWindow{PID: 123, handle: 0}},
+	}}
+	b := &seamlessWindowBridge{projection: p, grants: map[seamlessWindowKey]seamlessGrant{
+		unrelatedKey: {},
+	}}
+	p.bridge = b
+	previous := activeSeamlessBridge.Swap(b)
+	defer activeSeamlessBridge.Store(previous)
+	if !nativeProjectionRestoreBeforeFatal() {
+		t.Fatal("failed to release an invalid tracked HWND before fatal exit")
+	}
+	if !p.closed || len(p.tracked) != 0 || len(b.grants) != 1 {
+		t.Fatal("fatal cleanup left a tracked HWND or changed an unrelated grant")
+	}
+	select {
+	case <-p.stop:
+	default:
+		t.Fatal("fatal cleanup did not stop the projection watcher")
+	}
+	if !nativeProjectionRestoreBeforeFatal() {
+		t.Fatal("fatal cleanup was not idempotent")
+	}
+}
+
+func TestNativeFatalRestoreWaitIsBounded(t *testing.T) {
+	blocked := make(chan struct{})
+	start := time.Now()
+	if waitNativeRestore(func() bool { <-blocked; return true }, 20*time.Millisecond) {
+		t.Fatal("blocked restoration reported success")
+	}
+	close(blocked)
+	if time.Since(start) > time.Second {
+		t.Fatal("blocked restoration stalled the startup error path")
+	}
+	if !waitNativeRestore(func() bool { return true }, time.Second) {
+		t.Fatal("completed restoration was not reported")
+	}
+}

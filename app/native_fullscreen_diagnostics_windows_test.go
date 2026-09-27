@@ -8,7 +8,7 @@ import (
 )
 
 func TestNativeFullscreenDiagnosticsRateLimit(t *testing.T) {
-	start := time.Now()
+	start := time.Unix(0, 0)
 	if nativeFullscreenDiagnosticDue("before", "after", start, start.Add(time.Second)) {
 		t.Fatal("changed state logged faster than the two-second cap")
 	}
@@ -29,7 +29,7 @@ func TestNativeFullscreenDiagnosticGateSurvivesSnapshotReplacementAndStaysBounde
 	if nativeFullscreenDiagnosticIdentity(replacement) != grant {
 		t.Fatal("replacement snapshot lost the same grant identity")
 	}
-	start := time.Now()
+	start := time.Unix(0, 0)
 	if !limiter.allow(grant, "same measurement", start) {
 		t.Fatal("first diagnostic was suppressed")
 	}
@@ -48,14 +48,20 @@ func TestNativeFullscreenDiagnosticGateSurvivesSnapshotReplacementAndStaysBounde
 		!limiter.allow(grant, "changed measurement", start.Add(33*time.Second)) {
 		t.Fatal("changed measurement ignored its two-second minimum")
 	}
+	var lastInserted time.Time
 	for i := 0; i < nativeFullscreenDiagnosticCap+5; i++ {
 		other := nativeFullscreenDiagnosticKey{pid: uint32(30000 + i), hwnd: uintptr(i + 1), created: 200}
-		limiter.allow(other, "first", start.Add(34*time.Second+time.Duration(i)*time.Millisecond))
+		lastInserted = start.Add(34*time.Second + time.Duration(i)*time.Millisecond)
+		limiter.allow(other, "first", lastInserted)
 	}
 	if len(limiter.records) != nativeFullscreenDiagnosticCap {
 		t.Fatal("diagnostic identity cache exceeded its cap")
 	}
-	limiter.allow(grant, "after expiry", start.Add(34*time.Second+nativeFullscreenDiagnosticTTL))
+	// Expire relative to the newest insertion; every cached identity must
+	// have reached the inclusive TTL, including the final millisecond offset.
+	if !limiter.allow(grant, "after expiry", lastInserted.Add(nativeFullscreenDiagnosticTTL)) {
+		t.Fatal("expired grant diagnostic was suppressed")
+	}
 	if len(limiter.records) != 1 {
 		t.Fatal("expired diagnostic identities were retained")
 	}

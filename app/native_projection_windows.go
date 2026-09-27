@@ -305,6 +305,39 @@ func nativeProjectionQemuGenerationPreparing(generation uint64) {
 	p.mu.Unlock()
 }
 
+const nativeFatalRestoreLimit = 2 * time.Second
+
+func waitNativeRestore(run func() bool, limit time.Duration) bool {
+	done := make(chan bool, 1)
+	go func() { done <- run() }()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case restored := <-done:
+		return restored
+	case <-timer.C:
+		return false
+	}
+}
+
+// Only nativeProjection.Close touches tracked HWNDs, using its existing
+// identity and last-applied-state checks. Do not let a stuck Win32 call block
+// the startup error path indefinitely. The caller has already shown the
+// error dialog; if this wait expires, Close may continue until process exit.
+func nativeProjectionRestoreBeforeFatal() bool {
+	bridge := activeSeamlessBridge.Load()
+	if bridge == nil || bridge.projection == nil {
+		return true
+	}
+	p := bridge.projection
+	return waitNativeRestore(func() bool {
+		p.Close()
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.closed && len(p.tracked) == 0
+	}, nativeFatalRestoreLimit)
+}
+
 func (p *nativeProjection) auditGrantsLocked() bool {
 	changed := false
 	p.bridge.mu.Lock()
