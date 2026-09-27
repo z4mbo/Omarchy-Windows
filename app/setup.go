@@ -313,7 +313,9 @@ func ensureRuntime(cfg *config, release, sumsSHA256 string) (string, error) {
 			// before failing. Recovery reconciles it on the next launch.
 			return "", err
 		}
-		os.Remove(zipPath)
+		if removeZip {
+			os.Remove(zipPath)
+		}
 		return root, nil
 	}
 	os.RemoveAll(root)

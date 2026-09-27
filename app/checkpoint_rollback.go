@@ -211,6 +211,19 @@ func (s checkpointStore) Rollback(id string, report backupProgress) (string, err
 }
 
 func (s checkpointStore) rollbackUsingTool(id, tool string, report backupProgress) (string, error) {
+	return s.rollbackWithToolPolicy(id, tool, "", "", "", report)
+}
+
+// Managed guest update recovery must use the checkpoint's verified boot state.
+// The current build specification or runtime tool may be torn by an update.
+func (s checkpointStore) rollbackManagedGuestUpdate(id, expectedArchitecture, diskFormat, diskName string, report backupProgress) (string, error) {
+	if expectedArchitecture != "x86_64" {
+		return "", fmt.Errorf("unsupported managed guest update checkpoint architecture")
+	}
+	return s.rollbackWithToolPolicy(id, "", expectedArchitecture, diskFormat, diskName, report)
+}
+
+func (s checkpointStore) rollbackWithToolPolicy(id, tool, expectedArchitecture, diskFormat, diskName string, report backupProgress) (string, error) {
 	if err := recoverCheckpointRollback(s.installation); err != nil {
 		return "", err
 	}
@@ -219,7 +232,13 @@ func (s checkpointStore) rollbackUsingTool(id, tool string, report backupProgres
 			return "", fmt.Errorf("finish the pending update before rolling back")
 		}
 	}
-	inventory, err := inspectInstallationDisk(s.installation)
+	var inventory installationDisk
+	var err error
+	if expectedArchitecture != "" {
+		inventory, err = managedGuestUpdateDisk(s.installation, diskFormat, diskName)
+	} else {
+		inventory, err = inspectInstallationDisk(s.installation)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -239,19 +258,30 @@ func (s checkpointStore) rollbackUsingTool(id, tool string, report backupProgres
 	if err := s.restoreVerified(id, next, report); err != nil {
 		return "", err
 	}
-	currentArch, err := checkpointGuestArchitecture(s.installation)
-	if err != nil {
-		return "", err
-	}
 	nextArch, err := checkpointGuestArchitecture(next)
 	if err != nil {
 		return "", err
 	}
-	if currentArch != nextArch {
-		return "", fmt.Errorf("snapshot architecture %s does not match this installation (%s)", nextArch, currentArch)
+	if expectedArchitecture != "" {
+		if nextArch != expectedArchitecture {
+			return "", fmt.Errorf("managed guest update checkpoint architecture changed")
+		}
+	} else {
+		currentArch, err := checkpointGuestArchitecture(s.installation)
+		if err != nil {
+			return "", err
+		}
+		if currentArch != nextArch {
+			return "", fmt.Errorf("snapshot architecture %s does not match this installation (%s)", nextArch, currentArch)
+		}
 	}
 	if inventory.Format == "qcow2" {
-
+		if expectedArchitecture != "" {
+			tool, err = managedGuestUpdateRestoredTool(next)
+			if err != nil {
+				return "", err
+			}
+		}
 		if err := makeRestoredDiskPortable(next, tool, report); err != nil {
 			return "", err
 		}
@@ -313,6 +343,25 @@ func (s checkpointStore) rollbackUsingTool(id, tool string, report backupProgres
 		return "", err
 	}
 	return filepath.Join(stage, "data"), nil
+}
+
+func managedGuestUpdateRestoredTool(restored string) (string, error) {
+	name := "qemu-img"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	tool := filepath.Join(restored, "runtime", "bin", name)
+	info, err := os.Lstat(tool)
+	if err != nil {
+		return "", err
+	}
+	if err := rejectMoveLink(tool, info); err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 {
+		return "", fmt.Errorf("verified checkpoint has no disk conversion tool")
+	}
+	return tool, nil
 }
 
 func randomCheckpointRollbackID() string {

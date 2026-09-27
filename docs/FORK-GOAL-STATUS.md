@@ -112,6 +112,11 @@ streaming remains different from the requested individual-window experience.
 - Fresh portable and standard setup functions passed isolated tests. A full
   graphical one-click installation and signed release remain open. Repository
   release signing credentials are not configured.
+- The [managed guest update checkpoint component](MANAGED-GUEST-UPDATE.md)
+  restored a disposable QCOW2 disk after deliberate damage to its header,
+  installed build metadata, runtime executable and DLLs. It remains disconnected
+  from normal startup and package updates; an installed automatic updater is
+  unfinished. Portable runtime archive retention now passes an offline repair test.
 
 The README and linked evidence distinguish observed results from unfinished
 work. The old personalized installation has not been removed and replaced with

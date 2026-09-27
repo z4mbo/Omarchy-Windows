@@ -22,6 +22,8 @@ The [revision-39 image passed its build, automated desktop boot, five older-inst
 
 A further [recovery test](docs/GUEST-UPGRADES.md#package-write-interruption-and-offline-recovery) interrupts a real package payload write in a disposable guest and restores an independent stopped-disk backup. CI and release publication require this check. Its results and limits are recorded in PR #1; it does not provide automatic package rollback in the installed Windows app.
 
+A new [managed-update checkpoint component](docs/MANAGED-GUEST-UPDATE.md) passed recovery tests with a damaged disposable QCOW2 header, build metadata, and runtime tools. It restores from the verified checkpoint but is not yet connected to normal startup or package updates. Portable runtime updates also retain their cached archive for offline repair.
+
 This fork builds on [Try Omarchy for Windows](https://github.com/omacom/try-omarchy-windows) by [Omacom](https://github.com/omacom).
 The Omarchy mark in the app icon is sourced from the
 [official Omarchy brand kit](https://omarchy.org/brand/) and remains subject to
