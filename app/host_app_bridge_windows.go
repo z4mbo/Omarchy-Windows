@@ -147,7 +147,14 @@ func previewHostApp(id string) error {
 	if err != nil {
 		return err
 	}
-	return shellOpenWindowApp(path)
+	name := id
+	for _, app := range listHostApps() {
+		if app.ID == id {
+			name = app.Name
+			break
+		}
+	}
+	return shellOpenWindowApp(path, name)
 }
 
 func hostAppPath(id string) (string, error) {
@@ -180,7 +187,7 @@ func hostAppPath(id string) (string, error) {
 // ShellExecuteEx supplies a process handle when it starts a new process. We
 // only auto-share a window if that process was created for this request; DDE
 // and single-instance handoffs remain visible solely to the Windows user.
-func shellOpenWindowApp(path string) error {
+func shellOpenWindowApp(path, name string) error {
 	bridge := activeSeamlessBridge.Load()
 	var before []seamlessWindow
 	if bridge != nil {
@@ -200,7 +207,11 @@ func shellOpenWindowApp(path string) error {
 	}
 	if si.hProcess == 0 {
 		if bridge != nil {
-			logf("Windows app opened without a new process; choose Show Windows app in Omarchy from the tray")
+			if bridge.offerWindowSelector(name, before, time.Now()) {
+				logf("Windows app opened without a new process; offered the explicit Windows window selector")
+			} else {
+				logf("Windows app opened without a new process; use Show Windows app in Omarchy from the tray")
+			}
 		}
 		return nil
 	}
@@ -220,12 +231,16 @@ func shellOpenWindowApp(path string) error {
 		uintptr(unsafe.Pointer(&kernelTime)), uintptr(unsafe.Pointer(&userTime)))
 	if gotTimes != 0 && pid != 0 && !time.Unix(0, created.Nanoseconds()).Before(started) {
 		creation := uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime)
-		if bridge.noteLaunchProcess(uint32(pid), creation, handle, before, time.Now()) {
+		if bridge.noteLaunchProcessNamed(uint32(pid), creation, handle, before, name, time.Now()) {
 			handle = 0 // the bridge owns the exact launcher process lifetime now
 			return nil
 		}
 	}
-	logf("Windows app launch could not be tied to a new process; choose Show Windows app in Omarchy from the tray")
+	if bridge.offerWindowSelector(name, before, time.Now()) {
+		logf("Windows app launch could not be tied to a new process; offered the explicit Windows window selector")
+	} else {
+		logf("Windows app launch could not be tied to a new process; use Show Windows app in Omarchy from the tray")
+	}
 	return nil
 }
 

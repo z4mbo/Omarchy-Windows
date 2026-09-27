@@ -31,11 +31,41 @@ func nativeTestLayout() nativeLayout {
 	return l
 }
 
+func TestNativeHeartbeatKeepsAppResizeButRepairsLostVisibility(t *testing.T) {
+	wanted := seamlessRect{100, 200, 900, 700}
+	appResized := seamlessRect{100, 200, 1100, 800}
+	state := &nativeProjectedWindow{
+		applied: true, requestedShown: true, requestedRect: wanted,
+		lastRect: appResized, lastVisible: true,
+	}
+	tile := nativeTile{Visible: true}
+	if !nativeCanKeepPlacement(state, tile, wanted, true) {
+		t.Fatal("app-chosen resize should not be reset on a visible heartbeat")
+	}
+	if nativeCanKeepPlacement(state, tile, wanted, false) {
+		t.Fatal("a hidden native window must be shown again for a visible guest tile")
+	}
+	if nativeCanKeepPlacement(state, tile, seamlessRect{200, 200, 1000, 700}, true) {
+		t.Fatal("a new guest tile position must be applied")
+	}
+	tile.Visible = false
+	if nativeCanKeepPlacement(state, tile, wanted, false) {
+		t.Fatal("first request to hide the native window must be applied")
+	}
+	state.requestedShown = false
+	if !nativeCanKeepPlacement(state, tile, wanted, false) {
+		t.Fatal("an already hidden native window should stay hidden")
+	}
+	if nativeCanKeepPlacement(state, tile, wanted, true) {
+		t.Fatal("an app-shown window must be hidden again for a hidden guest tile")
+	}
+}
+
 func TestTrayReconciliationRetainsHiddenNativeGrant(t *testing.T) {
 	w := seamlessWindow{PID: 4711, handle: 0xabc, Class: "OwnedEditor", Title: "Editor"}
 	backend := &fakeSeamlessBackend{items: []seamlessWindow{w}}
 	b := &seamlessWindowBridge{token: strings.Repeat("d", 64), backend: backend,
-		grants: map[seamlessWindowKey]string{seamlessKey(w): w.Class}}
+		grants: map[seamlessWindowKey]seamlessGrant{seamlessKey(w): {class: w.Class}}}
 	p := &nativeProjection{bridge: b, hiddenWindowSourceForTest: func(visible []seamlessWindow) []seamlessWindow {
 		if len(visible) == 0 {
 			return []seamlessWindow{w}
@@ -391,7 +421,7 @@ func TestNativeRestoreKeepsSnapshotAcrossFailures(t *testing.T) {
 func TestNativeGrantLossClearsForegroundRouting(t *testing.T) {
 	w := seamlessWindow{PID: 9, handle: 0x987, Class: "OwnedApp"}
 	key := seamlessKey(w)
-	b := &seamlessWindowBridge{grants: map[seamlessWindowKey]string{key: w.Class}}
+	b := &seamlessWindowBridge{grants: map[seamlessWindowKey]seamlessGrant{key: {class: w.Class}}}
 	p := &nativeProjection{bridge: b, tracked: map[seamlessWindowKey]*nativeProjectedWindow{
 		key: {window: w},
 	}, deadline: time.Now().Add(time.Second)}

@@ -319,8 +319,10 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 			uintptr(point.x), uintptr(point.y), 0, hwnd, 0)
 		procPostMessageW.Call(hwnd, wmNull, 0, 0)
 		if command >= trayShareWindowBase && command < trayShareWindowBase+uintptr(len(shareChoices)) {
-			if bridge != nil && !bridge.grantWindow(shareChoices[command-trayShareWindowBase]) {
-				infoBox("That Windows window has closed. Open the tray menu to choose another.")
+			if bridge != nil {
+				if err := bridge.grantWindowChecked(shareChoices[command-trayShareWindowBase]); err != nil {
+					infoBox("Cannot show that Windows window in Omarchy: " + err.Error())
+				}
 			}
 			return
 		}
@@ -392,6 +394,9 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 			return 0
 		}
 		switch message {
+		case traySelectorMessage:
+			showWindowSelector(window)
+			return 0
 		case trayNoticeMessage:
 			if text := pendingTrayNotice.Swap(nil); text != nil {
 				notice := nid

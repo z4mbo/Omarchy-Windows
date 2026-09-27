@@ -102,6 +102,18 @@ EXPECTED_FACTS = {
     "complete-modules": "yes",
 }
 
+
+def add_idle_guest_facts(revision: int, facts: dict[str, str], expected: dict[str, str],
+                         service_path: Path = Path("/usr/share/omarchy/shell/plugins/services/idle/Service.qml")) -> None:
+    """Check the first user's Omarchy-owned idle preference on fresh images."""
+    if revision < 39:
+        return
+    facts["idle-stay-awake-default"] = (
+        "test -f ~/.local/state/omarchy/indicators/stay-awake && "
+        f"grep -Fq stay-awake {shlex.quote(str(service_path))} && echo yes || echo no"
+    )
+    expected["idle-stay-awake-default"] = "yes"
+
 # This is a public, disposable smoke-test value, never a production bridge token.
 WINDOWS_APPS_TEST_TOKEN = "a1" * 32
 
@@ -257,6 +269,7 @@ def main() -> None:
         )
         EXPECTED_FACTS["windows-apps-input-helper"] = "yes"
     add_native_guest_facts(args.compat_revision, FACT_CHECKS, EXPECTED_FACTS)
+    add_idle_guest_facts(args.compat_revision, FACT_CHECKS, EXPECTED_FACTS)
 
     login_delay = args.login_delay if args.login_delay is not None else (60 if args.accel == "tcg" else 0)
     if login_delay < 0:

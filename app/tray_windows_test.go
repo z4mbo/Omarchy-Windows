@@ -15,9 +15,9 @@ func TestTrayChoicesKeepHiddenGrantRevocableWithoutOfferingItAgain(t *testing.T)
 	backend := &fakeSeamlessBackend{items: []seamlessWindow{visible}}
 	bridge := &seamlessWindowBridge{
 		token: strings.Repeat("a", 64), backend: backend,
-		grants: map[seamlessWindowKey]string{
-			seamlessKey(hidden): hidden.Class,
-			seamlessKey(closed): closed.Class,
+		grants: map[seamlessWindowKey]seamlessGrant{
+			seamlessKey(hidden): {class: hidden.Class},
+			seamlessKey(closed): {class: closed.Class},
 		},
 	}
 	hiddenOwned := true

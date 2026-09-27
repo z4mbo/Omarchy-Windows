@@ -30,6 +30,12 @@ native proxy on workspace 2 at `[12, 38]`, size `[2536, 1390]`. The real Windows
 window occupied the corresponding tile, inside the visible Omarchy borders and
 workspace bar.
 
+A later mouse-only check opened **Apps** from the Omarchy logo, scrolled to
+**Windows Apps in Omarchy**, and clicked it. The Windows picker opened as a
+Linux tile beside the existing proxy. This confirms the desktop menu route
+works with the development helpers; the first picker test had launched the
+helper through compositor IPC.
+
 Clicking its actual editable field and typing `Omarchy native input test`
 succeeded. The Windows accessibility value and visible text agreed. The host
 bridge's frame endpoint returned HTTP 409 after native activation, confirming
@@ -47,6 +53,13 @@ Character Map returned to its original small Windows window and retained the
 exact typed text. Computer Use observed the restored window and accessibility
 value. This verifies one controller-crash restoration case; host launcher/QEMU
 crashes and broader app recovery remain separate checks.
+
+Restarting the controller exposed a separate ordering defect: the real window
+could stay behind QEMU while the bridge accepted a visible layout with an empty
+suspension reason. Explicitly activating Character Map revealed the correctly
+positioned native window. Returning to a workspace alone is not a substitute
+for verifying controller restart recovery; this case needs a new host build
+and a physical retest.
 
 Initial observations immediately after actions sometimes captured the previous
 frame or the empty Linux proxy. Subsequent observations showed the settled
@@ -73,6 +86,13 @@ window content. No latency or frame-time measurement was made.
    therefore appeared as an ordinary host app and suspended the projected
    Character Map while foreground. Its untouched test session was closed.
    Descendant-process launch tracking requires a new host build and retest.
+4. Selecting File Explorer in the picker created a new Windows File Explorer
+   window, confirmed through Computer Use's returned window and accessibility
+   state. The bridge still listed only Character Map, and Hyprland had no
+   Explorer proxy. The test window was closed without opening or changing a
+   file. This build does not automatically attach Explorer's reused-process
+   window; fresh-window correlation needs a separate fix from Blender's direct
+   child-process tracking.
 
 ## Remaining checks
 
@@ -85,5 +105,37 @@ window content. No latency or frame-time measurement was made.
   Walker menu, although mouse clicks did. Native Windows text input passed.
   Earlier SDL tests recorded a similar automation-input limitation; physical
   keyboard behavior needs a separate check before drawing a product conclusion.
-- Complete factory-image and existing-disk upgrade validation for the new
-  dependency and workspace fixes, followed by a complete installer test.
+- Physical Windows validation using the complete current factory image,
+  followed by a complete installer test.
+
+## Follow-up CI and idle preference
+
+[CI run 25](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36318844583),
+source commit `918bb56cb5fc987ed57d2d206d536b12bccfaeef`, passed the launcher,
+Windows tests, guest contracts, and complete revision-38 image boot. Its
+five-boot existing-disk sequence also passed: seed, upgrade, reboot, boot with
+the older image, and return to the candidate. The logs confirm Zenity is
+package-owned after the upgrade and retained across subsequent boots, while
+the test documents, settings, and Neovim configuration remain intact. This is
+Linux KVM image/upgrade evidence, separate from Windows desktop acceptance.
+
+The downloaded `guest-upgrade-evidence` artifact, ID `10932241001`, matched
+GitHub's archive SHA256
+`bd3d9a66bf579e4bf56a277851da5a3fbbfd497ae8e1d341dbb85f01395f9cc1`.
+The same run subsequently passed interrupted package-write recovery. Its
+`package-write-recovery-evidence` artifact, ID `10931892664`, matched archive
+SHA256 `383999df52eec11a21c4a9b67ff9400d9ec54c265b23e79b8c83a4de95d285a6`.
+The receipt reports `passed: true` for seed, cut, torn, restore, and reboot,
+with an unchanged source disk chain. This remains a Linux CI recovery test;
+it does not establish automatic Windows recovery from every failed update.
+
+The user subsequently requested disabling Omarchy's automatic locking. After
+the user unlocked the test VM, the supported `omarchy-shell idle disable`
+command enabled Stay Awake. Its status returned `enabled: false` and
+`stayAwake: true`, with idle timers stopped. The preference file
+`~/.local/state/omarchy/indicators/stay-awake` was present. This first-party
+preference controls both the automatic screensaver and idle lock.
+
+Guest patch 0093 seeds this preference only in the new-user skeleton and raises
+the compatibility revision to 39. It does not rewrite existing users' choices.
+The new factory-image default awaits its CI boot check.

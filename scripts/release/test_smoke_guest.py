@@ -38,6 +38,34 @@ class ParseFactsTests(unittest.TestCase):
 
 
 class NativeGuestFactsTests(unittest.TestCase):
+    def test_revision39_fresh_idle_preference_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            service = home / "idle service.qml"
+            service.write_text('property string marker: "stay-awake"\n')
+            facts, expected = {}, {}
+            smoke_guest.add_idle_guest_facts(38, facts, expected, service)
+            self.assertNotIn("idle-stay-awake-default", facts)
+            smoke_guest.add_idle_guest_facts(39, facts, expected, service)
+            self.assertEqual(expected["idle-stay-awake-default"], "yes")
+            if os.name != "posix" or not shutil.which("bash"):
+                return
+            command = facts["idle-stay-awake-default"]
+            environment = dict(os.environ, HOME=directory)
+
+            def probe() -> str:
+                result = subprocess.run(["bash", "-c", command], env=environment,
+                                        capture_output=True, text=True, check=True)
+                return result.stdout.strip()
+
+            self.assertEqual(probe(), "no")
+            marker = home / ".local/state/omarchy/indicators/stay-awake"
+            marker.parent.mkdir(parents=True)
+            marker.touch()
+            self.assertEqual(probe(), "yes")
+            service.write_text("idle handling without marker recognition\n")
+            self.assertEqual(probe(), "no")
+
     def test_fresh_image_requires_runtime_picker_dependency(self) -> None:
         self.assertEqual(smoke_guest.EXPECTED_FACTS["runtime-package"], "4.0.3-5")
         self.assertIn("pacman -Qq zenity", smoke_guest.FACT_CHECKS["windows-app-picker"])

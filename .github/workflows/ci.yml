@@ -62,6 +62,21 @@ jobs:
       - name: Validate current release pin
         run: scripts/release/validate-pin.py --require-public --allow-upstream-bootstrap --require-independent-key "$(sed -n 's/.*releases\/download\/\([^\"]*\).*/\1/p' app/manifest.go)"
 
+      - name: Retain unsigned launcher for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        run: sha256sum TryOmarchy.exe > TryOmarchy.exe.sha256
+
+      - name: Upload unsigned launcher test candidate
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-windows-launcher-test-only
+          path: |
+            TryOmarchy.exe
+            TryOmarchy.exe.sha256
+          retention-days: 3
+          if-no-files-found: error
+
   windows-launcher:
     name: Windows launcher
     runs-on: windows-latest
@@ -117,6 +132,7 @@ jobs:
                            'scripts/release/smoke-package-write-recovery.py',
                            'scripts/release/package-write-recovery',
                            'scripts/release/prepare-guest-upgrade.py',
+                           'scripts/release/split-candidate-image.py',
                            'scripts/release/verify-guest-integration.py',
                            '.github/workflows/ci.yml')
                   result = subprocess.run(['git', 'diff', '--quiet', base, head, '--', *paths])
@@ -211,6 +227,106 @@ jobs:
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
+
+      - name: Prepare bounded rootfs downloads for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        run: |
+          python3 scripts/release/split-candidate-image.py \
+            "$ARTIFACT_DIR/rootfs.ext4.zst" "$ARTIFACT_DIR/SHA256SUMS" guest-candidate-parts
+          cp -- "$ARTIFACT_DIR/SHA256SUMS" guest-candidate-parts/SHA256SUMS
+
+      - name: Upload rootfs parts index for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-parts-index-test-only
+          path: |
+            guest-candidate-parts/parts-manifest.json
+            guest-candidate-parts/SHA256SUMS
+            guest-candidate/guest-manifest.json
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Upload rootfs part 00 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-00-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-00
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 01 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-01-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-01
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 02 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-02-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-02
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 03 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-03-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-03
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 04 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-04-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-04
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 05 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-05-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-05
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 06 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-06-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-06
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 07 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-07-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-07
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
 
   guest-upgrade:
     name: Existing guest upgrade

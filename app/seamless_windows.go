@@ -46,7 +46,8 @@ type seamlessWindowBridge struct {
 	nativeActive bool         // sticky for this bridge boot after the first valid layout
 	captureWarm  sync.Once
 	mu           sync.Mutex
-	grants       map[seamlessWindowKey]string
+	grants       map[seamlessWindowKey]seamlessGrant
+	retired      []seamlessRetiredGrant
 	pending      []seamlessLaunch
 	closed       bool
 }
@@ -56,12 +57,26 @@ type seamlessWindowKey struct {
 	handle uintptr
 }
 
+type seamlessGrant struct {
+	class       string
+	created     uint64
+	threadID    uint32
+	incarnation uintptr
+}
+
+type seamlessRetiredGrant struct {
+	key   seamlessWindowKey
+	grant seamlessGrant
+}
+
 type seamlessLaunch struct {
-	pid      uint32
-	created  uint64 // FILETIME of the ShellExecuteEx process; zero only in legacy tests
-	handle   syscall.Handle // retained until grant, expiry, or bridge shutdown
-	until    time.Time
-	previous map[seamlessWindowKey]bool
+	pid          uint32
+	created      uint64         // FILETIME of the ShellExecuteEx process; zero only in legacy tests
+	handle       syscall.Handle // retained until grant, expiry, or bridge shutdown
+	until        time.Time
+	previous     map[seamlessWindowKey]bool
+	lastError    string
+	selectorName string // nonempty only for an explicit guest app request
 }
 
 type seamlessWindowBackend interface {
@@ -72,19 +87,23 @@ type seamlessWindowBackend interface {
 }
 
 type seamlessWindow struct {
-	ID         string `json:"id"`
-	HWND       string `json:"hwnd"`
-	PID        uint32 `json:"pid"`
-	Title      string `json:"title"`
-	Class      string `json:"class"`
-	Process    string `json:"process"`
-	AppGroup   string `json:"appGroup"`
-	X          int32  `json:"x"`
-	Y          int32  `json:"y"`
-	Width      int32  `json:"width"`
-	Height     int32  `json:"height"`
-	Fullscreen bool   `json:"fullscreen"`
-	handle     uintptr
+	ID            string `json:"id"`
+	HWND          string `json:"hwnd"`
+	PID           uint32 `json:"pid"`
+	Title         string `json:"title"`
+	Class         string `json:"class"`
+	Process       string `json:"process"`
+	AppGroup      string `json:"appGroup"`
+	X             int32  `json:"x"`
+	Y             int32  `json:"y"`
+	Width         int32  `json:"width"`
+	Height        int32  `json:"height"`
+	Fullscreen    bool   `json:"fullscreen"`
+	handle        uintptr
+	created       uint64  // process creation FILETIME, captured during enumeration
+	threadID      uint32  // GUI thread that owned this HWND during enumeration
+	incarnation   uintptr // property marker on a granted native HWND
+	grantProperty string  // bridge-specific Win32 property name
 }
 
 type seamlessInput struct {
@@ -179,6 +198,7 @@ func runSeamlessWindowBridge() (string, func(), error) {
 		if bridge.projection != nil {
 			bridge.projection.Close()
 		}
+		bridge.closeGrants()
 		// A legacy guest may have used capture before native activation.
 		stopSeamlessWGC()
 		_ = os.Remove(path)
@@ -363,7 +383,7 @@ func (b *seamlessWindowBridge) catalogue() []seamlessWindow {
 }
 
 func (b *seamlessWindowBridge) windowID(window seamlessWindow) string {
-	identity := fmt.Sprintf("%x:%x", window.PID, window.handle)
+	identity := fmt.Sprintf("%x:%x:%x:%x", window.PID, window.handle, window.created, window.incarnation)
 	mac := hmac.New(sha256.New, []byte(b.token))
 	_, _ = mac.Write([]byte(identity))
 	return hex.EncodeToString(mac.Sum(nil)[:16])
@@ -376,26 +396,63 @@ func seamlessKey(window seamlessWindow) seamlessWindowKey {
 // The host chooses grants. The bearer token only permits use of already
 // granted windows; it cannot nominate a host HWND or inspect other titles.
 func (b *seamlessWindowBridge) grantWindow(window seamlessWindow) bool {
+	return b.grantWindowChecked(window) == nil
+}
+
+func (b *seamlessWindowBridge) grantWindowChecked(window seamlessWindow) error {
 	for _, current := range b.backend.windows() {
-		if seamlessKey(current) == seamlessKey(window) && current.Class == window.Class {
-			b.mu.Lock()
-			if b.grants == nil {
-				b.grants = make(map[seamlessWindowKey]string)
+		selector := window.grantProperty == b.selectorPropertyName() && window.incarnation != 0
+		if seamlessKey(current) == seamlessKey(window) && current.Class == window.Class &&
+			current.created == window.created && current.threadID == window.threadID &&
+			(current.incarnation == window.incarnation || (selector && current.incarnation == 0)) {
+			if selector {
+				current.incarnation = window.incarnation
+				current.grantProperty = window.grantProperty
+				if !seamlessWindowStillMatches(current) {
+					return errors.New("window identity changed before selection")
+				}
 			}
-			b.grants[seamlessKey(current)] = current.Class
-			b.mu.Unlock()
-			return true
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			if b.closed {
+				return errors.New("Windows app bridge has stopped")
+			}
+			if existing, ok := b.grants[seamlessKey(current)]; ok && b.grantMatches(current, existing) {
+				return nil
+			}
+			grant, err := b.newGrant(current)
+			if err != nil {
+				return err
+			}
+			if selector && nativeWindowProperty(current.handle, window.grantProperty) != window.incarnation {
+				nativeRemoveGrantProperty(current.handle, b.grantPropertyName(), grant.incarnation)
+				return errors.New("window identity changed during selection")
+			}
+			if b.grants == nil {
+				b.grants = make(map[seamlessWindowKey]seamlessGrant)
+			}
+			b.grants[seamlessKey(current)] = grant
+			return nil
 		}
 	}
-	return false
+	return errors.New("window identity changed before grant")
 }
 
 func (b *seamlessWindowBridge) revokeWindow(window seamlessWindow) {
 	b.mu.Lock()
-	delete(b.grants, seamlessKey(window))
+	key := seamlessKey(window)
+	grant, granted := b.grants[key]
+	if !granted || !b.grantMatches(window, grant) {
+		b.mu.Unlock()
+		return
+	}
+	delete(b.grants, key)
 	b.mu.Unlock()
 	if b.projection != nil {
 		b.projection.Release(window)
+	}
+	if granted {
+		b.retireGrant(key, grant)
 	}
 }
 
@@ -407,6 +464,10 @@ func (b *seamlessWindowBridge) noteLaunch(pid uint32, before []seamlessWindow, n
 
 // The caller transfers ownership of handle only when this returns true.
 func (b *seamlessWindowBridge) noteLaunchProcess(pid uint32, created uint64, handle syscall.Handle, before []seamlessWindow, now time.Time) bool {
+	return b.noteLaunchProcessNamed(pid, created, handle, before, "", now)
+}
+
+func (b *seamlessWindowBridge) noteLaunchProcessNamed(pid uint32, created uint64, handle syscall.Handle, before []seamlessWindow, name string, now time.Time) bool {
 	if pid == 0 {
 		return false
 	}
@@ -422,7 +483,7 @@ func (b *seamlessWindowBridge) noteLaunchProcess(pid uint32, created uint64, han
 	if b.closed {
 		return false
 	}
-	b.pending = append(b.pending, seamlessLaunch{pid: pid, created: created, handle: handle, until: now.Add(12 * time.Second), previous: previous})
+	b.pending = append(b.pending, seamlessLaunch{pid: pid, created: created, handle: handle, until: now.Add(12 * time.Second), previous: previous, selectorName: name})
 	return true
 }
 
@@ -446,14 +507,19 @@ func (b *seamlessWindowBridge) sharedWindows(windows []seamlessWindow, now time.
 		windows = append(windows, b.projection.HiddenWindows(windows)...)
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	current := make(map[seamlessWindowKey]string, len(windows))
+	defer func() {
+		b.mu.Unlock()
+		b.cleanupRetiredGrants()
+	}()
+	current := make(map[seamlessWindowKey]seamlessWindow, len(windows))
 	for _, window := range windows {
-		current[seamlessKey(window)] = window.Class
+		current[seamlessKey(window)] = window
 	}
-	for key, class := range b.grants {
-		if current[key] != class {
+	for key, grant := range b.grants {
+		window, exists := current[key]
+		if !exists || !b.grantMatches(window, grant) {
 			delete(b.grants, key)
+			b.retired = append(b.retired, seamlessRetiredGrant{key: key, grant: grant})
 		}
 	}
 	var parents map[uint32]uint32
@@ -469,7 +535,18 @@ func (b *seamlessWindowBridge) sharedWindows(windows []seamlessWindow, now time.
 			if launch.handle != 0 {
 				_ = syscall.CloseHandle(launch.handle)
 			}
-			logf("Windows app window was not found after launch; choose Show Windows app in Omarchy from the tray")
+			if launch.lastError != "" {
+				logf("Windows app window could not be granted: %s", launch.lastError)
+			}
+			if launch.selectorName != "" {
+				if b.offerWindowSelectorFromKeys(launch.selectorName, launch.previous, now) {
+					logf("Windows app window was not found after launch; offered the explicit Windows window selector")
+				} else {
+					logf("Windows app window was not found after launch; use Show Windows app in Omarchy from the tray")
+				}
+			} else if launch.lastError == "" {
+				logf("Windows app window was not found after launch; choose Show Windows app in Omarchy from the tray")
+			}
 			continue
 		}
 		granted := false
@@ -502,10 +579,15 @@ func (b *seamlessWindowBridge) sharedWindows(windows []seamlessWindow, now time.
 					continue
 				}
 			}
-			if b.grants == nil {
-				b.grants = make(map[seamlessWindowKey]string)
+			grant, err := b.newGrant(window)
+			if err != nil {
+				launch.lastError = err.Error()
+				continue
 			}
-			b.grants[key] = window.Class
+			if b.grants == nil {
+				b.grants = make(map[seamlessWindowKey]seamlessGrant)
+			}
+			b.grants[key] = grant
 			granted = true
 			break
 		}
@@ -518,7 +600,9 @@ func (b *seamlessWindowBridge) sharedWindows(windows []seamlessWindow, now time.
 	b.pending = pending
 	shared := make([]seamlessWindow, 0, len(b.grants))
 	for _, window := range windows {
-		if class, ok := b.grants[seamlessKey(window)]; ok && class == window.Class {
+		if grant, ok := b.grants[seamlessKey(window)]; ok && b.grantMatches(window, grant) {
+			window.incarnation = grant.incarnation
+			window.grantProperty = b.grantPropertyName()
 			shared = append(shared, window)
 		}
 	}

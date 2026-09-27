@@ -185,6 +185,64 @@ func TestSeamlessLaunchGrantIsOneFreshWindowAndRevokesOnClose(t *testing.T) {
 	}
 }
 
+func TestSeamlessGrantDoesNotTransferAcrossReusedProcessOrWindow(t *testing.T) {
+	first := seamlessWindow{PID: 77, HWND: "99", Class: "Editor", handle: 0x99,
+		created: 100, threadID: 5, incarnation: 11}
+	backend := &fakeSeamlessBackend{items: []seamlessWindow{first}}
+	bridge := &seamlessWindowBridge{token: strings.Repeat("e", 64), backend: backend}
+	if !bridge.grantWindow(first) {
+		t.Fatal("initial grant failed")
+	}
+	granted := bridge.catalogue()
+	if len(granted) != 1 {
+		t.Fatalf("initial catalogue: %+v", granted)
+	}
+	firstID := granted[0].ID
+
+	reusedProcess := first
+	reusedProcess.created = 200
+	backend.items = []seamlessWindow{reusedProcess}
+	if got := bridge.catalogue(); len(got) != 0 {
+		t.Fatalf("reused PID/HWND/class inherited grant: %+v", got)
+	}
+	if !bridge.grantWindow(reusedProcess) {
+		t.Fatal("fresh process was not independently grantable")
+	}
+	granted = bridge.catalogue()
+	if len(granted) != 1 || granted[0].ID == firstID {
+		t.Fatalf("reused process retained original ID: %+v", granted)
+	}
+	secondID := granted[0].ID
+
+	reusedWindow := reusedProcess
+	reusedWindow.incarnation = 12
+	backend.items = []seamlessWindow{reusedWindow}
+	if got := bridge.catalogue(); len(got) != 0 {
+		t.Fatalf("reused HWND in same process inherited grant: %+v", got)
+	}
+	if !bridge.grantWindow(reusedWindow) {
+		t.Fatal("new HWND incarnation was not independently grantable")
+	}
+	granted = bridge.catalogue()
+	if len(granted) != 1 || granted[0].ID == firstID || granted[0].ID == secondID {
+		t.Fatalf("reused window retained a prior ID: %+v", granted)
+	}
+	if bridge.grantWindow(first) {
+		t.Fatal("stale tray choice granted a replacement window")
+	}
+	bridge.revokeWindow(first)
+	if got := bridge.catalogue(); len(got) != 1 {
+		t.Fatalf("stale tray choice revoked replacement grant: %+v", got)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/windows/"+firstID+"/close", nil)
+	request.Header.Set("Authorization", "Bearer "+bridge.token)
+	response := httptest.NewRecorder()
+	bridge.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound || backend.closeCount != 0 {
+		t.Fatalf("old guest ID controlled replacement window: %d", response.Code)
+	}
+}
+
 func TestSeamlessInputValidation(t *testing.T) {
 	window := seamlessWindow{Width: 1920, Height: 1080}
 	for _, input := range []seamlessInput{

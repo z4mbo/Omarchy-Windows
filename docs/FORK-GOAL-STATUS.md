@@ -28,6 +28,9 @@ capture-only design is no longer the required implementation.
   Omarchy's layout. Direct Windows presentation is accepted; pixel capture
   into Linux is not required.
 - Resolution and refresh rate follow the Windows monitor automatically.
+- Automatic guest locking is disabled through Omarchy's persistent Stay Awake
+  preference. New installations start with that preference; later user choices
+  must survive updates.
 - Future Omarchy updates are part of the product's acceptance requirements.
   Host/guest integration must preserve compatibility, user files, and settings
   across supported upgrades. New upstream releases need upgrade and rollback

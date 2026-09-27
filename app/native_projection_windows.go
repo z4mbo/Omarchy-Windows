@@ -122,7 +122,8 @@ type nativeProjectedWindow struct {
 	uncertainMutation bool
 	// SetWindowRgn transfers ownership of the region. We retain our own copy
 	// to detect a later application-owned region change before restoring NULL.
-	lastRegion uintptr
+	lastRegion    uintptr
+	lastZOrderLog time.Time
 }
 
 var (
@@ -199,6 +200,7 @@ func (p *nativeProjection) watch() {
 				p.publishForegroundLocked()
 			}
 			p.mu.Unlock()
+			p.bridge.cleanupRetiredGrants()
 			restore()
 		}
 	}
@@ -208,7 +210,7 @@ func (p *nativeProjection) auditGrantsLocked() bool {
 	changed := false
 	p.bridge.mu.Lock()
 	for key, state := range p.tracked {
-		if class, ok := p.bridge.grants[key]; !ok || class != state.window.Class {
+		if grant, ok := p.bridge.grants[key]; !ok || !p.bridge.grantMatches(state.window, grant) {
 			if !state.pendingRestore {
 				state.pendingRestore = true
 				changed = true
@@ -770,9 +772,9 @@ func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
 		}
 		key := seamlessKey(w)
 		p.bridge.mu.Lock()
-		class, granted := p.bridge.grants[key]
+		grant, granted := p.bridge.grants[key]
 		p.bridge.mu.Unlock()
-		if !granted || class != w.Class {
+		if !granted || !p.bridge.grantMatches(w, grant) {
 			return "", errors.New("window grant changed")
 		}
 		state := p.tracked[key]
@@ -914,6 +916,25 @@ func nativeQemuAbove(hwnd uintptr) bool {
 	return false
 }
 
+// A heartbeat may keep a previous placement only while its requested
+// visibility still matches the actual window. App-chosen geometry is kept,
+// but a window that hid itself must be shown again for a visible guest tile.
+func nativeCanKeepPlacement(state *nativeProjectedWindow, tile nativeTile, rect seamlessRect, shown bool) bool {
+	return state.applied && state.requestedShown == tile.Visible &&
+		(!tile.Visible || state.requestedRect == rect) && shown == tile.Visible
+}
+
+func nativeRaiseAboveQemu(hwnd uintptr) error {
+	const zFlags = 0x0010 | 0x0200 | 0x0001 | 0x0002 // NOACTIVATE | NOOWNERZORDER | NOSIZE | NOMOVE
+	if ok, _, _ := procSetWindowPos.Call(hwnd, 0, 0, 0, 0, 0, zFlags); ok == 0 {
+		return errors.New("window z order failed")
+	}
+	if nativeQemuAbove(hwnd) {
+		return errors.New("window remained behind QEMU after z order repair")
+	}
+	return nil
+}
+
 func (p *nativeProjection) publishForegroundLocked() {
 	if p.deadline.IsZero() || p.closed {
 		p.foreground.Store(nil)
@@ -989,19 +1010,21 @@ func (p *nativeProjection) placeLocked(state *nativeProjectedWindow, tile native
 	nativeObserveFullscreen(state, current, shown != 0)
 	if state.applied {
 		changed := current != state.lastRect || (shown != 0) != state.lastVisible
-		if state.requestedShown == tile.Visible && (!tile.Visible || state.requestedRect == rect) {
+		if nativeCanKeepPlacement(state, tile, rect, shown != 0) {
 			// Never fight an app's own resize or fullscreen transition on a
-			// heartbeat. A hidden guest window is the one exception: rehide it
-			// if the app chose to show itself while Omarchy is locked.
-			if tile.Visible && !changed && nativeQemuAbove(state.window.handle) {
-				const zFlags = 0x0010 | 0x0200 | 0x0001 | 0x0002 // NOACTIVATE | NOOWNERZORDER | NOSIZE | NOMOVE
-				if ok, _, _ := procSetWindowPos.Call(state.window.handle, 0, 0, 0, 0, 0, zFlags); ok == 0 {
-					return errors.New("window z order failed")
+			// heartbeat. Z-order is independent of the app's chosen geometry,
+			// so repair it even after an app-initiated resize.
+			if tile.Visible && nativeQemuAbove(state.window.handle) {
+				if err := nativeRaiseAboveQemu(state.window.handle); err != nil {
+					logf("native projection z order repair failed (PID %d): %v", state.window.PID, err)
+					return err
+				}
+				if time.Since(state.lastZOrderLog) >= 5*time.Second {
+					logf("native projection raised window above QEMU (PID %d, app geometry changed=%t)", state.window.PID, changed)
+					state.lastZOrderLog = time.Now()
 				}
 			}
-			if tile.Visible || shown == 0 {
-				return nil
-			}
+			return nil
 		}
 		if changed {
 			var placement windowPlacementStruct
@@ -1048,6 +1071,17 @@ func (p *nativeProjection) placeLocked(state *nativeProjectedWindow, tile native
 	state.applied = true
 	if state.lastVisible != tile.Visible || (tile.Visible && state.lastRect != rect) {
 		return errors.New("window ignored requested placement")
+	}
+	if tile.Visible && nativeQemuAbove(state.window.handle) {
+		if err := nativeRaiseAboveQemu(state.window.handle); err != nil {
+			logf("native projection initial z order failed (PID %d): %v", state.window.PID, err)
+			return err
+		}
+		logf("native projection initial z order repaired (PID %d)", state.window.PID)
+	}
+	if firstMutation && tile.Visible {
+		logf("native projection first placement verified (PID %d, visible=%t, QEMU above=%t)",
+			state.window.PID, state.lastVisible, nativeQemuAbove(state.window.handle))
 	}
 	return nil
 }

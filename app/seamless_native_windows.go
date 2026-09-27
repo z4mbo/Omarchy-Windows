@@ -88,7 +88,7 @@ func seamlessEnumWindow(hwnd, _ uintptr) uintptr {
 		return 1
 	}
 	var pid uint32
-	procGetWindowThreadProcessId.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+	threadID, _, _ := procGetWindowThreadProcessId.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
 	if pid == 0 || pid == uint32(os.Getpid()) || pid == qemuPid.Load() {
 		return 1
 	}
@@ -132,6 +132,8 @@ func seamlessEnumWindow(hwnd, _ uintptr) uintptr {
 		Height:     height,
 		Fullscreen: seamlessCoversMonitor(hwnd, visibleRect),
 		handle:     hwnd,
+		created:    seamlessProcessCreationOrZero(pid),
+		threadID:   uint32(threadID),
 	})
 	return 1
 }
@@ -183,8 +185,30 @@ func seamlessWindowStillMatches(window seamlessWindow) bool {
 		return false
 	}
 	var pid uint32
-	procGetWindowThreadProcessId.Call(window.handle, uintptr(unsafe.Pointer(&pid)))
-	return pid == window.PID
+	threadID, _, _ := procGetWindowThreadProcessId.Call(window.handle, uintptr(unsafe.Pointer(&pid)))
+	if pid != window.PID || (window.threadID != 0 && uint32(threadID) != window.threadID) {
+		return false
+	}
+	if window.Class != "" {
+		var class [128]uint16
+		seamlessGetClass.Call(window.handle, uintptr(unsafe.Pointer(&class[0])), uintptr(len(class)))
+		if syscall.UTF16ToString(class[:]) != window.Class {
+			return false
+		}
+	}
+	if window.created != 0 {
+		created, err := nativeProcessCreated(window.PID)
+		if err != nil || created != window.created {
+			return false
+		}
+	}
+	return window.incarnation == 0 ||
+		(window.grantProperty != "" && nativeWindowProperty(window.handle, window.grantProperty) == window.incarnation)
+}
+
+func seamlessProcessCreationOrZero(pid uint32) uint64 {
+	created, _ := nativeProcessCreated(pid)
+	return created
 }
 
 func seamlessAppGroup(process, title string) string {
