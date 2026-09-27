@@ -106,37 +106,63 @@ func (p *nativeProjection) markAllHandoffsHiddenLocked() {
 // The caller holds p.mu and the physical DPI context. The active layout was
 // validated in Apply; repeat the live host grant, HWND and foreground checks
 // immediately around the short QMP operation because they can change meanwhile.
-func (p *nativeProjection) nativeHandoffAllowedLocked(state *nativeProjectedWindow, rect seamlessRect) bool {
-	if !p.experimentalForeground || p.closed || !guestUp.Load() || !nativeHandoffGuestReady.Load() ||
-		!nativeHandoffLeaseReady(p.deadline, p.handoffUntil, time.Now()) ||
-		state == nil || state.pendingRestore || !nativeIdentityMatches(state) ||
-		state.window.incarnation == 0 || state.created == 0 || state.window.grantProperty == "" ||
+func (p *nativeProjection) nativeHandoffAllowedLocked(state *nativeProjectedWindow, rect seamlessRect) (bool, string) {
+	if !p.experimentalForeground || p.closed {
+		return false, "disabled_or_closed"
+	}
+	if !guestUp.Load() || !nativeHandoffGuestReady.Load() {
+		return false, "guest_not_ready"
+	}
+	now := time.Now()
+	if !nativeHandoffLeaseReady(p.deadline, p.handoffUntil, now) {
+		if p.deadline.IsZero() || !now.Before(p.deadline) {
+			return false, "committed_lease_expired"
+		}
+		return false, "apply_budget_expired"
+	}
+	if state == nil || state.pendingRestore || !nativeIdentityMatches(state) {
+		return false, "window_identity_unavailable"
+	}
+	if state.window.incarnation == 0 || state.created == 0 || state.window.grantProperty == "" ||
 		state.window.grantProperty != p.bridge.grantPropertyName() ||
-		nativeWindowProperty(state.window.handle, state.window.grantProperty) != state.window.incarnation ||
-		rect.right <= rect.left || rect.bottom <= rect.top {
-		return false
+		nativeWindowProperty(state.window.handle, state.window.grantProperty) != state.window.incarnation {
+		return false, "grant_marker_changed"
+	}
+	if rect.right <= rect.left || rect.bottom <= rect.top {
+		return false, "invalid_tile"
 	}
 	key := seamlessKey(state.window)
 	p.bridge.mu.Lock()
 	grant, granted := p.bridge.grants[key]
 	p.bridge.mu.Unlock()
 	if !granted || !p.bridge.grantMatches(state.window, grant) {
-		return false
+		return false, "grant_changed"
 	}
 	qemu := qemuHwnd.Load()
 	if qemu == 0 || nativeReadForegroundRelation().root != qemu {
-		return false
+		return false, "qemu_not_foreground"
 	}
 	if _, err := nativeQemuClientRect(); err != nil {
-		return false
+		return false, "qemu_display_unavailable"
 	}
 	shown, _, _ := procIsWindowVisible.Call(state.window.handle)
 	if shown == 0 {
-		return false
+		return false, "native_window_hidden"
 	}
 	var actual seamlessRect
 	ok, _, _ := seamlessGetRect.Call(state.window.handle, uintptr(unsafe.Pointer(&actual)))
-	return ok != 0 && actual == rect
+	if ok == 0 || actual != rect {
+		return false, "native_tile_mismatch"
+	}
+	return true, "eligible"
+}
+
+func (p *nativeProjection) logHandoffOutcomeLocked(state *nativeProjectedWindow, reason string) {
+	if state == nil || !p.handoffDiagnostics.allow(nativeFullscreenDiagnosticIdentity(state), reason, time.Now()) {
+		return
+	}
+	// No title, grant property, bearer, native HWND or request body is logged.
+	logf("experimental native foreground handoff: pid=%d reason=%s", state.window.PID, reason)
 }
 
 func nativeIssueForegroundHandoff(ctx context.Context, caller nativeQMPCaller, request nativeHandoffRequest) error {
@@ -186,7 +212,11 @@ func nativeForegroundHandoff(ctx context.Context, request nativeHandoffRequest) 
 // each layout heartbeat; an actual hide/show transition is cooldown limited.
 func (p *nativeProjection) raiseAboveQemuLocked(state *nativeProjectedWindow, rect seamlessRect) error {
 	originalError := nativeRaiseAboveQemu(state.window.handle)
-	if originalError == nil || !p.nativeHandoffAllowedLocked(state, rect) {
+	if originalError == nil || !p.experimentalForeground {
+		return originalError
+	}
+	if allowed, reason := p.nativeHandoffAllowedLocked(state, rect); !allowed {
+		p.logHandoffOutcomeLocked(state, reason)
 		return originalError
 	}
 	key := seamlessKey(state.window)
@@ -194,6 +224,7 @@ func (p *nativeProjection) raiseAboveQemuLocked(state *nativeProjectedWindow, re
 		rect: rect, qemuPID: qemuPid.Load(), qemuHWND: qemuHwnd.Load()}
 	now := time.Now()
 	if !nativeHandoffAttemptAllowed(p.handoffAttempts[key], fingerprint, now) {
+		p.logHandoffOutcomeLocked(state, "retry_suppressed")
 		return originalError
 	}
 	p.handoffAttempts[key] = nativeHandoffAttempt{fingerprint: fingerprint, when: now}
@@ -206,11 +237,22 @@ func (p *nativeProjection) raiseAboveQemuLocked(state *nativeProjectedWindow, re
 	ctx, cancel := context.WithDeadline(context.Background(), end)
 	defer cancel()
 	if err := nativeForegroundHandoff(ctx, request); err != nil {
+		p.logHandoffOutcomeLocked(state, "qmp_permission_unavailable")
 		logf("experimental native foreground permission unavailable: %v", err)
 		return originalError
 	}
-	if ctx.Err() != nil || !p.nativeHandoffAllowedLocked(state, rect) {
+	if ctx.Err() != nil {
+		p.logHandoffOutcomeLocked(state, "reply_after_deadline")
 		return errors.New("native foreground handoff identity changed")
 	}
-	return nativeRaiseAboveQemu(state.window.handle)
+	if allowed, reason := p.nativeHandoffAllowedLocked(state, rect); !allowed {
+		p.logHandoffOutcomeLocked(state, "post_permission_"+reason)
+		return errors.New("native foreground handoff identity changed")
+	}
+	if err := nativeRaiseAboveQemu(state.window.handle); err != nil {
+		p.logHandoffOutcomeLocked(state, "permission_accepted_placement_failed")
+		return err
+	}
+	p.logHandoffOutcomeLocked(state, "permission_accepted_placement_verified")
+	return nil
 }

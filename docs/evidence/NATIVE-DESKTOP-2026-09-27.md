@@ -317,3 +317,45 @@ Graceful guest shutdown restored Blender on Windows. Its viewport then changed
 between observations without a test action, so further desktop actions were
 paused pending confirmation that the desktop was free. Blender was left open;
 the test VM was stopped. The personalized installation was not changed.
+
+## Candidate 8: experimental foreground handoff
+
+The isolated Candidate 8 test started at 17:22 local time with a new writable
+disk, no copied settings or bridge tokens, native presentation enabled, and
+`-experimental-native-foreground`. It used the Windows launcher from
+[CI run 35](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36329047162),
+source `200d4510500faa957a9908a54fcc698e12831f66`, executable SHA256
+`ac92e8d709e4127e5c2c459c59e4695c878e9721eb5bca7e8687ca9df8e12c1f`.
+That run's launcher and guest-contract jobs passed; its fresh image job failed
+on a fastfetch package-lock mismatch. Candidate 8 therefore used the separately
+verified revision-43 guest from CI run 30, compressed rootfs SHA256
+`fad5b6d454e917ccc75010dc227fdb1b7430d41827de34305c234e9e7f5fc66e`.
+
+The experimental QEMU executable SHA256 was
+`db28946ac900aa0ffbaf35889ab78641f1274e894ea989d6a686a867e66c39fd`.
+Its build/archive job completed, but the original CI smoke failed with the old
+pipelined QMP driver. The identical executable passed the corrected sequential
+headless smoke locally: greeting, capabilities, command discovery, exact
+rejection of ASFW_ANY and a missing SDL display, and clean quit. This headless
+check does not test real foreground permission or window ordering.
+
+The complete guest signed in automatically, remained unlocked, and reported
+`try-omarchy-runtime 4.0.3-9`, Linux `7.2.7-arch1-1`, and Hyprland output
+2560×1440 at 360.039 Hz. Computer Use selected native Blender 5.2 in the
+packaged picker, dismissed its splash screen, and pressed numpad 3. The native
+Blender window displayed **Right Orthographic** inside the expected tile.
+
+The packaged workspace-move helper moved the single Blender proxy to workspace
+2 without following it. Computer Use observed the empty workspace 1 and clicked
+workspace 2 in Omarchy's bar. The native window did **not** return above QEMU;
+the proxy and error panel were visible instead. The host log at 17:29:22
+reported `QEMU remained above`, with QEMU foreground and both HWNDs valid,
+visible, non-iconic and non-topmost. Subsequent retries alternated native
+visibility without restoring the app. The available diagnostic does not
+distinguish an ineligible foreground handoff from a successful QMP permission
+call followed by ineffective window ordering.
+
+This candidate fails workspace-return acceptance. No fullscreen toggle was
+performed before this failure; the delayed Blender fullscreen regression tests
+passed locally, but physical validation remains pending. Games, performance
+parity and a replacement install are not validated by this run.

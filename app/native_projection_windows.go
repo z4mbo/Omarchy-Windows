@@ -92,6 +92,7 @@ type nativeProjection struct {
 	foreground                atomic.Pointer[nativeForegroundSnapshot]
 	experimentalForeground    bool
 	handoffAttempts           map[seamlessWindowKey]nativeHandoffAttempt
+	handoffDiagnostics        nativeFullscreenDiagnosticLimiter
 	fullscreenDiagnostics     nativeFullscreenDiagnosticLimiter
 	hiddenWindowSourceForTest func([]seamlessWindow) []seamlessWindow
 }
