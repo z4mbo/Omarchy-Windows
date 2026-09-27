@@ -373,4 +373,106 @@ focused handoff and fullscreen tests passed after it. Its executable SHA256 is
 `2d4f079134bdc09491962f9fa084c289463b35c4451192a6e0fb315038b2d88d`.
 It was staged beside the stopped disposable disk. Automatic approval review
 rejected its launch with `blocked by policy`, without a further reason; it has
-not yet supplied a physical diagnostic result.
+not yet supplied a physical diagnostic result at that staging point.
+
+## Candidate 9: fullscreen pass and specific workspace failure
+
+The user started Candidate 9 at 17:56 local time. It reused Candidate 8's
+disposable revision-43 disk and the identical experimental QEMU executable;
+this was not a new factory-image installation. The launcher SHA256 was
+`2d4f079134bdc09491962f9fa084c289463b35c4451192a6e0fb315038b2d88d`,
+from source `4295dd47573ace12e6f12ba22ec2b9d9a62a0671`.
+
+Computer Use selected native Blender 5.2 in the packaged picker. The Window
+menu's Toggle Window Fullscreen command removed the native titlebar. The host
+catalogue reported fullscreen true, and the Hyprland proxy occupied 2560×1440
+at (0, 0), with fullscreen state 2. Numpad 3 changed the native viewport to
+Right Orthographic while fullscreen. Toggling fullscreen off restored the
+2536×1390 tile at (12, 38), with host fullscreen false and proxy fullscreen 0.
+This passes the fullscreen state and native input checks. It does not measure
+frame times or prove pixel-perfect fullscreen client geometry: the diagnostic
+DWM frame after projection was inset seven pixels from the projected outer
+rectangle.
+
+The packaged workspace helper moved the Blender proxy to workspace 2 without
+following it. Computer Use observed empty workspace 1 and clicked workspace 2
+in Omarchy's bar. Blender did not return above QEMU; an empty proxy and then
+the recoverable layout error appeared. At 17:59:43 the host logged
+`permission_accepted_placement_failed`, with both HWNDs valid, visible,
+non-iconic and non-topmost and QEMU foreground. This distinguishes an accepted
+QMP foreground permission request from the subsequent failed nonactivating
+placement. Workspace return still fails acceptance.
+
+Closing the guest controller through its normal Hyprland close dispatcher
+restored Blender to Windows. Computer Use explicitly activated it for cleanup,
+confirmed the Right Orthographic view was intact, and closed its unchanged
+default scene. That manual activation is not a workspace-return pass.
+
+The named File Explorer launcher then opened a Windows Home window, but the
+guest received no matching window grant and displayed its selector-fallback
+error. The Explorer process can reuse an existing process, so its launch stub
+does not establish ownership of the resulting window. Computer Use dismissed
+the error and closed the test Explorer window. No Explorer tiling or input
+pass is claimed.
+
+The guest powered off cleanly at 18:09:56, and its launcher and QEMU exited.
+The host log was preserved as `candidate9-completed-shell.log` in the isolated
+test directory. The personalized installation was not changed.
+
+## Candidate 10: activating placement still fails
+
+Source `ba7d9f194c86cfdc96697f4dd8efe76c7c2f8827` changes the opt-in handoff
+to attempt one activating placement after accepted QMP permission and repeated
+identity, geometry, foreground and lease checks. Exactly one native tile must
+be visible; multiple native tiles cannot select an arbitrary activation target.
+The full Windows Go suite passed (app 27.068 seconds). The launcher SHA256 is
+`fa95bacd7596a25ff2961e00c685ff4d68eec6633c208b3c954b4ee95361f59c`.
+
+The verified executable and build receipt were staged beside the stopped test
+disk. Automatic approval review rejected startup with `blocked by policy`,
+without a more specific reason. A concrete manual launch command was prepared
+for the user. The user then started it at 18:11 local time on the same revision-43
+disk and experimental QEMU binary.
+
+Computer Use launched native Blender through the packaged picker, dismissed
+the splash, and verified Numpad 3 changed its viewport to Right Orthographic.
+The packaged workspace helper moved its proxy from workspace 1 to workspace 2
+without following it. The native window disappeared from workspace 1. Clicking
+workspace 2 in the Omarchy bar produced the empty proxy and layout error.
+At 18:15:50 the host recorded `permission_accepted_still_behind`: the activating
+`SetWindowPos` returned success but QEMU remained foreground and above Blender.
+Both windows were valid, visible, non-iconic and non-topmost. This experiment
+does not fix workspace return; no fullscreen retest was performed in this run.
+
+After closing the failed guest controller, Computer Use activated the restored
+Blender window only for cleanup and closed the unchanged scene. A subsequent
+Character Map launch through the packaged picker obtained a grant but also
+failed initial placement, with `permission_accepted_still_behind` in the host
+log. This shows the remaining foreground problem also affects a standard
+Windows application. Earlier Character Map passes are historical results,
+not acceptance of this candidate.
+
+Closing its guest controller restored Character Map to Windows. Computer Use
+closed that test window. The VM powered off cleanly at 18:19:33; the launcher
+and QEMU exited, and the host log was archived as
+`candidate10-completed-shell.log`. The personalized installation was unchanged.
+
+The follow-up design grants foreground permission to the actual launcher
+process, which makes the activation call, then targets only the validated
+native HWND. Candidate 10 delegated permission to the native app while the
+launcher made the cross-process call. The replacement remains experimental
+and requires a separately built runtime and a new physical test.
+
+## Explorer Home: isolated launch attribution passes
+
+After Candidate 10 stopped, the opt-in Windows test
+`TestExplorerCOMHomeGrantOptIn` passed against source `d3bda1d` in 0.62 seconds.
+The new `ShellBrowserWindow` COM instance navigated to Home, exposed a new
+visible `CabinetWClass` window owned by `explorer.exe`, and the bridge granted
+that exact HWND. Computer Use independently confirmed that the returned Home
+window rendered correctly. No user file was opened or changed.
+
+This validates host-side COM creation, Home navigation, and exact-window
+attribution. It does not validate Explorer projection, input, tiling, or
+workspace restoration inside Omarchy; those checks await the next integrated
+candidate. A later Computer Use inventory showed the test window had closed.

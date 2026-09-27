@@ -13,7 +13,8 @@ import time
 from pathlib import Path
 
 
-COMMAND = "__omarchy_native-foreground-handoff"
+COMMAND = "__omarchy_native-foreground-handoff-v2"
+OLD_COMMAND = "__omarchy_native-foreground-handoff"
 
 
 def smoke(qemu: Path) -> None:
@@ -88,6 +89,9 @@ def smoke(qemu: Path) -> None:
             "property": "Omarchy.Windows.Grant." + "0" * 32,
             "incarnation": 1,
             "expires": 1,
+            "launcher-pid": 2,
+            "launcher-created": 1,
+            "launcher-hwnd": 2,
         }
         any_error = execute(COMMAND, "reject-any-pid", arguments).get("error", {})
         arguments["pid"] = 1
@@ -114,6 +118,8 @@ def smoke(qemu: Path) -> None:
 
     if not isinstance(commands, list) or COMMAND not in {item.get("name") for item in commands}:
         raise RuntimeError("isolated runtime lacks native foreground QMP command")
+    if OLD_COMMAND in {item.get("name") for item in commands}:
+        raise RuntimeError("isolated runtime still exposes the obsolete v1 foreground handoff")
     if any_error.get("desc") != "invalid native foreground handoff identity":
         raise RuntimeError("QMP command accepted ASFW_ANY instead of rejecting it")
     if display_error.get("desc") != "Omarchy SDL display is not the interactive foreground window":

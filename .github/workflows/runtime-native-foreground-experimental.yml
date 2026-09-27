@@ -10,6 +10,7 @@ on:
       - runtime-build/experimental/native-foreground/**
       - runtime-build/test-sdl-context.py
       - runtime-build/patches/qemu/0013-bound-native-foreground-permission-to-sdl-grant.patch
+      - runtime-build/patches/qemu/0014-bind-foreground-handoff-to-launcher.patch
 
 permissions:
   contents: read
@@ -63,7 +64,7 @@ jobs:
         if: ${{ !cancelled() && steps.build_runtime.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: winq-emu-native-foreground-experimental
+          name: winq-emu-native-foreground-v2-experimental
           path: |
             runtime-output-native-foreground-experimental/*.zip
             runtime-output-native-foreground-experimental/SHA256SUMS

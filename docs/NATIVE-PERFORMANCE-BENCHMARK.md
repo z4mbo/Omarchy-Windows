@@ -1,7 +1,8 @@
 # Native Windows app performance comparison
 
-This is a prepared test procedure, not a benchmark result. No workload or
-capture was launched while preparing it. The first useful comparison is the
+This is a test procedure, not a paired benchmark result. A later authorized
+[Intel collector validation](evidence/NATIVE-PERFORMANCE-CAPTURE-2026-09-27.md#intel-collector-validation)
+produced standalone Blender frame data. The first useful comparison is the
 installed Windows Blender 5.2 viewport run **standalone** and as a native
 Windows tile over a disposable Omarchy candidate. Test a game separately after
 the basic window, input, workspace, and fullscreen acceptance checks pass.
@@ -12,13 +13,17 @@ The host has `C:\Program Files\NVIDIA Corporation\FrameViewSDK\bin\PresentMon_x6
 `MsPCLatency`, CPU/GPU utilization, and resolution. The matching upstream
 [PresentMon 1.9 command-line reference](https://github.com/GameTechDev/PresentMon/blob/v1.9.0/README.md#command-line-options)
 documents `-process_name`, `-output_file`, and `-timed`. Verify the bundled
-binary's accepted options at collection time; do not change tracing privileges
-or install another tool just to make this first comparison.
+binary's accepted options at collection time. That installed fork subsequently
+failed to produce a capture. The standalone Intel 2.6.0 console binary produced
+valid data after the user approved its recorder UAC prompt; no tracing group,
+execution policy, or security setting was changed. Use that same verified
+collector for both sides of the comparison.
 
 The installed binary's `--help` was checked on September 27. Despite its
 1.9.12728.0 file version, it advertises the newer double-dash options below and
 an explicit `--v1_metrics` switch. Use that switch for this repository's analyzer,
-which reads `MsBetweenPresents` and the other version-1 CSV columns.
+which reads `MsBetweenPresents` and the other version-1 CSV columns. The analyzer
+also accepts Intel 2.6.0's lowercase `ms` capitalization for those metrics.
 
 ## Controlled capture
 
@@ -33,10 +38,10 @@ which reads `MsBetweenPresents` and the other version-1 CSV columns.
    (for example standalone, integrated, integrated, standalone, then repeat).
    Use the same collector and process name `blender.exe` in both conditions.
    FrameView/PresentMon follows the **Windows application process**, not QEMU.
-   The installed collector accepts a timed capture like:
+   The verified Intel collector accepts a timed capture like:
 
    ```powershell
-   $collector = 'C:\Program Files\NVIDIA Corporation\FrameViewSDK\bin\PresentMon_x64.exe'
+   $collector = 'C:\captures\PresentMon-2.6.0-x64.exe'
    & $collector --process_name blender.exe --output_file 'C:\captures\standalone-1.csv' --timed 40 --terminate_after_timed --no_console_stats --v1_metrics --session_name OmarchyNativeComparison
    ```
 
@@ -98,4 +103,5 @@ render triggered from that forwarded GUI with selected-device and image evidence
 Measure interaction latency and visual correctness there; do not mix WSL results
 with the Windows-native app comparison. OptiX still failed in the previous lab.
 
-No frame-time, quality, or input performance result is claimed by this document.
+No standalone-versus-Omarchy performance, quality, or input-latency result is
+claimed by this document.

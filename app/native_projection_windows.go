@@ -87,6 +87,7 @@ type nativeProjection struct {
 	generationRestorePending  bool
 	deadline                  time.Time
 	handoffUntil              time.Time // shared short budget for this in-progress Apply only
+	handoffVisibleCount       int       // a single unambiguous tile may request activation
 	closed                    bool
 	stop                      chan struct{}
 	foreground                atomic.Pointer[nativeForegroundSnapshot]
@@ -966,7 +967,11 @@ func (p *nativeProjection) Apply(l nativeLayout, requestGeneration uint64) (stri
 		return "", errors.New("stale native layout")
 	}
 	p.handoffUntil = started.Add(nativeHandoffBudget)
-	defer func() { p.handoffUntil = time.Time{} }()
+	p.handoffVisibleCount = nativeHandoffVisibleTiles(l.Windows)
+	defer func() {
+		p.handoffUntil = time.Time{}
+		p.handoffVisibleCount = 0
+	}()
 	requested := make(map[seamlessWindowKey]nativeTile, len(l.Windows))
 	states := make(map[seamlessWindowKey]*nativeProjectedWindow, len(l.Windows))
 	// Reuse the scoped DPI setup error variable for snapshot failures.

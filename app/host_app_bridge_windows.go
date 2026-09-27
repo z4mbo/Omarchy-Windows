@@ -147,6 +147,9 @@ func previewHostApp(id string) error {
 	if err != nil {
 		return err
 	}
+	if id == "explorer" {
+		return shellOpenExplorerWindowApp()
+	}
 	name := id
 	for _, app := range listHostApps() {
 		if app.ID == id {

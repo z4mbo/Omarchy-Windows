@@ -12,6 +12,7 @@ import (
 
 type fakeNativeHandoffQMP struct {
 	supported bool
+	legacy    bool
 	calls     []string
 	request   nativeHandoffRequest
 	err       error
@@ -22,6 +23,8 @@ func (f *fakeNativeHandoffQMP) Call(_ context.Context, command string, arguments
 	if command == "query-commands" {
 		commands := `[{"name":"query-status"}]`
 		if f.supported {
+			commands = `[{"name":"query-status"},{"name":"__omarchy_native-foreground-handoff-v2"}]`
+		} else if f.legacy {
 			commands = `[{"name":"query-status"},{"name":"__omarchy_native-foreground-handoff"}]`
 		}
 		return json.Unmarshal([]byte(commands), result)
@@ -34,12 +37,17 @@ func (f *fakeNativeHandoffQMP) Call(_ context.Context, command string, arguments
 }
 
 func TestNativeHandoffOnlyAfterFeatureDiscovery(t *testing.T) {
-	request := nativeHandoffRequest{HWND: 0xabc, PID: 301, Created: 918, Property: "Omarchy.Windows.Grant.test", Incarnation: 755}
+	request := nativeHandoffRequest{HWND: 0xabc, PID: 301, Created: 918, Property: "Omarchy.Windows.Grant.test", Incarnation: 755,
+		LauncherPID: 55, LauncherCreated: 617, LauncherHWND: 0xdef}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	missing := &fakeNativeHandoffQMP{}
 	if err := nativeIssueForegroundHandoff(ctx, missing, request); err == nil || len(missing.calls) != 1 {
 		t.Fatal("unsupported runtime received the privileged command")
+	}
+	legacy := &fakeNativeHandoffQMP{legacy: true}
+	if err := nativeIssueForegroundHandoff(ctx, legacy, request); err == nil || len(legacy.calls) != 1 {
+		t.Fatal("v1 runtime received a v2 privileged command")
 	}
 	supported := &fakeNativeHandoffQMP{supported: true}
 	if err := nativeIssueForegroundHandoff(ctx, supported, request); err != nil {
@@ -48,8 +56,24 @@ func TestNativeHandoffOnlyAfterFeatureDiscovery(t *testing.T) {
 	if len(supported.calls) != 2 || supported.calls[1] != nativeForegroundQMPCommand ||
 		supported.request.HWND != request.HWND || supported.request.PID != request.PID ||
 		supported.request.Created != request.Created || supported.request.Property != request.Property ||
-		supported.request.Incarnation != request.Incarnation || supported.request.Expires == 0 {
+		supported.request.Incarnation != request.Incarnation || supported.request.Expires == 0 ||
+		supported.request.LauncherPID != request.LauncherPID ||
+		supported.request.LauncherCreated != request.LauncherCreated ||
+		supported.request.LauncherHWND != request.LauncherHWND {
 		t.Fatal("feature-supported runtime did not receive the exact grant identity")
+	}
+	encoded, err := json.Marshal(supported.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"launcher-pid", "launcher-created", "launcher-hwnd"} {
+		if _, ok := wire[field]; !ok {
+			t.Fatalf("QMP v2 request omitted %q", field)
+		}
 	}
 }
 
@@ -118,5 +142,17 @@ func TestNativeHandoffRequiresCommittedAndCurrentLease(t *testing.T) {
 	}
 	if got := nativeHandoffEffectiveDeadline(now.Add(time.Second), now.Add(250*time.Millisecond)); got != now.Add(250*time.Millisecond) {
 		t.Fatal("permission could outlive the current Apply budget")
+	}
+}
+
+func TestNativeHandoffVisibleTilesRequiresOne(t *testing.T) {
+	if got := nativeHandoffVisibleTiles([]nativeTile{{Visible: false}}); got != 0 {
+		t.Fatalf("hidden tile counted as visible: %d", got)
+	}
+	if got := nativeHandoffVisibleTiles([]nativeTile{{Visible: true}, {Visible: false}}); got != 1 {
+		t.Fatalf("one visible tile was not eligible: %d", got)
+	}
+	if got := nativeHandoffVisibleTiles([]nativeTile{{Visible: true}, {Visible: true}}); got != 2 {
+		t.Fatalf("two visible tiles could select an arbitrary foreground app: %d", got)
 	}
 }

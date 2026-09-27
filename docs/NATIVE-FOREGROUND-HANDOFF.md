@@ -1,8 +1,9 @@
 # Experimental native-window foreground handoff
 
-Status: **implemented behind an explicit developer flag; build and physical
-validation pending**. Normal launches and the normal runtime pin are unchanged.
-The isolated recipe is documented in
+Status: **experimental; workspace return remains broken**. Candidates 9 and 10
+failed physical foreground tests. A versioned launcher-parent handoff is now
+committed in source, but its QEMU compilation and physical behavior are pending.
+Normal launches and the normal runtime pin are unchanged. The isolated recipe is documented in
 [`runtime-build/experimental/native-foreground`](../runtime-build/experimental/native-foreground/README.md).
 
 ## Observed failure
@@ -17,9 +18,11 @@ The complete revision-41 factory image reproduced the failure. A temporary
 
 The projector uses `SetWindowPos` and verifies the native window's z order.
 Microsoft's [`SetWindowPos` documentation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)
-links raising a window to foreground permission. Delegating permission from
-foreground QEMU to the exact native app is therefore a testable explanation;
-it is not yet a demonstrated fix.
+links raising a window to foreground permission. Candidate 9 showed that QEMU
+accepted permission delegation to Blender, yet Blender stayed behind QEMU.
+Candidate 10 then tried one activating `SetWindowPos` after the grant. Blender
+still failed on workspace return, and Character Map failed on initial
+projection. Both reported `permission_accepted_still_behind`.
 
 ## Opt-in launcher and private transport
 
@@ -31,9 +34,10 @@ directory and installs a protected, inheritable DACL granting the current user
 full control. Before each handoff connection it verifies the socket's owner,
 DACL, private parent and AF_UNIX reparse tag. It does not alter unrelated paths.
 
-The foreground command is discovered by exact name through `query-commands`.
-Older runtimes take the ordinary placement failure path. Requests begin only
-after the existing supervisor has connected QMP and observed guest readiness;
+The v2 foreground command is discovered by exact name through
+`query-commands`. Older v1 runtimes take the ordinary placement failure path;
+they cannot receive a v2 request. Requests begin only after the existing
+supervisor has connected QMP and observed guest readiness;
 the experiment does not probe QMP during early WHPX boot.
 
 QMP is privileged VM control. These checks protect the transport and limit
@@ -60,40 +64,54 @@ transition can retry after a five-second cooldown. Error recovery can itself
 produce that hidden state, so this is a bounded retry, not a promise of one
 attempt per deliberate user action. Revocation and identity changes remove
 the attempt record. An initial visible layout has no committed lease and
-cannot use the handoff; a successfully acknowledged hidden layout can establish
-one. Guest bootstrap handling must preserve that rule.
+cannot use the handoff; the guest controller first sends an acknowledged
+hidden layout to establish one before presenting tiles.
 
 ## Runtime operation
 
-The separately pinned QEMU patch adds the downstream Windows-only command
-`__omarchy_native-foreground-handoff`. SDL registers its exact single display
-HWND and clears it before destruction and cleanup. QEMU checks:
+The separately pinned v2 QEMU patch adds the downstream Windows-only command
+`__omarchy_native-foreground-handoff-v2` and removes the v1 command. SDL
+registers its exact single display HWND and clears it before destruction and
+cleanup. At registration, QEMU identifies its actual launcher parent once,
+holds a handle to that process, and records its PID and creation `FILETIME`.
+QEMU checks:
 
 1. Its registered display is the exact foreground, visible, non-iconic,
    non-topmost window on the active interactive desktop.
 2. The target is a visible, non-iconic, non-topmost, responsive top-level native
    HWND with the requested PID and nonzero incarnation marker.
-3. A held process handle identifies a live process with the expected creation
-   `FILETIME`, in the same session and interactive desktop.
-4. The expiry, display and native identity remain valid immediately before
-   `AllowSetForegroundWindow` grants permission to that exact PID.
+3. A held target-process handle identifies a live process with the expected
+   creation `FILETIME`, in the same session and interactive desktop.
+4. The request's launcher PID and creation time match the bound, still-live
+   parent. Its exact tray HWND belongs to that parent, has the expected class,
+   and is on the input desktop in the same session.
+5. The expiry, display, target, and launcher identity remain valid immediately
+   before `AllowSetForegroundWindow` grants permission to the launcher PID.
 
-The operation uses no `ASFW_ANY`, input injection, topmost promotion, global
-QEMU demotion, or `AttachThreadInput`. It does not move or focus a window.
+The QMP operation uses no `ASFW_ANY`, input injection, topmost promotion,
+global QEMU demotion, or `AttachThreadInput`. It does not move or focus a window.
 Synchronous cross-process placement inside QMP could hang the VM; asynchronous
 placement could outlive a lease, so that variant was not implemented.
 
-After the reply, the host rechecks its live context, lease and identity, retries
-ordinary placement once, and verifies z order. Windows can expire delegated
-permission on subsequent input; see
+After a v2 reply, the launcher rechecks the live request deadline, lease,
+grant, native HWND and QEMU foreground state. With exactly one visible native
+tile, it calls `SetForegroundWindow` once on that exact granted HWND. A bounded
+`WM_NULL` `SendMessageTimeout` gives cross-queue activation time to complete
+before the launcher verifies foreground ownership and z order; Microsoft
+describes this [asynchronous foreground transition](https://devblogs.microsoft.com/oldnewthing/20161118-00/?p=94745).
+The launcher does not retry activation on each layout heartbeat. Multiple visible tiles fail this
+experimental gate; explicit guest focus intent is not yet part of the protocol.
+Windows can expire delegated permission on subsequent input; see
 [`AllowSetForegroundWindow`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-allowsetforegroundwindow).
 A QMP success is therefore not proof that the app was presented successfully.
+The v2 runtime has not yet compiled in CI or undergone a physical desktop test.
 
 ## Remaining acceptance checks
 
-- Compile the Windows runtime and launcher, and run the QAPI and ACL tests.
-  The headless QMP smoke checks exact identity/display rejection errors but
-  cannot exercise a foreground SDL window.
+- Compile the isolated v2 QEMU patch in CI and run its exact-command headless
+  QMP smoke. Local patch application, QAPI generation, recipe hash checks and
+  focused Go tests passed. The headless smoke cannot exercise a foreground SDL
+  window or prove the Windows handoff succeeds.
 - Verify the real single-output launch registers its expected SDL HWND, then
   compare workspace return with the flag disabled and enabled on a disposable
   disk. Confirm actual native input and fullscreen synchronization.

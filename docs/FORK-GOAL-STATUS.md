@@ -54,8 +54,14 @@ passed a [physical native input, tiling and workspace test](evidence/NATIVE-DESK
 The fresh revision-39 and revision-41 factory images also passed automatic login
 and their Stay Awake default on Windows. Blender launched and accepted native
 viewport input inside its tile, but fullscreen state and workspace return failed.
-The revision-41 physical retest reproduced both integration failures. Fullscreen,
-broader app coverage, focus, popup ownership, DPI and reliable restoration still
+Candidate 9 subsequently passed Blender fullscreen on/off synchronization and
+fullscreen viewport input on the revision-43 test disk. Workspace return still
+failed after QEMU accepted the exact-process foreground permission request.
+Candidate 10's activating placement did not repair it, and Character Map also
+failed initial placement. File Explorer's new exact-window COM launch path
+subsequently passed an isolated host test and visibly rendered Home; its
+integration inside Omarchy remains untested. Fullscreen
+games, broader app coverage, focus, popup ownership, DPI and reliable restoration still
 need validation before installation or default use. Native rendering removes
 the existing PNG-stream bottleneck, but does not
 prove that all apps behave correctly or that performance equals bare metal.

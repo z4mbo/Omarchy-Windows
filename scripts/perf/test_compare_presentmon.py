@@ -30,6 +30,22 @@ def capture(path: Path, frame_ms: float, resolution: str = "1280x720", input_met
 
 
 class CaptureComparisonTest(unittest.TestCase):
+    def test_intel_v1_metric_headers_from_physical_capture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "intel.csv"
+            capture(path, 16)
+            content = path.read_text(encoding="utf-8")
+            path.write_text(content.replace("MsBetween", "msBetween").replace("MsUntil", "msUntil"),
+                            encoding="utf-8")
+            result = module.read_capture(path, "blender.exe", 0, .5)
+            self.assertEqual(result["present_frame_ms"]["median"], 16)
+            self.assertEqual(result["display_frame_ms"]["median"], 16)
+            self.assertEqual(result["present_to_display_ms"]["median"], 2)
+            header, rows = path.read_text(encoding="utf-8").split("\n", 1)
+            path.write_text(header + ",MsBetweenPresents\n" + rows, encoding="utf-8")
+            with self.assertRaisesRegex(module.CaptureError, "ambiguous CSV columns"):
+                module.read_capture(path, "blender.exe", 0, .5)
+
     def test_matching_capture_sets_report_frame_delta_without_inventing_input(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -56,7 +56,14 @@ def read_capture(path: Path, application: str, warmup: float, minimum: float) ->
         reader = csv.DictReader(handle)
         if not reader.fieldnames:
             raise CaptureError(f"Missing CSV header: {path}")
-        reader.fieldnames = [name.strip() for name in reader.fieldnames]
+        # Intel's --v1_metrics spells these columns msBetweenPresents, while
+        # FrameView exports MsBetweenPresents. Preserve the metric meanings.
+        aliases = {name.casefold(): name for name in (
+            "MsBetweenPresents", "MsBetweenDisplayChange", "MsUntilDisplayed", "MsPCLatency")}
+        reader.fieldnames = [aliases.get(name.strip().casefold(), name.strip())
+                            for name in reader.fieldnames]
+        if len(set(reader.fieldnames)) != len(reader.fieldnames):
+            raise CaptureError(f"{path}: duplicate or ambiguous CSV columns")
         required = {"Application", "ProcessID", "SwapChainAddress", "MsBetweenPresents"}
         missing = required.difference(reader.fieldnames)
         if missing:

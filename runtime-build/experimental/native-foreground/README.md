@@ -1,16 +1,17 @@
 # Experimental native foreground QMP runtime
 
 This recipe copies the pinned production runtime source and patch list, then
-adds the independently pinned `0013` QEMU patch. It produces separate
-`winq-emu-alpha10-native-foreground-experimental-*.zip` archives. The normal
+adds the independently pinned `0013` and `0014` QEMU patches. It produces separate
+`winq-emu-alpha10-native-foreground-v2-experimental-*.zip` archives. The normal
 `runtime-build/sources.lock.json`, release runtime, and installed Omarchy are
 unchanged.
 
-The Windows SDL QMP command `__omarchy_native-foreground-handoff` delegates
-`AllowSetForegroundWindow` permission to one host process only after rechecking
+The Windows SDL QMP command `__omarchy_native-foreground-handoff-v2` delegates
+`AllowSetForegroundWindow` permission to QEMU's bound launcher parent only after rechecking
 the foreground SDL display, the exact native HWND/PID/process creation time,
-the Omarchy grant marker, a short Windows uptime expiry, the active desktop
-and session. It does not move or focus a window. This privileged command
+the Omarchy grant marker, a short Windows uptime expiry, the launcher's
+held process identity and tray HWND, the active desktop and session. It does
+not move or focus a window. This privileged command
 requires a private host QMP socket;
 QAPI alone cannot identify its caller. The launcher experiment must validate
 the socket ACL and each grant and lease before requesting it.

@@ -6,15 +6,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 	"unsafe"
 )
 
-const nativeForegroundQMPCommand = "__omarchy_native-foreground-handoff"
+const nativeForegroundQMPCommand = "__omarchy_native-foreground-handoff-v2"
 const nativeHandoffCooldown = 5 * time.Second
 const nativeHandoffBudget = 250 * time.Millisecond
 
 var nativeGetTickCount64 = kernel32.NewProc("GetTickCount64")
+var nativeSendMessageTimeoutW = user32.NewProc("SendMessageTimeoutW")
+
+var (
+	errNativeActivationStillBehind = errors.New("window remained behind QEMU after delegated activation")
+	errNativeActivationNoFocus     = errors.New("native window did not become foreground after activation")
+	errNativeActivationDenied      = errors.New("Windows denied launcher foreground activation")
+	errNativeActivationTimeout     = errors.New("native foreground processing did not finish within the budget")
+)
 
 type nativeHandoffFingerprint struct {
 	key         seamlessWindowKey
@@ -31,12 +40,15 @@ type nativeHandoffAttempt struct {
 }
 
 type nativeHandoffRequest struct {
-	HWND        uint64 `json:"hwnd"`
-	PID         uint32 `json:"pid"`
-	Created     uint64 `json:"created"`
-	Property    string `json:"property"`
-	Incarnation uint64 `json:"incarnation"`
-	Expires     uint64 `json:"expires"`
+	HWND            uint64 `json:"hwnd"`
+	PID             uint32 `json:"pid"`
+	Created         uint64 `json:"created"`
+	Property        string `json:"property"`
+	Incarnation     uint64 `json:"incarnation"`
+	Expires         uint64 `json:"expires"`
+	LauncherPID     uint32 `json:"launcher-pid"`
+	LauncherCreated uint64 `json:"launcher-created"`
+	LauncherHWND    uint64 `json:"launcher-hwnd"`
 }
 
 type nativeQMPCaller interface {
@@ -46,6 +58,16 @@ type nativeQMPCaller interface {
 func nativeHandoffLeaseReady(committed, applyingUntil, now time.Time) bool {
 	return !committed.IsZero() && now.Before(committed) &&
 		!applyingUntil.IsZero() && now.Before(applyingUntil)
+}
+
+func nativeHandoffVisibleTiles(tiles []nativeTile) int {
+	count := 0
+	for _, tile := range tiles {
+		if tile.Visible {
+			count++
+		}
+	}
+	return count
 }
 
 func nativeHandoffEffectiveDeadline(committed, applyingUntil time.Time) time.Time {
@@ -76,6 +98,24 @@ func nativeHandoffExpires(ctx context.Context, uptimeMillis uint64, now time.Tim
 func nativeWindowsUptimeMillis() uint64 {
 	value, _, _ := nativeGetTickCount64.Call()
 	return uint64(value)
+}
+
+func nativeLauncherHandoffIdentity() (uint32, uint64, uintptr, error) {
+	pid := uint32(os.Getpid())
+	hwnd := trayWindow.Load()
+	if pid == 0 || hwnd == 0 {
+		return 0, 0, 0, errors.New("launcher tray is unavailable")
+	}
+	var owner uint32
+	thread, _, _ := procGetWindowThreadProcessId.Call(hwnd, uintptr(unsafe.Pointer(&owner)))
+	if thread == 0 || owner != pid {
+		return 0, 0, 0, errors.New("launcher tray identity changed")
+	}
+	created, err := nativeProcessCreated(pid)
+	if err != nil || created == 0 {
+		return 0, 0, 0, errors.New("launcher process identity is unavailable")
+	}
+	return pid, created, hwnd, nil
 }
 
 func nativeHandoffAttemptAllowed(previous nativeHandoffAttempt, fingerprint nativeHandoffFingerprint, now time.Time) bool {
@@ -119,6 +159,9 @@ func (p *nativeProjection) nativeHandoffAllowedLocked(state *nativeProjectedWind
 			return false, "committed_lease_expired"
 		}
 		return false, "apply_budget_expired"
+	}
+	if p.handoffVisibleCount != 1 {
+		return false, "ambiguous_visible_tiles"
 	}
 	if state == nil || state.pendingRestore || !nativeIdentityMatches(state) {
 		return false, "window_identity_unavailable"
@@ -206,6 +249,58 @@ func nativeForegroundHandoff(ctx context.Context, request nativeHandoffRequest) 
 	return nativeIssueForegroundHandoff(ctx, client, request)
 }
 
+// QEMU grants its bound launcher one foreground attempt. Activation can be
+// asynchronous across input queues, so process a bounded no-op on the exact
+// target thread before checking the result. This never repeats activation.
+func nativeActivateGrantedWindowAboveQemu(ctx context.Context, state *nativeProjectedWindow) error {
+	hwnd := state.window.handle
+	qemu := qemuHwnd.Load()
+	if qemu == 0 || nativeReadForegroundRelation().root != qemu {
+		return errors.New("QEMU is no longer the foreground window")
+	}
+	if hung, _, _ := seamlessIsHung.Call(hwnd); hung != 0 {
+		return errors.New("native window became unresponsive")
+	}
+	if ctx.Err() != nil || !nativeIdentityMatches(state) ||
+		nativeWindowProperty(hwnd, state.window.grantProperty) != state.window.incarnation {
+		return errors.New("native foreground identity or layout deadline changed")
+	}
+	if ok, _, _ := procSetForegroundWindow.Call(hwnd); ok == 0 {
+		return errNativeActivationDenied
+	}
+	deadline, exists := ctx.Deadline()
+	if !exists || ctx.Err() != nil {
+		return errors.New("foreground activation budget expired")
+	}
+	remaining := time.Until(deadline).Milliseconds()
+	if remaining < 1 {
+		return errors.New("foreground activation budget expired")
+	}
+	if remaining > 100 {
+		remaining = 100
+	}
+	var messageResult uintptr
+	const wmNull = 0
+	const smtoAbortIfHungBlock = 0x0001 | 0x0002
+	if ok, _, _ := nativeSendMessageTimeoutW.Call(hwnd, wmNull, 0, 0,
+		smtoAbortIfHungBlock, uintptr(remaining), uintptr(unsafe.Pointer(&messageResult))); ok == 0 {
+		return errNativeActivationTimeout
+	}
+	if ctx.Err() != nil || !nativeIdentityMatches(state) ||
+		nativeWindowProperty(hwnd, state.window.grantProperty) != state.window.incarnation {
+		return errors.New("native foreground identity or layout deadline changed")
+	}
+	if nativeQemuAbove(hwnd) {
+		nativeLogZOrderFailure("QEMU remained above after delegated activation", hwnd)
+		return errNativeActivationStillBehind
+	}
+	foreground := nativeReadForegroundRelation()
+	if !nativeForegroundBelongsToProjected(foreground, seamlessKey(state.window), true, nativeIdentityMatches(state)) {
+		return errNativeActivationNoFocus
+	}
+	return nil
+}
+
 // First try the ordinary host placement. An experiment opts into one bounded
 // permission request only when QEMU itself is the foreground SDL window and
 // every current grant check still passes. A failed attempt is not replayed on
@@ -233,6 +328,14 @@ func (p *nativeProjection) raiseAboveQemuLocked(state *nativeProjectedWindow, re
 		Created: state.created, Property: state.window.grantProperty,
 		Incarnation: uint64(state.window.incarnation),
 	}
+	launcherPID, launcherCreated, launcherHWND, err := nativeLauncherHandoffIdentity()
+	if err != nil {
+		p.logHandoffOutcomeLocked(state, "launcher_identity_unavailable")
+		return originalError
+	}
+	request.LauncherPID = launcherPID
+	request.LauncherCreated = launcherCreated
+	request.LauncherHWND = uint64(launcherHWND)
 	end := nativeHandoffEffectiveDeadline(p.deadline, p.handoffUntil)
 	ctx, cancel := context.WithDeadline(context.Background(), end)
 	defer cancel()
@@ -249,8 +352,18 @@ func (p *nativeProjection) raiseAboveQemuLocked(state *nativeProjectedWindow, re
 		p.logHandoffOutcomeLocked(state, "post_permission_"+reason)
 		return errors.New("native foreground handoff identity changed")
 	}
-	if err := nativeRaiseAboveQemu(state.window.handle); err != nil {
-		p.logHandoffOutcomeLocked(state, "permission_accepted_placement_failed")
+	if err := nativeActivateGrantedWindowAboveQemu(ctx, state); err != nil {
+		reason := "permission_accepted_activation_failed"
+		if errors.Is(err, errNativeActivationStillBehind) {
+			reason = "permission_accepted_still_behind"
+		} else if errors.Is(err, errNativeActivationNoFocus) {
+			reason = "permission_accepted_no_foreground"
+		} else if errors.Is(err, errNativeActivationDenied) {
+			reason = "permission_accepted_activation_denied"
+		} else if errors.Is(err, errNativeActivationTimeout) {
+			reason = "permission_accepted_processing_timeout"
+		}
+		p.logHandoffOutcomeLocked(state, reason)
 		return err
 	}
 	p.logHandoffOutcomeLocked(state, "permission_accepted_placement_verified")

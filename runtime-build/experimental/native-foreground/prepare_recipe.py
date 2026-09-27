@@ -10,9 +10,11 @@ import sys
 from pathlib import Path
 
 
-EXPERIMENTAL_NAME = "winq-emu-alpha10-native-foreground-experimental"
-PATCH = "0013-bound-native-foreground-permission-to-sdl-grant.patch"
-PATCH_SHA256 = "3f5cc0f5d8f2e68574fc28775d87efa443065b15203b26cb6c2899265068bd59"
+EXPERIMENTAL_NAME = "winq-emu-alpha10-native-foreground-v2-experimental"
+PATCHES = (
+    ("0013-bound-native-foreground-permission-to-sdl-grant.patch", "3f5cc0f5d8f2e68574fc28775d87efa443065b15203b26cb6c2899265068bd59"),
+    ("0014-bind-foreground-handoff-to-launcher.patch", "0159dbc3849f4d392bfed8cd3bb1a1faa9872212c2363844fe197b5db51c9f58"),
+)
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
@@ -26,16 +28,18 @@ def prepare(destination: Path) -> None:
     source = Path(__file__).resolve().parents[2]
     if destination.exists():
         raise ValueError(f"destination already exists: {destination}")
-    patch = source / "patches" / "qemu" / PATCH
-    if hashlib.sha256(patch.read_bytes()).hexdigest() != PATCH_SHA256:
-        raise ValueError("experimental native foreground patch hash changed")
+    for filename, expected_hash in PATCHES:
+        patch = source / "patches" / "qemu" / filename
+        if hashlib.sha256(patch.read_bytes()).hexdigest() != expected_hash:
+            raise ValueError(f"experimental native foreground patch hash changed: {filename}")
     shutil.copytree(source, destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
     lock_path = destination / "sources.lock.json"
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     lock["name"] = EXPERIMENTAL_NAME
-    lock["qemu"]["patches"].append(
-        {"file": f"patches/qemu/{PATCH}", "sha256": PATCH_SHA256}
+    lock["qemu"]["patches"].extend(
+        {"file": f"patches/qemu/{filename}", "sha256": expected_hash}
+        for filename, expected_hash in PATCHES
     )
     lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8", newline="\n")
 
