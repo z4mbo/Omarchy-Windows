@@ -491,7 +491,7 @@ func nativeIndependentFullscreenChange(state *nativeProjectedWindow, current sea
 	return !state.uncertainMutation && shown && (current != state.lastRect || presentationChanged)
 }
 
-func nativeFullscreenFromAppPresentation(covers bool, presentation nativeWindowPresentation, styleChanged, previousIntent bool) bool {
+func nativeFullscreenFromAppPresentation(covers bool, presentation nativeWindowPresentation) bool {
 	if !covers || !presentation.valid {
 		return false
 	}
@@ -502,7 +502,10 @@ func nativeFullscreenFromAppPresentation(covers bool, presentation nativeWindowP
 		return true
 	}
 	const wsCaption = 0x00c00000 // WS_CAPTION; Blender fullscreen retains WS_THICKFRAME.
-	return presentation.style&wsCaption == 0 && (styleChanged || previousIntent)
+	// The app can remove its caption before its visible bounds expand to the
+	// monitor. Once both facts are observed together, the earlier style change
+	// need not still be pending in this sampling cycle.
+	return presentation.style&wsCaption == 0
 }
 
 func nativeResolvedFullscreen(state *nativeProjectedWindow, current seamlessRect, shown, measured, coversMonitor, presentationChanged bool) bool {
@@ -529,8 +532,7 @@ func nativeObserveFullscreen(state *nativeProjectedWindow, current seamlessRect,
 	covers := false
 	if measured {
 		covers = nativeFullscreenFromAppPresentation(
-			seamlessCoversMonitor(state.window.handle, visible), presentation,
-			nativeDecorationChanged(state.lastPresentation, presentation), state.fullscreenIntent)
+			seamlessCoversMonitor(state.window.handle, visible), presentation)
 		measured = presentation.valid
 		var verified seamlessRect
 		visibleNow, _, _ := procIsWindowVisible.Call(state.window.handle)

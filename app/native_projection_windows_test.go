@@ -187,12 +187,12 @@ func TestNativeFullscreenTracksAppStyleChangeWithoutGeometryChange(t *testing.T)
 	if !nativePresentationChanged(maximized, borderless) {
 		t.Fatal("same-rect app style transition was ignored")
 	}
-	fullscreen := nativeFullscreenFromAppPresentation(true, borderless, true, false)
+	fullscreen := nativeFullscreenFromAppPresentation(true, borderless)
 	if !nativeResolvedFullscreen(state, outer, true, true, fullscreen, true) {
 		t.Fatal("app borderless transition did not set fullscreen intent")
 	}
 	state.fullscreenIntent, state.lastPresentation = true, borderless
-	windowed := nativeFullscreenFromAppPresentation(true, maximized, true, true)
+	windowed := nativeFullscreenFromAppPresentation(true, maximized)
 	if nativeResolvedFullscreen(state, outer, true, true, windowed, true) {
 		t.Fatal("return to decorated maximized style stayed fullscreen")
 	}
@@ -203,11 +203,11 @@ func TestNativeFullscreenTracksAppStyleChangeWithoutGeometryChange(t *testing.T)
 	if nativePresentationChanged(maximized, nativeWindowPresentation{}) {
 		t.Fatal("unreadable presentation was treated as an app transition")
 	}
-	if !nativeFullscreenFromAppPresentation(true, borderless, false, true) {
+	if !nativeFullscreenFromAppPresentation(true, borderless) {
 		t.Fatal("later geometry measurement cleared known borderless fullscreen intent")
 	}
 	blenderFullscreen := nativeWindowPresentation{style: 0x00050000, showCmd: swShowMaximized, valid: true}
-	if !nativeFullscreenFromAppPresentation(true, blenderFullscreen, true, false) {
+	if !nativeFullscreenFromAppPresentation(true, blenderFullscreen) {
 		t.Fatal("Blender fullscreen retains thick frame but clears caption")
 	}
 	modalStyle := maximized
@@ -217,8 +217,37 @@ func TestNativeFullscreenTracksAppStyleChangeWithoutGeometryChange(t *testing.T)
 	}
 	minimized := maximized
 	minimized.showCmd = swShowMinimized
-	if nativeFullscreenFromAppPresentation(true, minimized, true, false) {
+	if nativeFullscreenFromAppPresentation(true, minimized) {
 		t.Fatal("minimized placement was classified as fullscreen")
+	}
+}
+
+func TestNativeFullscreenDetectsCaptionThenMonitorCoverage(t *testing.T) {
+	projected := seamlessRect{12, 38, 2548, 1428}
+	fullscreen := seamlessRect{0, 0, 2574, 1454}
+	maximized := nativeWindowPresentation{style: 0x00c40000, showCmd: swShowMaximized, valid: true}
+	captionless := nativeWindowPresentation{style: 0x00050000, showCmd: swShowMaximized, valid: true}
+	state := &nativeProjectedWindow{lastRect: projected, lastPresentation: maximized, applied: true}
+
+	// Blender can remove its caption while still occupying the old tile. The
+	// first observation has independent style change but no monitor coverage.
+	if !nativePresentationChanged(state.lastPresentation, captionless) {
+		t.Fatal("caption removal was not an independent app presentation change")
+	}
+	if nativeResolvedFullscreen(state, projected, true, true,
+		nativeFullscreenFromAppPresentation(false, captionless), true) {
+		t.Fatal("caption removal without monitor coverage invented fullscreen")
+	}
+	state.lastPresentation = captionless
+
+	// A later geometry change supplies coverage after the decoration change
+	// was already consumed. It must still make the proxy fullscreen.
+	if nativePresentationChanged(state.lastPresentation, captionless) {
+		t.Fatal("unchanged presentation was treated as a fresh app style change")
+	}
+	if !nativeResolvedFullscreen(state, fullscreen, true, true,
+		nativeFullscreenFromAppPresentation(true, captionless), false) {
+		t.Fatal("captionless monitor coverage after an earlier style change was missed")
 	}
 }
 
