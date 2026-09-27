@@ -71,6 +71,11 @@ def candidate_checks(revision, compat_path='/usr/share/try-omarchy/compat-versio
             "grep -Fq 'matching_new' /usr/local/bin/omarchy-windows-open",
             "grep -Fq 'self.mapped = False' /usr/local/bin/omarchy-windows-native",
         ))
+    if revision >= 42:
+        checks.extend((
+            "grep -Fq 'layout_error_message(exc)' /usr/local/bin/omarchy-windows-native",
+            "grep -Fq 'Stop showing Windows app' /usr/local/bin/omarchy-windows-native",
+        ))
     return ' && '.join(checks)
 
 

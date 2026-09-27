@@ -74,7 +74,7 @@ EXPECTED_FACTS = {
     "icon-cache": "yes",
     "system-ownership": "yes",
     "update-repository": "active",
-    "runtime-package": "4.0.3-7",
+    "runtime-package": "4.0.3-8",
     "package-database": "clean",
     "lock-pam": "yes",
     "pacman-unlocked": "yes",
@@ -298,6 +298,13 @@ def main() -> None:
             "sudo pacman -Qk try-omarchy-runtime >/dev/null 2>&1 && echo yes || echo no"
         )
         EXPECTED_FACTS["windows-named-native-routes"] = "yes"
+    if args.compat_revision >= 42:
+        FACT_CHECKS["windows-native-layout-guidance"] = (
+            "grep -Fq 'layout_error_message(exc)' /usr/local/bin/omarchy-windows-native && "
+            "grep -Fq 'Stop showing Windows app' /usr/local/bin/omarchy-windows-native && "
+            "sudo pacman -Qk try-omarchy-runtime >/dev/null 2>&1 && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-native-layout-guidance"] = "yes"
     add_native_guest_facts(args.compat_revision, FACT_CHECKS, EXPECTED_FACTS)
     add_idle_guest_facts(args.compat_revision, FACT_CHECKS, EXPECTED_FACTS)
 

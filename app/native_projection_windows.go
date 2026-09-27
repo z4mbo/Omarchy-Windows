@@ -104,9 +104,10 @@ type nativeForegroundWindow struct {
 }
 
 type nativeForegroundRelation struct {
-	root      uintptr
-	rootOwner uintptr
-	pid       uint32
+	root            uintptr
+	rootOwner       uintptr
+	pid             uint32
+	ownedChainValid bool
 }
 
 type nativeWindowPresentation struct {
@@ -1015,7 +1016,9 @@ func nativeReadForegroundRelation() nativeForegroundRelation {
 	rootOwner, _, _ := nativeGetAncestor.Call(root, 3) // GA_ROOTOWNER
 	var pid uint32
 	procGetWindowThreadProcessId.Call(root, uintptr(unsafe.Pointer(&pid)))
-	return nativeForegroundRelation{root: root, rootOwner: rootOwner, pid: pid}
+	ownedChainValid := rootOwner != 0 && rootOwner != root &&
+		nativeOwnedPopupChain(root, rootOwner, pid)
+	return nativeForegroundRelation{root: root, rootOwner: rootOwner, pid: pid, ownedChainValid: ownedChainValid}
 }
 
 // An owned popup may be foreground while its granted app tile stays visible.
@@ -1023,7 +1026,7 @@ func nativeReadForegroundRelation() nativeForegroundRelation {
 // same process, and identityValid must be checked against the live grant.
 func nativeForegroundBelongsToProjected(foreground nativeForegroundRelation, key seamlessWindowKey, visible, identityValid bool) bool {
 	return visible && identityValid && foreground.root != 0 && foreground.pid == key.pid &&
-		(foreground.root == key.handle || foreground.rootOwner == key.handle)
+		(foreground.root == key.handle || (foreground.rootOwner == key.handle && foreground.ownedChainValid))
 }
 
 func nativeForegroundSnapshotIdentity(candidate nativeForegroundWindow, ownerPID, ownerThread uint32, liveMarker uintptr) bool {

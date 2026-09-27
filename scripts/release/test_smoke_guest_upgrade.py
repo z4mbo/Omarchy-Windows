@@ -170,6 +170,12 @@ class UpgradeHarnessTests(unittest.TestCase):
         self.assertIn("grep -Fq 'matching_new'", checks)
         self.assertIn("grep -Fq 'self.mapped = False'", checks)
 
+    def test_revision42_checks_native_layout_conflict_guidance_on_older_disks(self) -> None:
+        self.assertNotIn('layout_error_message(exc)', upgrade.candidate_checks(41))
+        checks = upgrade.candidate_checks(42)
+        self.assertIn('layout_error_message(exc)', checks)
+        self.assertIn('Stop showing Windows app', checks)
+
     def test_qcow2_overlay_uses_raw_backing_without_copying_or_mutating_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

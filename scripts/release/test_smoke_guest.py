@@ -67,7 +67,7 @@ class NativeGuestFactsTests(unittest.TestCase):
             self.assertEqual(probe(), "no")
 
     def test_fresh_image_requires_runtime_picker_dependency(self) -> None:
-        self.assertEqual(smoke_guest.EXPECTED_FACTS["runtime-package"], "4.0.3-7")
+        self.assertEqual(smoke_guest.EXPECTED_FACTS["runtime-package"], "4.0.3-8")
         self.assertIn("pacman -Qq zenity", smoke_guest.FACT_CHECKS["windows-app-picker"])
 
     def test_revision38_lua_probe_rejects_a_broken_guest_helper(self) -> None:

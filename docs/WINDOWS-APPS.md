@@ -15,9 +15,10 @@ capture and posted-input endpoints are disabled for that boot.
 
 The [September 27 physical test](evidence/NATIVE-DESKTOP-2026-09-27.md) passed
 Character Map launch, real text input, tiling beside the Linux picker, and
-workspace hide/restore. It also found a Blender launcher-to-child tracking
-failure. Games, fullscreen transitions, popup behavior, monitor changes and
-performance comparisons remain open. The current prototype supports one guest
+workspace hide/restore. A later fresh factory-image test fixed the Blender
+launcher-to-child grant and verified native viewport input. It still failed
+Blender fullscreen-state synchronization and workspace return. Games, popup
+behavior, monitor changes and performance comparisons remain open. The current prototype supports one guest
 output at scale 1 and at most eight granted windows.
 
 See the [native presentation design](NATIVE-WINDOW-PRESENTATION.md) for the

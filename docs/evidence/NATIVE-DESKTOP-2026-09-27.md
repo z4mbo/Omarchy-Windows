@@ -200,3 +200,34 @@ needed before claiming workspace restoration works broadly.
 No gameplay, frame-time comparison, latency measurement, or native-performance
 equivalence was established. The existing personalized installation was not
 replaced.
+
+## Candidate 6: fullscreen classification and foreground diagnostics
+
+The launcher from [CI run 27](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36322084452),
+source `528313df374dda943154c6998e3c6c5fa9eb0afe`, was tested with the existing
+isolated revision-39 disk and runtime from Candidate 5. This is a host-only
+comparison, not a physical test of the revision-41 image built by the same run.
+Launcher artifact `10932553967` matched GitHub's ZIP digest
+`483969388f9b2d3eed550a08a0be7959d1d9b28a560b19195fe9c664eb52556c`.
+The extracted executable matched SHA256
+`7c4d3f5e1f2fc121fa0883e39832acf8ab43cabd07398d2b1da16f9742da0d24`.
+
+The packaged picker again launched and granted Blender's child window. The
+initial maximized application correctly reported `fullscreen: false`; the
+Hyprland proxy was also windowed, at 2536 by 1390. This narrowly verifies the
+maximized-window classification fix. Computer Use opened Blender's Window menu,
+but the subsequent observation found QEMU foreground with the native window
+behind it and a layout HTTP 409. The intended fullscreen toggle was not
+performed, so matching fullscreen behavior remains unverified.
+
+The new bounded host diagnostic established that both QEMU and Blender were
+valid, visible, non-iconic, non-topmost windows at failure. QEMU's exact display
+HWND was foreground. Its extended style was `0x10`; Blender's was `0x100`.
+The diagnostic repeated at 30-second intervals rather than each layout poll.
+This rules out a topmost QEMU window in this reproduction. A foreground-process
+handoff is the next experiment, not an established fix; see its
+[design and validation requirements](../NATIVE-FOREGROUND-HANDOFF.md).
+
+Graceful guest shutdown restored the native Blender window. Computer Use then
+closed the untouched default scene normally and confirmed its window exited.
+The existing personalized installation and its settings remain untouched.

@@ -130,6 +130,11 @@ older disks. It does not claim that those apps or fullscreen transitions pass
 physical acceptance tests; the current Blender fullscreen and workspace-return
 failures remain documented in [desktop evidence](../docs/evidence/NATIVE-DESKTOP-2026-09-27.md).
 
+Patch 0096 (compatibility revision 42) carries native layout-conflict guidance
+on fresh and older guest disks. It gives a safe retry/restore action for the
+observed HTTP 409 condition while retaining the underlying diagnostic error;
+it does not repair the host z-order failure or establish a physical retest.
+
 If Arch has moved since the lock was written, refresh it first and review the diff.
 `scripts/release/refresh-guest-lock.sh` does the whole dance: it checks out the
 locked source, applies the patches, resolves the lock in Docker, and writes the

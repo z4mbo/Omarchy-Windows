@@ -63,14 +63,15 @@ func TestNativeHeartbeatKeepsAppResizeButRepairsLostVisibility(t *testing.T) {
 
 func TestNativeOwnedForegroundRequiresVisibleGrantedOwnerAndSameProcess(t *testing.T) {
 	key := seamlessWindowKey{pid: 73, handle: 0x100}
-	owned := nativeForegroundRelation{root: 0x200, rootOwner: key.handle, pid: key.pid}
+	owned := nativeForegroundRelation{root: 0x200, rootOwner: key.handle, pid: key.pid, ownedChainValid: true}
 	if !nativeForegroundBelongsToProjected(owned, key, true, true) {
 		t.Fatal("same-process owned popup should keep its granted tile active")
 	}
 	for name, relation := range map[string]nativeForegroundRelation{
 		"same-process unowned": {root: 0x200, rootOwner: 0x200, pid: key.pid},
 		"unrelated owner":      {root: 0x200, rootOwner: 0x300, pid: key.pid},
-		"other process":        {root: 0x200, rootOwner: key.handle, pid: 74},
+		"other process":        {root: 0x200, rootOwner: key.handle, pid: 74, ownedChainValid: true},
+		"invalid owner chain":  {root: 0x200, rootOwner: key.handle, pid: key.pid},
 		"missing foreground":   {},
 	} {
 		if nativeForegroundBelongsToProjected(relation, key, true, true) {

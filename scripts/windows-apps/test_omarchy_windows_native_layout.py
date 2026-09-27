@@ -8,6 +8,7 @@ import subprocess
 import sys
 import types
 import unittest
+from urllib.error import HTTPError
 from unittest import mock
 
 script_dir = Path(__file__).resolve().parent
@@ -15,6 +16,7 @@ helper_dir = script_dir if (script_dir / "omarchy_windows_native_layout.py").exi
 sys.path.insert(0, str(helper_dir))
 
 from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, legacy_dispatch_needs_lua, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation, proxy_location, workspace_move_command
+from omarchy_windows_protocol import BridgeError
 
 WINDOW_ID = "a" * 32
 PID = 4607
@@ -40,6 +42,28 @@ def state():
 
 
 class NativeLayoutTest(unittest.TestCase):
+    def test_layout_conflict_has_actionable_wording_without_losing_http_status(self):
+        fcntl = types.ModuleType("fcntl")
+        with mock.patch.dict(sys.modules, {"fcntl": fcntl}):
+            script = runpy.run_path(str(helper_dir / "omarchy-windows-native"), run_name="native_test")
+
+        def bridge_error(path, status):
+            error = BridgeError(f"The Windows bridge returned HTTP {status}.")
+            error.__cause__ = HTTPError("http://127.0.0.1:4445" + path, status, "test", {}, None)
+            return error
+
+        layout_error = bridge_error("/v1/layout", 409)
+        self.assertTrue(script["layout_conflict"](layout_error))
+        message = script["layout_error_message"](layout_error)
+        self.assertIn("Reopen Windows Apps in Omarchy", message)
+        self.assertIn("Stop showing Windows app", message)
+        self.assertNotIn("HTTP 409", message)
+        self.assertEqual(layout_error.__cause__.code, 409)
+        for error in (bridge_error("/v1/windows", 409), bridge_error("/v1/layout", 500),
+                      LayoutError("Hyprland is unavailable")):
+            self.assertFalse(script["layout_conflict"](error))
+            self.assertEqual(script["layout_error_message"](error), str(error))
+
     def test_gtk_proxy_waits_for_verified_workspace_before_fullscreen(self):
         controllers = []
         removed_sources = []

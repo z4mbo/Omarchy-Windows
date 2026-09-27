@@ -1,0 +1,221 @@
+From b03ec7e424ca06f28fa42525de954ad072881472 Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 15:23:59 +0200
+Subject: [PATCH] Package native layout conflict guidance in guest revision 42
+
+---
+ .../usr/local/bin/omarchy-windows-native      | 24 ++++++++++++++++++-
+ guest/scripts/finalize-rootfs.sh              |  4 +++-
+ guest/spec.json                               |  2 +-
+ guest/tests/test_runtime_package.py           |  8 +++----
+ guest/tests/test_windows_native_layout.py     | 24 +++++++++++++++++++
+ guest/tests/verify.py                         |  6 +++--
+ 6 files changed, 59 insertions(+), 9 deletions(-)
+
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-native b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+index 8b7b9ad..3bef8c4 100755
+--- a/guest/factory-overlay/usr/local/bin/omarchy-windows-native
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+@@ -17,6 +17,7 @@ import sys
+ import threading
+ import time
+ import urllib.error
++import urllib.parse
+ 
+ from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, legacy_dispatch_needs_lua, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked, proxy_location, workspace_move_command
+ from omarchy_windows_protocol import Bridge, BridgeError, load_token
+@@ -101,6 +102,21 @@ def hidden_layout(output: dict, catalog: list[dict]) -> dict:
+         for item in catalog]}
+ 
+ 
++def layout_conflict(error: Exception) -> bool:
++    """Only an HTTP 409 from the native layout endpoint gets recovery wording."""
++    cause = error.__cause__ if isinstance(error, BridgeError) else None
++    return (isinstance(cause, urllib.error.HTTPError) and cause.code == 409
++            and urllib.parse.urlsplit(cause.geturl()).path == "/v1/layout")
++
++
++def layout_error_message(error: Exception) -> str:
++    if layout_conflict(error):
++        return ("Omarchy couldn't show this Windows app in its workspace. "
++                "Reopen Windows Apps in Omarchy to retry. To restore it on Windows, "
++                "choose Stop showing Windows app from the Omarchy tray menu.")
++    return str(error)
++
++
+ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+     try:
+         import gi
+@@ -222,6 +238,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+             self.error = ""
+             self.workspace_warning = ""
+             self.move_syntax: str | None = None
++            self.last_layout_conflict_log = 0.0
+ 
+         def do_activate(self):
+             if self.worker is not None:
+@@ -385,7 +402,12 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+                                 # window has focus; it must not raise a popup.
+                                 GLib.idle_add(self.clear_error)
+                     except (BridgeError, LayoutError) as exc:
+-                        GLib.idle_add(self.show_error, str(exc))
++                        if layout_conflict(exc):
++                            now = time.monotonic()
++                            if not self.last_layout_conflict_log or now - self.last_layout_conflict_log >= 30:
++                                print(f"Native Windows layout rejected at /v1/layout: {exc}", file=sys.stderr)
++                                self.last_layout_conflict_log = now
++                        GLib.idle_add(self.show_error, layout_error_message(exc))
+                         # Keep native content hidden through transient Hyprland
+                         # failures when an authenticated session remains reachable.
+                         if self.last_output is not None:
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index 271c3ff..3aab079 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -201,7 +201,9 @@ tar -C / -cf /usr/share/try-omarchy/compat-overlay.tar "${compat_paths[@]}"
+ # for source provenance and disposable compatibility tests, not menu use.
+ # Revision 41 carries mapped-proxy fullscreen requests and named Windows app
+ # routes into the existing-disk compatibility overlay.
+-compat_revision=41
++# Revision 42 shows actionable native layout-conflict guidance on fresh and
++# existing disks while retaining the HTTP failure in bounded diagnostics.
++compat_revision=42
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Fail the build if DKMS or networking modules were not packaged for this kernel.
+diff --git a/guest/spec.json b/guest/spec.json
+index 181a554..f4ecfb0 100644
+--- a/guest/spec.json
++++ b/guest/spec.json
+@@ -30,7 +30,7 @@
+     "versionFile": "4.0.0.alpha",
+     "channel": "quattro",
+     "license": "MIT",
+-    "packageRelease": 7
++    "packageRelease": 8
+   },
+   "supplyChain": {
+     "omarchyPackagesRepository": "https://github.com/omacom-io/omarchy-pkgs",
+diff --git a/guest/tests/test_runtime_package.py b/guest/tests/test_runtime_package.py
+index 798d38d..c27b31a 100644
+--- a/guest/tests/test_runtime_package.py
++++ b/guest/tests/test_runtime_package.py
+@@ -38,7 +38,7 @@ class RuntimePackageTests(unittest.TestCase):
+                      'omarchy-update-available', 'omarchy-channel-set'):
+             (self.root / 'usr/share/omarchy/bin' / name).symlink_to('/usr/bin/' + name)
+         self.spec = self.base / 'spec.json'
+-        self.spec.write_text(json.dumps({'upstream': {'version': '4.0.3', 'packageRelease': 7,
++        self.spec.write_text(json.dumps({'upstream': {'version': '4.0.3', 'packageRelease': 8,
+             'repository': 'https://example.invalid/omarchy', 'commit': 'a' * 40},
+             'image': {'sourceDateEpoch': 1789344000}}))
+         self.config = self.base / 'pacman.conf'
+@@ -50,7 +50,7 @@ class RuntimePackageTests(unittest.TestCase):
+         self.fake('zstd', 'cat > "${@: -1}"')
+         self.fake('pacman', '''for arg in "$@"; do
+   if [[ $arg == -U ]]; then cp "${@: -1}" "$CAPTURE"; fi
+-    if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-7'; fi
++    if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-8'; fi
+ done
+ exit 0''')
+         self.capture = self.base / 'package.tar'
+@@ -73,7 +73,7 @@ exit 0''')
+             names = set(archive.getnames())
+             metadata = archive.extractfile('.PKGINFO').read().decode()
+             self.assertIn('.INSTALL', names)
+-            self.assertIn('pkgver = 4.0.3-7', metadata)
++            self.assertIn('pkgver = 4.0.3-8', metadata)
+             self.assertIn('depend = zenity', metadata)
+             self.assertIn('usr/bin/omarchy', names)
+             self.assertIn('usr/bin/omarchy-version', names)
+@@ -105,7 +105,7 @@ exit 0''')
+     def test_database_failure_rejects_package(self):
+         self.fake('pacman', '''for arg in "$@"; do
+   if [[ $arg == -Dk ]]; then exit 1; fi
+-    if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-7'; fi
++    if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-8'; fi
+ done
+ exit 0''')
+         result = self.run_builder()
+diff --git a/guest/tests/test_windows_native_layout.py b/guest/tests/test_windows_native_layout.py
+index b65e972..fcaf423 100755
+--- a/guest/tests/test_windows_native_layout.py
++++ b/guest/tests/test_windows_native_layout.py
+@@ -8,6 +8,7 @@ import subprocess
+ import sys
+ import types
+ import unittest
++from urllib.error import HTTPError
+ from unittest import mock
+ 
+ script_dir = Path(__file__).resolve().parent
+@@ -15,6 +16,7 @@ helper_dir = script_dir if (script_dir / "omarchy_windows_native_layout.py").exi
+ sys.path.insert(0, str(helper_dir))
+ 
+ from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, legacy_dispatch_needs_lua, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation, proxy_location, workspace_move_command
++from omarchy_windows_protocol import BridgeError
+ 
+ WINDOW_ID = "a" * 32
+ PID = 4607
+@@ -40,6 +42,28 @@ def state():
+ 
+ 
+ class NativeLayoutTest(unittest.TestCase):
++    def test_layout_conflict_has_actionable_wording_without_losing_http_status(self):
++        fcntl = types.ModuleType("fcntl")
++        with mock.patch.dict(sys.modules, {"fcntl": fcntl}):
++            script = runpy.run_path(str(helper_dir / "omarchy-windows-native"), run_name="native_test")
++
++        def bridge_error(path, status):
++            error = BridgeError(f"The Windows bridge returned HTTP {status}.")
++            error.__cause__ = HTTPError("http://127.0.0.1:4445" + path, status, "test", {}, None)
++            return error
++
++        layout_error = bridge_error("/v1/layout", 409)
++        self.assertTrue(script["layout_conflict"](layout_error))
++        message = script["layout_error_message"](layout_error)
++        self.assertIn("Reopen Windows Apps in Omarchy", message)
++        self.assertIn("Stop showing Windows app", message)
++        self.assertNotIn("HTTP 409", message)
++        self.assertEqual(layout_error.__cause__.code, 409)
++        for error in (bridge_error("/v1/windows", 409), bridge_error("/v1/layout", 500),
++                      LayoutError("Hyprland is unavailable")):
++            self.assertFalse(script["layout_conflict"](error))
++            self.assertEqual(script["layout_error_message"](error), str(error))
++
+     def test_gtk_proxy_waits_for_verified_workspace_before_fullscreen(self):
+         controllers = []
+         removed_sources = []
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index 8cde5e3..1a1234b 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -47,7 +47,7 @@ def main() -> None:
+     check(spec["runtime"]["virtualMachineMonitor"] == "qemu-system-x86_64", "runtime uses native x86 QEMU")
+     check(spec["runtime"]["hypervisor"] == "whpx", "runtime uses Windows Hypervisor Platform")
+     check(spec["runtime"]["storage"]["expandedSizeMiB"] == 24576, "working disk expands to 24 GiB")
+-    check(spec["upstream"].get("packageRelease") == 7
++    check(spec["upstream"].get("packageRelease") == 8
+           and "depend = zenity" in read(GUEST / "scripts/register-omarchy-runtime.sh"),
+           "the updated Omarchy runtime requires Zenity on existing guest disks")
+     check(set(spec["inputs"]) == {"packages", "packageLock", "pacmanConfig"}, "spec has a minimal input set")
+@@ -273,7 +273,7 @@ def main() -> None:
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     compat_paths = finalize_rootfs.split("compat_paths=(", 1)[1].split(")", 1)[0]
+     check(
+-        "compat_revision=41" in finalize_rootfs
++        "compat_revision=42" in finalize_rootfs
+         and "usr/local/lib/try-omarchy/catch-up" in compat_paths
+         and "usr/share/try-omarchy/vdso-overlay.sha256" in compat_paths
+         and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
+@@ -370,6 +370,8 @@ def main() -> None:
+         and windows_native.stat().st_mode & stat.S_IXUSR != 0
+         and "self.mapped = False" in windows_native.read_text()
+         and "mapped=proxy_location(ident, clients, os.getpid()) is not None" in windows_native.read_text()
++        and "layout_error_message(exc)" in windows_native.read_text()
++        and "Stop showing Windows app" in windows_native.read_text()
+         and windows_native_layout.exists()
+         and "presentation_mode" in windows_open.read_text()
+         and windows_protocol.exists()
+-- 
+2.53.0.windows.3
+
