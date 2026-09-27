@@ -83,9 +83,12 @@ type nativeProjection struct {
 	tracked                   map[seamlessWindowKey]*nativeProjectedWindow
 	sequence                  int64
 	deadline                  time.Time
+	handoffUntil              time.Time // shared short budget for this in-progress Apply only
 	closed                    bool
 	stop                      chan struct{}
 	foreground                atomic.Pointer[nativeForegroundSnapshot]
+	experimentalForeground    bool
+	handoffAttempts           map[seamlessWindowKey]nativeHandoffAttempt
 	hiddenWindowSourceForTest func([]seamlessWindow) []seamlessWindow
 }
 
@@ -190,7 +193,7 @@ func nativeCountQemuWindow(hwnd, _ uintptr) uintptr {
 }
 
 func newNativeProjection(b *seamlessWindowBridge) *nativeProjection {
-	p := &nativeProjection{bridge: b, tracked: make(map[seamlessWindowKey]*nativeProjectedWindow), stop: make(chan struct{})}
+	p := &nativeProjection{bridge: b, tracked: make(map[seamlessWindowKey]*nativeProjectedWindow), handoffAttempts: make(map[seamlessWindowKey]nativeHandoffAttempt), stop: make(chan struct{})}
 	go p.watch()
 	return p
 }
@@ -212,6 +215,7 @@ func (p *nativeProjection) watch() {
 			if !p.deadline.IsZero() && time.Now().After(p.deadline) {
 				p.foreground.Store(nil)
 				p.markAllRestoreLocked()
+				p.markAllHandoffsHiddenLocked()
 				p.deadline = time.Time{}
 			}
 			p.retryRestoreLocked()
@@ -239,6 +243,7 @@ func (p *nativeProjection) auditGrantsLocked() bool {
 	p.bridge.mu.Lock()
 	for key, state := range p.tracked {
 		if grant, ok := p.bridge.grants[key]; !ok || !p.bridge.grantMatches(state.window, grant) {
+			delete(p.handoffAttempts, key)
 			if !state.pendingRestore {
 				state.pendingRestore = true
 				changed = true
@@ -261,6 +266,7 @@ func (p *nativeProjection) Close() {
 		p.closed = true
 		close(p.stop)
 		p.foreground.Store(nil)
+		clear(p.handoffAttempts)
 		p.markAllRestoreLocked()
 		for i := 0; i < 3 && len(p.tracked) > 0; i++ {
 			for _, state := range p.tracked {
@@ -288,6 +294,7 @@ func (p *nativeProjection) Release(window seamlessWindow) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	key := seamlessKey(window)
+	delete(p.handoffAttempts, key)
 	if state := p.tracked[key]; state != nil {
 		state.pendingRestore = true
 		state.restoreAttempts = 0
@@ -326,6 +333,7 @@ func (p *nativeProjection) HiddenWindows(visible []seamlessWindow) []seamlessWin
 			p.dropOwnedPopupsLocked(state)
 			nativeFreeRegion(state)
 			delete(p.tracked, key)
+			delete(p.handoffAttempts, key)
 			continue
 		}
 		if shown, _, _ := procIsWindowVisible.Call(key.handle); shown == 0 {
@@ -820,6 +828,7 @@ func nativeAspectMatches(outputWidth, outputHeight int, client seamlessRect) boo
 }
 
 func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
+	started := time.Now()
 	restore, err := nativeDPIEnter()
 	if err != nil {
 		return "", err
@@ -838,6 +847,8 @@ func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
 	if p.closed || l.Sequence <= p.sequence {
 		return "", errors.New("stale native layout")
 	}
+	p.handoffUntil = started.Add(nativeHandoffBudget)
+	defer func() { p.handoffUntil = time.Time{} }()
 	requested := make(map[seamlessWindowKey]nativeTile, len(l.Windows))
 	states := make(map[seamlessWindowKey]*nativeProjectedWindow, len(l.Windows))
 	// Reuse the scoped DPI setup error variable for snapshot failures.
@@ -867,6 +878,7 @@ func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
 	}
 	for key, state := range p.tracked {
 		if _, ok := requested[key]; !ok {
+			delete(p.handoffAttempts, key)
 			if !state.pendingRestore {
 				state.pendingRestore = true
 				state.restoreAttempts = 0
@@ -927,6 +939,7 @@ func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
 		if clientErr != nil || !active {
 			tile.Visible = false
 		}
+		p.noteHandoffVisibilityLocked(key, tile.Visible)
 		var rect seamlessRect
 		if tile.Visible {
 			rect = nativeScaleTile(tile, l.Output.Width, l.Output.Height, client)
@@ -1149,7 +1162,7 @@ func (p *nativeProjection) placeLocked(state *nativeProjectedWindow, tile native
 			// heartbeat. Z-order is independent of the app's chosen geometry,
 			// so repair it even after an app-initiated resize.
 			if tile.Visible && nativeQemuAbove(state.window.handle) {
-				if err := nativeRaiseAboveQemu(state.window.handle); err != nil {
+				if err := p.raiseAboveQemuLocked(state, rect); err != nil {
 					return err
 				}
 				if time.Since(state.lastZOrderLog) >= 5*time.Second {
@@ -1207,7 +1220,7 @@ func (p *nativeProjection) placeLocked(state *nativeProjectedWindow, tile native
 		return errors.New("window ignored requested placement")
 	}
 	if tile.Visible && nativeQemuAbove(state.window.handle) {
-		if err := nativeRaiseAboveQemu(state.window.handle); err != nil {
+		if err := p.raiseAboveQemuLocked(state, rect); err != nil {
 			return err
 		}
 		logf("native projection initial z order repaired (PID %d)", state.window.PID)

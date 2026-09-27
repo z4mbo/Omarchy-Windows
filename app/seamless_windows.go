@@ -116,7 +116,7 @@ type seamlessInput struct {
 	Text   string `json:"text,omitempty"`
 }
 
-func runSeamlessWindowBridge() (string, func(), error) {
+func runSeamlessWindowBridge(experimentalNativeForeground bool) (string, func(), error) {
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", seamlessWindowPort))
 	if err != nil {
 		return "", nil, err
@@ -171,6 +171,7 @@ func runSeamlessWindowBridge() (string, func(), error) {
 		}
 		restore()
 		bridge.projection = newNativeProjection(bridge)
+		bridge.projection.experimentalForeground = experimentalNativeForeground
 	}
 	activeSeamlessBridge.Store(bridge)
 	server := &http.Server{

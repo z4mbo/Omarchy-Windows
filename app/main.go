@@ -59,10 +59,11 @@ type config struct {
 	diskGiB        int
 	irqchipOff     bool
 	// Guest vCPUs chosen by the user (settings.json or -cpus); 0 = automatic.
-	cpuOverride  int
-	cpus         int
-	hostTotalMiB int
-	adaptiveCPU  bool
+	cpuOverride                  int
+	cpus                         int
+	hostTotalMiB                 int
+	adaptiveCPU                  bool
+	experimentalNativeForeground bool
 	// Rendering decision inputs, see render_probe.go.
 	renderMode    string
 	runtimeID     string
@@ -148,6 +149,7 @@ func main() {
 	flag.BoolVar(&cfg.hostCursor, "host-cursor", false, "force the legacy Windows cursor over the guest")
 	flag.BoolVar(&cfg.instant, "instant", false, "skip first-boot questions and use the trial account")
 	flag.BoolVar(&cfg.portable, "portable", false, "run entirely from data and payload folders beside the executable")
+	flag.BoolVar(&cfg.experimentalNativeForeground, "experimental-native-foreground", false, "developer experiment: private native-window foreground handoff with a verified patched runtime")
 	var forwards forwardList
 	flag.Var(&forwards, "forward", "forward a Windows port into Omarchy: tcp:2222:22 (local), tcp:192.168.1.5:8080:80 (LAN); repeatable")
 	firewallPlan := flag.String("firewall-plan", "", "internal: apply owned LAN firewall rules")
@@ -182,6 +184,9 @@ func main() {
 	updateWaitPID := flag.Int("update-wait-pid", 0, "internal: process to wait for before replacing the launcher")
 	updateRestartArgs := flag.String("update-restart-args", "", "internal: encoded launcher restart arguments")
 	flag.Parse()
+	if cfg.experimentalNativeForeground && (os.Getenv("OMARCHY_WINDOWS_PRESENTATION") != "native" || cfg.displays != 1) {
+		fatal("The native foreground experiment requires native presentation mode and exactly one Omarchy display.")
+	}
 	if *sunshineInstall {
 		os.Exit(runSunshineInstallElevated())
 	}
@@ -760,7 +765,10 @@ func main() {
 	runClipboardBridge()
 	runCameraBridge(cfg.desktop)
 	runHostAppBridge()
-	if path, stop, err := runSeamlessWindowBridge(); err != nil {
+	if path, stop, err := runSeamlessWindowBridge(cfg.experimentalNativeForeground); err != nil {
+		if cfg.experimentalNativeForeground {
+			fatal("Cannot start the experimental native Windows bridge: %v", err)
+		}
 		logf("seamless Windows bridge unavailable: %v", err)
 	} else {
 		cfg.windowTokenPath = path
@@ -810,11 +818,17 @@ func supervise(cfg *config, cmdline string) bool {
 		logf("booting - %s (attempt %d)", mode, attempt)
 		pendingReboot.Store(false)
 		guestReady.Store(false)
+		nativeHandoffGuestReady.Store(false)
 		controlDir, err := prepareQMPControl()
 		if err != nil {
 			fatal("Cannot prepare private VM controls: %v", err)
 		}
 		cfg.qmpDir = controlDir
+		if cfg.experimentalNativeForeground {
+			if err := ensureQMPControlDirectoryACL(controlDir); err != nil {
+				fatal("Cannot protect the experimental native QMP control: %v", err)
+			}
+		}
 		proc = exec.Command(cfg.qemu, buildQemuArgs(cfg, cmdline)...)
 		// The w-binary's startup errors (bad args, SDL init) only ever reach
 		// stderr; without this they vanish and a dead QEMU is undebuggable.
@@ -940,6 +954,7 @@ func supervise(cfg *config, cmdline string) bool {
 			return watch(cfg, qmp, exited)
 		}
 		qemuPid.Store(0)
+		nativeHandoffGuestReady.Store(false)
 		if !startupDead {
 			logf("QEMU is not answering (known WHPX launch wedge) - killing and retrying")
 			proc.Process.Kill()
@@ -968,6 +983,9 @@ func watch(cfg *config, qmp *qmpConn, exited <-chan error) bool {
 	movedBootPending := false
 	for reason == "" && !procDown {
 		if guestReady.Swap(false) {
+			// QMP is already connected here; the lifecycle listener alone must
+			// never permit an experimental monitor call during early WHPX boot.
+			nativeHandoffGuestReady.Store(true)
 			commitLauncherUpdate(cfg.dir)
 			commitPayloadUpdates(cfg.dir)
 			commitCheckpointBoot(cfg.dir)
@@ -1035,6 +1053,7 @@ drained:
 	}
 	guestUp.Store(false)
 	qemuPid.Store(0)
+	nativeHandoffGuestReady.Store(false)
 	// A QEMU wedged during the guest's reset can die without ever delivering
 	// its SHUTDOWN event, making reboot and poweroff indistinguishable over
 	// QMP (and the wedge also loses the serial file's final flush, so the
@@ -1057,8 +1076,9 @@ drained:
 }
 
 var (
-	pendingReboot atomic.Bool
-	guestReady    atomic.Bool
+	pendingReboot           atomic.Bool
+	guestReady              atomic.Bool
+	nativeHandoffGuestReady atomic.Bool
 )
 
 // runLifecycleListener receives the guest's shutdown intent: the image's

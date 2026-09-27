@@ -33,6 +33,9 @@ func TestQMPControlPreservesUnexpectedFiles(t *testing.T) {
 	if _, err := qmpControlPath(12345); err == nil {
 		t.Fatal("accepted unknown role")
 	}
+	if qmpControlName(qmpNativePort) != "native.sock" {
+		t.Fatal("native QMP role does not have its own private socket")
+	}
 	qmpControlDirectory = func() (string, error) { return filepath.Join(dir, strings.Repeat("x", 120)), nil }
 	if _, err := qmpControlPath(qmpToolsPort); err == nil {
 		t.Fatal("accepted an unusable control path")
@@ -55,5 +58,27 @@ func TestQemuControlArgumentsUsePrivateSockets(t *testing.T) {
 	}
 	if count != 3 {
 		t.Fatalf("expected three private control channels, got %d", count)
+	}
+}
+
+func TestExperimentalNativeControlAddsOnlyPrivateFourthSocket(t *testing.T) {
+	cfg := &config{qmpDir: filepath.Join("private,controls"), memMiB: 2048, cpus: 2, guestDir: "guest", vmDir: "vm", disk: "disk.raw", diskFormat: "raw", audio: "none", experimentalNativeForeground: true}
+	args := buildQemuArgs(cfg, "root=/dev/vda")
+	count := 0
+	for index, arg := range args {
+		if arg != "-qmp" {
+			continue
+		}
+		count++
+		value := args[index+1]
+		if !strings.HasPrefix(value, "unix:private,,controls") || strings.Contains(value, "tcp:") {
+			t.Fatalf("guest-accessible experimental control: %s", value)
+		}
+		if count == 4 && !strings.Contains(value, "native.sock") {
+			t.Fatalf("fourth QMP control is not the native socket: %s", value)
+		}
+	}
+	if count != 4 {
+		t.Fatalf("expected four private control channels in experiment, got %d", count)
 	}
 }

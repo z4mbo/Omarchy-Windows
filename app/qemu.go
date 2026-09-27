@@ -131,6 +131,9 @@ func buildQemuArgs(cfg *config, cmdline string) []string {
 		"-no-reboot",
 		"-name", appTitle,
 	)
+	if cfg.experimentalNativeForeground {
+		args = append(args, "-qmp", "unix:"+qemuOptionValue(filepath.Join(cfg.qmpDir, qmpControlName(qmpNativePort)))+",server=on,wait=off")
+	}
 	if cfg.share != "" {
 		if cfg.supportsSharing {
 			args = append(args, "-virtfs", "local,path="+qemuOptionValue(cfg.share)+",mount_tag=hostshare,security_model=none")
