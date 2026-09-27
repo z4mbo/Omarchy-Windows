@@ -6,7 +6,7 @@ adds the independently pinned `0013` QEMU patch. It produces separate
 `runtime-build/sources.lock.json`, release runtime, and installed Omarchy are
 unchanged.
 
-The Windows SDL QMP command `__omarchy_native_foreground_handoff` delegates
+The Windows SDL QMP command `__omarchy_native-foreground-handoff` delegates
 `AllowSetForegroundWindow` permission to one host process only after rechecking
 the foreground SDL display, the exact native HWND/PID/process creation time,
 the Omarchy grant marker, a short Windows uptime expiry, the active desktop

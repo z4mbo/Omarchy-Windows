@@ -555,3 +555,47 @@ func TestNativeGrantLossClearsForegroundRouting(t *testing.T) {
 		t.Fatal("revoked native window still eligible for Super routing")
 	}
 }
+
+func TestQemuGenerationRestoresBeforeResettingNativeSequence(t *testing.T) {
+	key := seamlessWindowKey{pid: 123, handle: 0xabc}
+	state := &nativeProjectedWindow{}
+	p := &nativeProjection{
+		tracked:  map[seamlessWindowKey]*nativeProjectedWindow{key: state},
+		sequence: 9_000_000_000, deadline: time.Now().Add(time.Second),
+		handoffAttempts: map[seamlessWindowKey]nativeHandoffAttempt{key: {}},
+	}
+	p.foreground.Store(&nativeForegroundSnapshot{until: p.deadline})
+	p.prepareQemuGenerationLocked(1)
+	if !p.generationRestorePending || !state.pendingRestore || p.sequence != 9_000_000_000 ||
+		!p.deadline.IsZero() || p.foreground.Load() != nil || len(p.handoffAttempts) != 0 {
+		t.Fatal("old native state was not barred before the next QEMU process")
+	}
+	p.completeQemuGenerationLocked()
+	if p.sequence == 0 {
+		t.Fatal("sequence reset before the next QEMU process started")
+	}
+	p.beginQemuGenerationLocked(1)
+	if p.sequence == 0 || p.acceptsSequenceLocked(1, 1) {
+		t.Fatal("new guest layout accepted before old window restoration")
+	}
+	delete(p.tracked, key) // A verified restoration or identity drop completed.
+	p.completeQemuGenerationLocked()
+	if p.sequence != 0 || p.generationRestorePending || !p.acceptsSequenceLocked(1, 1) ||
+		p.acceptsSequenceLocked(0, 9_000_000_001) {
+		t.Fatal("new guest could not restart its layout sequence after restoration")
+	}
+	p.sequence = 5
+	p.beginQemuGenerationLocked(1)
+	if p.sequence != 5 {
+		t.Fatal("duplicate process-generation notification reset a live sequence")
+	}
+	p.completeQemuGenerationLocked() // Lease expiry alone must not reset it.
+	if p.sequence != 5 {
+		t.Fatal("sequence reset without a distinct QEMU process")
+	}
+	p.prepareQemuGenerationLocked(2)
+	p.beginQemuGenerationLocked(2)
+	if p.sequence != 0 {
+		t.Fatal("second confirmed QEMU process did not reset the sequence")
+	}
+}

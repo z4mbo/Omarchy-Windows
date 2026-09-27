@@ -39,6 +39,8 @@ var activeSeamlessBridge atomic.Pointer[seamlessWindowBridge]
 // exclusive-fullscreen compatibility is implied.
 type seamlessWindowBridge struct {
 	token        string
+	tokenPath    string
+	session      atomic.Pointer[seamlessSession]
 	backend      seamlessWindowBackend
 	frames       chan struct{}
 	projection   *nativeProjection
@@ -50,6 +52,13 @@ type seamlessWindowBridge struct {
 	retired      []seamlessRetiredGrant
 	pending      []seamlessLaunch
 	closed       bool
+}
+
+// Grant identities use the bridge's stable token as an HMAC key. The bearer
+// presented by a guest is separate and changes for each QEMU process.
+type seamlessSession struct {
+	token      string
+	generation uint64
 }
 
 type seamlessWindowKey struct {
@@ -161,7 +170,8 @@ func runSeamlessWindowBridge(experimentalNativeForeground bool) (string, func(),
 		os.Remove(path)
 		return "", nil, fmt.Errorf("protect bearer token: %w", err)
 	}
-	bridge := &seamlessWindowBridge{token: token, backend: nativeSeamlessWindows{}, frames: make(chan struct{}, 2)}
+	bridge := &seamlessWindowBridge{token: token, tokenPath: path, backend: nativeSeamlessWindows{}, frames: make(chan struct{}, 2)}
+	bridge.session.Store(&seamlessSession{token: token})
 	if os.Getenv("OMARCHY_WINDOWS_PRESENTATION") == "native" {
 		restore, dpiErr := nativeDPIEnter()
 		if dpiErr != nil {
@@ -206,10 +216,63 @@ func runSeamlessWindowBridge(experimentalNativeForeground bool) (string, func(),
 	}, nil
 }
 
+// QEMU reads the existing protected fw_cfg file only when its process starts.
+// A fresh bearer rejects queued requests from the previous process while the
+// bridge's stable HMAC key keeps explicit host window grants intact.
+func prepareSeamlessSessionToken(path string, generation uint64) error {
+	if path == "" {
+		return nil // The optional bridge did not start.
+	}
+	b := activeSeamlessBridge.Load()
+	if b == nil || b.tokenPath != path || generation == 0 || qemuPid.Load() != 0 {
+		return errors.New("seamless bridge is not ready for a new QEMU process")
+	}
+	previous := b.session.Load()
+	if previous == nil || generation <= previous.generation {
+		return errors.New("seamless session generation did not advance")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("seamless token path is not a regular file")
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return err
+	}
+	token := hex.EncodeToString(secret)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return err
+	}
+	_, writeErr := io.WriteString(file, token)
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := restrictSeamlessTokenWindows(path); err != nil {
+		return fmt.Errorf("protect renewed seamless token: %w", err)
+	}
+	b.session.Store(&seamlessSession{token: token, generation: generation})
+	return nil
+}
+
 func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	session := b.session.Load()
+	if session == nil { // Existing in-process tests construct a bridge directly.
+		session = &seamlessSession{token: b.token}
+	}
 	provided, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || subtle.ConstantTimeCompare([]byte(provided), []byte(b.token)) != 1 {
+	if !ok || subtle.ConstantTimeCompare([]byte(provided), []byte(session.token)) != 1 {
 		seamlessJSONError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -230,6 +293,9 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			seamlessJSONError(w, http.StatusConflict, "native_presentation_disabled")
 			return
 		}
+		// The token and generation were captured together before parsing. A
+		// request from a previous QEMU process cannot become current later.
+		requestGeneration := session.generation
 		// Eight tiles with up to sixteen optional occlusion rectangles each.
 		r.Body = http.MaxBytesReader(w, r.Body, 16384)
 		dec := json.NewDecoder(r.Body)
@@ -248,7 +314,7 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		// when this host was configured for native projection. From the first
 		// valid native layout onward, do not mix synthetic input with HWNDs.
 		b.nativeActive = true
-		suspended, err := b.projection.Apply(layout)
+		suspended, err := b.projection.Apply(layout, requestGeneration)
 		b.nativeModeMu.Unlock()
 		if err != nil {
 			seamlessJSONError(w, http.StatusConflict, "layout_unavailable")
@@ -335,6 +401,10 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			seamlessJSONError(w, http.StatusBadRequest, "invalid_input")
 			return
 		}
+		if current := b.session.Load(); current != nil && current != session {
+			seamlessJSONError(w, http.StatusUnauthorized, "previous_guest_session")
+			return
+		}
 		if err := b.backend.input(*selected, input); err != nil {
 			if errors.Is(err, errSeamlessGone) {
 				seamlessJSONError(w, http.StatusNotFound, "window_gone")
@@ -345,6 +415,10 @@ func (b *seamlessWindowBridge) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		}
 		seamlessJSON(w, http.StatusOK, map[string]bool{"accepted": true})
 	case action == "close" && r.Method == http.MethodPost:
+		if current := b.session.Load(); current != nil && current != session {
+			seamlessJSONError(w, http.StatusUnauthorized, "previous_guest_session")
+			return
+		}
 		if err := b.backend.close(*selected); err != nil {
 			if errors.Is(err, errSeamlessGone) {
 				seamlessJSONError(w, http.StatusNotFound, "window_gone")

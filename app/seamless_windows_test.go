@@ -5,11 +5,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -20,6 +22,19 @@ type fakeSeamlessBackend struct {
 	inputCount int
 	closeCount int
 }
+
+type signalledBody struct {
+	reader  *io.PipeReader
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (b *signalledBody) Read(data []byte) (int, error) {
+	b.once.Do(func() { close(b.entered) })
+	return b.reader.Read(data)
+}
+
+func (b *signalledBody) Close() error { return b.reader.Close() }
 
 func (f *fakeSeamlessBackend) windows() []seamlessWindow { return f.items }
 func (f *fakeSeamlessBackend) frame(seamlessWindow) ([]byte, error) {
@@ -290,5 +305,88 @@ func TestSeamlessTokenFileCanBeRestrictedAndReadByQemuUser(t *testing.T) {
 	}
 	if value, err := os.ReadFile(path); err != nil || string(value) != "temporary-test-token" {
 		t.Fatalf("current user cannot read restricted token: %v", err)
+	}
+}
+
+func TestSeamlessBearerRotatesPerQemuProcessWithoutRevokingGrantKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	stable := strings.Repeat("a", 64)
+	if err := os.WriteFile(path, []byte(stable), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := restrictSeamlessTokenWindows(path); err != nil {
+		t.Fatal(err)
+	}
+	b := &seamlessWindowBridge{token: stable, tokenPath: path, backend: &fakeSeamlessBackend{}, frames: make(chan struct{}, 2)}
+	b.session.Store(&seamlessSession{token: stable})
+	previousBridge := activeSeamlessBridge.Swap(b)
+	defer activeSeamlessBridge.Store(previousBridge)
+	if err := prepareSeamlessSessionToken(path, 1); err != nil {
+		t.Fatal(err)
+	}
+	first := b.session.Load()
+	onDisk, err := os.ReadFile(path)
+	if err != nil || string(onDisk) != first.token || first.token == stable || len(first.token) != 64 ||
+		first.generation != 1 || b.token != stable {
+		t.Fatal("session bearer, protected fw_cfg file, and stable grant key diverged")
+	}
+	request := func(token string) int {
+		r := httptest.NewRequest(http.MethodGet, "/v1/windows", nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		b.ServeHTTP(w, r)
+		return w.Code
+	}
+	if request(stable) != http.StatusUnauthorized || request(first.token) != http.StatusOK {
+		t.Fatal("old bearer retained access after first QEMU startup")
+	}
+	if err := prepareSeamlessSessionToken(path, 1); err == nil {
+		t.Fatal("same QEMU generation rotated bearer again")
+	}
+	if err := prepareSeamlessSessionToken(path, 2); err != nil {
+		t.Fatal(err)
+	}
+	second := b.session.Load()
+	if second == first || second.token == first.token || second.generation != 2 ||
+		request(first.token) != http.StatusUnauthorized || request(second.token) != http.StatusOK {
+		t.Fatal("reboot did not revoke the previous QEMU bearer")
+	}
+}
+
+func TestAuthenticatedOldLayoutCannotCommitAfterQemuGenerationChanges(t *testing.T) {
+	old := &seamlessSession{token: strings.Repeat("a", 64), generation: 1}
+	b := &seamlessWindowBridge{token: strings.Repeat("f", 64), backend: &fakeSeamlessBackend{}, frames: make(chan struct{}, 2)}
+	b.session.Store(old)
+	b.projection = &nativeProjection{bridge: b, tracked: make(map[seamlessWindowKey]*nativeProjectedWindow), qemuGeneration: 1}
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	body := &signalledBody{reader: reader, entered: make(chan struct{})}
+	r := httptest.NewRequest(http.MethodPost, "/v1/layout", nil)
+	r.Body = body
+	r.Header.Set("Authorization", "Bearer "+old.token)
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { b.ServeHTTP(response, r); close(done) }()
+	select {
+	case <-body.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old authenticated layout did not reach its body read")
+	}
+	b.session.Store(&seamlessSession{token: strings.Repeat("b", 64), generation: 2})
+	b.projection.mu.Lock()
+	b.projection.beginQemuGenerationLocked(2)
+	b.projection.mu.Unlock()
+	if _, err := io.WriteString(writer, `{"sequence":9000000000,"output":{"width":2560,"height":1440},"windows":[]}`); err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old layout request did not complete")
+	}
+	if response.Code != http.StatusConflict || b.projection.sequence != 0 {
+		t.Fatal("authenticated old layout committed across the QEMU restart")
 	}
 }

@@ -96,6 +96,30 @@ func TestApplySettingsLetsExplicitFlagsWin(t *testing.T) {
 	}
 }
 
+func TestNativeForegroundGateUsesEffectiveSettingsDisplayCount(t *testing.T) {
+	cfg := &config{displays: 1, experimentalNativeForeground: true}
+	if !nativeForegroundExperimentSupported(cfg, "native") {
+		t.Fatal("one native display rejected")
+	}
+	var forwards forwardList
+	keyPath := ""
+	if err := applySettings(cfg, settings{Displays: 2}, map[string]bool{}, &forwards, &keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.displays != 2 || nativeForegroundExperimentSupported(cfg, "native") ||
+		nativeForegroundExperimentSupported(cfg, "capture") {
+		t.Fatal("saved multi-display setting bypassed the experimental gate")
+	}
+	cfg.displays = 1
+	if nativeForegroundExperimentSupported(cfg, "capture") {
+		t.Fatal("capture presentation bypassed the experimental gate")
+	}
+	cfg.experimentalNativeForeground = false
+	if !nativeForegroundExperimentSupported(cfg, "capture") {
+		t.Fatal("normal launch was gated")
+	}
+}
+
 func TestApplySettingsKeepsDisabledShareInactive(t *testing.T) {
 	cfg := &config{}
 	var forwards forwardList

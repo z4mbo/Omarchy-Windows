@@ -28,6 +28,14 @@ import (
 
 const appTitle = "Omarchy"
 
+// The bridge survives guest reboots, while -no-reboot starts a fresh QEMU
+// process. Advance only after Process.Start succeeds.
+var qemuProcessGeneration atomic.Uint64
+
+func nativeForegroundExperimentSupported(cfg *config, presentation string) bool {
+	return !cfg.experimentalNativeForeground || (presentation == "native" && cfg.displays == 1)
+}
+
 type config struct {
 	desktop                     desktopPreferences
 	dir, hostDir, payloadDir    string
@@ -184,9 +192,6 @@ func main() {
 	updateWaitPID := flag.Int("update-wait-pid", 0, "internal: process to wait for before replacing the launcher")
 	updateRestartArgs := flag.String("update-restart-args", "", "internal: encoded launcher restart arguments")
 	flag.Parse()
-	if cfg.experimentalNativeForeground && (os.Getenv("OMARCHY_WINDOWS_PRESENTATION") != "native" || cfg.displays != 1) {
-		fatal("The native foreground experiment requires native presentation mode and exactly one Omarchy display.")
-	}
 	if *sunshineInstall {
 		os.Exit(runSunshineInstallElevated())
 	}
@@ -413,6 +418,10 @@ func main() {
 	}
 	if err := applySettings(cfg, userSettings, explicitFlags, &forwards, sshKeyPath); err != nil {
 		fatal("Omarchy cannot use its settings: %v", err)
+	}
+	// Settings may override the default display count after flag parsing.
+	if !nativeForegroundExperimentSupported(cfg, os.Getenv("OMARCHY_WINDOWS_PRESENTATION")) {
+		fatal("The native foreground experiment requires native presentation mode and exactly one Omarchy display.")
 	}
 	resourcePrefs, err := loadResourcePreferences(cfg.dir)
 	if err != nil {
@@ -838,10 +847,19 @@ func supervise(cfg *config, cmdline string) bool {
 			proc.Stderr = ef
 			defer ef.Close()
 		}
+		// The previous QEMU child has been reaped before another attempt. Bar
+		// old layouts, then write the new protected fw_cfg bearer before QEMU
+		// opens the file. The generation commits only after Start succeeds.
+		nextGeneration := qemuProcessGeneration.Load() + 1
+		nativeProjectionQemuGenerationPreparing(nextGeneration)
+		if err := prepareSeamlessSessionToken(cfg.windowTokenPath, nextGeneration); err != nil {
+			fatal("Cannot prepare the seamless guest session: %v", err)
+		}
 		if err := proc.Start(); err != nil {
 			fatal("QEMU failed to start: %v", err)
 		}
 		qemuPid.Store(uint32(proc.Process.Pid))
+		nativeProjectionQemuGenerationStarted(qemuProcessGeneration.Add(1))
 		stopCPUScheduling := func() {}
 		if cfg.adaptiveCPU {
 			stopCPUScheduling = startAdaptiveCPUScheduling(uint32(proc.Process.Pid))

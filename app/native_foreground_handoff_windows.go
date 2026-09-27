@@ -10,7 +10,7 @@ import (
 	"unsafe"
 )
 
-const nativeForegroundQMPCommand = "__omarchy_native_foreground_handoff"
+const nativeForegroundQMPCommand = "__omarchy_native-foreground-handoff"
 const nativeHandoffCooldown = 5 * time.Second
 const nativeHandoffBudget = 250 * time.Millisecond
 

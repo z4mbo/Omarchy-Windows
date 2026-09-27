@@ -12,27 +12,39 @@ index bb777e6..e3eb6ac 100644
  void qemu_console_resize(QemuConsole *con, int width, int height);
  DisplaySurface *qemu_console_surface(QemuConsole *con);
 diff --git a/qapi/ui.json b/qapi/ui.json
-index 9ad68f4..5a65810 100644
+index 9ad68f4..945a80e 100644
 --- a/qapi/ui.json
 +++ b/qapi/ui.json
-@@ -1740,3 +1740,20 @@
+@@ -1740,3 +1740,32 @@
  ##
  { 'event': 'DISPLAY_FILE_DROP',
    'data': { 'display': 'int', 'files': [ 'str' ] } }
 +
 +##
-+# @__omarchy_native_foreground_handoff:
++# @__omarchy_native-foreground-handoff:
 +#
 +# Experimental Windows SDL-only foreground permission handoff.
-+# The caller must supply the exact native window grant incarnation and process
-+# creation time and a short Windows-uptime deadline. QEMU independently
-+# validates them and its own foreground SDL
-+# window before delegating foreground permission. This downstream command
-+# requires a private host QMP transport; QAPI cannot identify its caller.
++# QEMU verifies the native grant, process creation time, short uptime
++# deadline and its foreground SDL window before delegating permission.
++# This requires private host QMP transport; QAPI cannot identify its
++# caller.
++#
++# @hwnd: Native top-level window handle, encoded without truncation.
++#
++# @pid: Exact native process ID; zero and ASFW_ANY are rejected.
++#
++# @created: Expected process creation FILETIME as a 64-bit integer.
++#
++# @property: Exact per-session Omarchy window grant property name.
++#
++# @incarnation: Nonzero grant value attached to this window instance.
++#
++# @expires: Absolute GetTickCount64 deadline, in milliseconds; must be
++#     in the future and at most 250 milliseconds ahead when executed.
 +#
 +# Since: 11.0 (downstream)
 +##
-+{ 'command': '__omarchy_native_foreground_handoff',
++{ 'command': '__omarchy_native-foreground-handoff',
 +  'data': { 'hwnd': 'uint64', 'pid': 'uint32', 'created': 'uint64',
 +            'property': 'str', 'incarnation': 'uint64', 'expires': 'uint64' },
 +  'if': 'CONFIG_WIN32' }

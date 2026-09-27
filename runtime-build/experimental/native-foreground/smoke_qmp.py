@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 
-COMMAND = "__omarchy_native_foreground_handoff"
+COMMAND = "__omarchy_native-foreground-handoff"
 
 
 def smoke(qemu: Path) -> None:

@@ -22,7 +22,7 @@ func (f *fakeNativeHandoffQMP) Call(_ context.Context, command string, arguments
 	if command == "query-commands" {
 		commands := `[{"name":"query-status"}]`
 		if f.supported {
-			commands = `[{"name":"query-status"},{"name":"__omarchy_native_foreground_handoff"}]`
+			commands = `[{"name":"query-status"},{"name":"__omarchy_native-foreground-handoff"}]`
 		}
 		return json.Unmarshal([]byte(commands), result)
 	}

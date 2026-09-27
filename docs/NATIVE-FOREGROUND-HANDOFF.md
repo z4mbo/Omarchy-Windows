@@ -66,7 +66,7 @@ one. Guest bootstrap handling must preserve that rule.
 ## Runtime operation
 
 The separately pinned QEMU patch adds the downstream Windows-only command
-`__omarchy_native_foreground_handoff`. SDL registers its exact single display
+`__omarchy_native-foreground-handoff`. SDL registers its exact single display
 HWND and clears it before destruction and cleanup. QEMU checks:
 
 1. Its registered display is the exact foreground, visible, non-iconic,

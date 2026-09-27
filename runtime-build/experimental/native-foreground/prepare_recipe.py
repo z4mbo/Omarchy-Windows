@@ -12,7 +12,7 @@ from pathlib import Path
 
 EXPERIMENTAL_NAME = "winq-emu-alpha10-native-foreground-experimental"
 PATCH = "0013-bound-native-foreground-permission-to-sdl-grant.patch"
-PATCH_SHA256 = "a4a0fdc82eb87df523a669fa0fd33881bd8175a40e6777f8d3304761ed46854f"
+PATCH_SHA256 = "3f5cc0f5d8f2e68574fc28775d87efa443065b15203b26cb6c2899265068bd59"
 
 
 def replace_once(path: Path, old: str, new: str) -> None:

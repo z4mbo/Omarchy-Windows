@@ -82,6 +82,9 @@ type nativeProjection struct {
 	mu                        sync.Mutex
 	tracked                   map[seamlessWindowKey]*nativeProjectedWindow
 	sequence                  int64
+	qemuGeneration            uint64
+	pendingGeneration         uint64
+	generationRestorePending  bool
 	deadline                  time.Time
 	handoffUntil              time.Time // shared short budget for this in-progress Apply only
 	closed                    bool
@@ -221,6 +224,7 @@ func (p *nativeProjection) watch() {
 				p.deadline = time.Time{}
 			}
 			p.retryRestoreLocked()
+			p.completeQemuGenerationLocked()
 			for _, state := range p.tracked {
 				if state.pendingRestore || state.lastVisible {
 					continue
@@ -238,6 +242,67 @@ func (p *nativeProjection) watch() {
 			restore()
 		}
 	}
+}
+
+// The supervisor bars old layouts before opening the next QEMU child. Keep
+// the old sequence until that child starts and all previous-generation host
+// windows have been restored or safely dropped.
+func (p *nativeProjection) prepareQemuGenerationLocked(generation uint64) {
+	if generation == 0 || generation <= p.qemuGeneration || p.closed {
+		return
+	}
+	p.pendingGeneration = generation
+	p.foreground.Store(nil)
+	p.deadline = time.Time{}
+	p.handoffUntil = time.Time{}
+	p.handoffAttempts = make(map[seamlessWindowKey]nativeHandoffAttempt)
+	p.markAllRestoreLocked()
+	p.generationRestorePending = true
+}
+
+func (p *nativeProjection) beginQemuGenerationLocked(generation uint64) {
+	if generation == 0 || generation <= p.qemuGeneration || p.closed {
+		return
+	}
+	if p.pendingGeneration != generation {
+		p.prepareQemuGenerationLocked(generation)
+	}
+	p.qemuGeneration = generation
+	p.completeQemuGenerationLocked()
+}
+
+func (p *nativeProjection) completeQemuGenerationLocked() {
+	if p.generationRestorePending && p.qemuGeneration >= p.pendingGeneration && len(p.tracked) == 0 {
+		p.sequence = 0
+		p.generationRestorePending = false
+	}
+}
+
+func (p *nativeProjection) acceptsSequenceLocked(requestGeneration uint64, sequence int64) bool {
+	return !p.closed && !p.generationRestorePending &&
+		requestGeneration == p.qemuGeneration && sequence > p.sequence
+}
+
+func nativeProjectionQemuGenerationStarted(generation uint64) {
+	bridge := activeSeamlessBridge.Load()
+	if bridge == nil || bridge.projection == nil {
+		return
+	}
+	p := bridge.projection
+	p.mu.Lock()
+	p.beginQemuGenerationLocked(generation)
+	p.mu.Unlock()
+}
+
+func nativeProjectionQemuGenerationPreparing(generation uint64) {
+	bridge := activeSeamlessBridge.Load()
+	if bridge == nil || bridge.projection == nil {
+		return
+	}
+	p := bridge.projection
+	p.mu.Lock()
+	p.prepareQemuGenerationLocked(generation)
+	p.mu.Unlock()
 }
 
 func (p *nativeProjection) auditGrantsLocked() bool {
@@ -837,7 +902,7 @@ func nativeAspectMatches(outputWidth, outputHeight int, client seamlessRect) boo
 	return a-b <= a/200 // allow only rounding and a small SDL border difference
 }
 
-func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
+func (p *nativeProjection) Apply(l nativeLayout, requestGeneration uint64) (string, error) {
 	started := time.Now()
 	restore, err := nativeDPIEnter()
 	if err != nil {
@@ -854,7 +919,14 @@ func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.closed || l.Sequence <= p.sequence {
+	if requestGeneration != p.qemuGeneration {
+		return "", errors.New("native layout belongs to a previous QEMU process")
+	}
+	if p.generationRestorePending {
+		p.retryRestoreLocked()
+		p.completeQemuGenerationLocked()
+	}
+	if !p.acceptsSequenceLocked(requestGeneration, l.Sequence) {
 		return "", errors.New("stale native layout")
 	}
 	p.handoffUntil = started.Add(nativeHandoffBudget)
