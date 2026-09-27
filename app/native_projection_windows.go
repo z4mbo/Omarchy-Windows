@@ -142,10 +142,12 @@ type nativeProjectedWindow struct {
 	uncertainMutation bool
 	// SetWindowRgn transfers ownership of the region. We retain our own copy
 	// to detect a later application-owned region change before restoring NULL.
-	lastRegion    uintptr
-	lastZOrderLog time.Time
-	ownedPopups   map[uintptr]nativeOwnedPopup
-	lastPopupLog  time.Time
+	lastRegion           uintptr
+	lastZOrderLog        time.Time
+	ownedPopups          map[uintptr]nativeOwnedPopup
+	lastPopupLog         time.Time
+	lastFullscreenDiag   string
+	lastFullscreenDiagAt time.Time
 }
 
 var (
@@ -401,8 +403,8 @@ func nativeFullscreenFromAppPresentation(covers bool, presentation nativeWindowP
 	if presentation.showCmd != swShowMaximized {
 		return true
 	}
-	const decorated = 0x00c00000 | 0x00040000 // WS_CAPTION | WS_THICKFRAME
-	return presentation.style&decorated == 0 && (styleChanged || previousIntent)
+	const wsCaption = 0x00c00000 // WS_CAPTION; Blender fullscreen retains WS_THICKFRAME.
+	return presentation.style&wsCaption == 0 && (styleChanged || previousIntent)
 }
 
 func nativeResolvedFullscreen(state *nativeProjectedWindow, current seamlessRect, shown, measured, coversMonitor, presentationChanged bool) bool {
@@ -414,11 +416,14 @@ func nativeResolvedFullscreen(state *nativeProjectedWindow, current seamlessRect
 
 func nativeObserveFullscreen(state *nativeProjectedWindow, current seamlessRect, shown bool) {
 	presentation := nativeReadWindowPresentation(state.window.handle)
+	priorPresentation := state.lastPresentation
 	if presentation.valid && presentation.showCmd == swShowMinimized {
+		nativeLogFullscreenDiagnostic(state, current, priorPresentation, presentation, shown, "minimized")
 		return // Minimizing does not express a new fullscreen preference.
 	}
 	changed := nativePresentationChanged(state.lastPresentation, presentation)
 	if !nativeIndependentFullscreenChange(state, current, shown, changed) {
+		nativeLogFullscreenDiagnostic(state, current, priorPresentation, presentation, shown, "no-independent-change")
 		return
 	}
 	var visible seamlessRect
@@ -441,6 +446,11 @@ func nativeObserveFullscreen(state *nativeProjectedWindow, current seamlessRect,
 	if measured {
 		state.lastPresentation = presentation
 	}
+	reason := "unmeasured"
+	if measured {
+		reason = "measured"
+	}
+	nativeLogFullscreenDiagnostic(state, current, priorPresentation, presentation, shown, reason)
 }
 
 func nativeProcessCreated(pid uint32) (uint64, error) {

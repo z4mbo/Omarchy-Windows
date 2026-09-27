@@ -169,24 +169,27 @@ func seamlessCoversMonitor(hwnd uintptr, rect seamlessRect) bool {
 // A maximized ordinary application can cover the monitor while retaining its
 // normal caption and task-switching behavior. Do not ask Hyprland to fullscreen
 // its proxy merely because the Windows application started maximized.
-func seamlessFullscreenFromPlacement(coversMonitor bool, placementKnown bool, showCmd uint32) (bool, bool) {
+func seamlessFullscreenFromPlacement(coversMonitor bool, presentation nativeWindowPresentation) (bool, bool) {
 	if !coversMonitor {
 		return false, true
 	}
-	if !placementKnown {
+	if !presentation.valid {
 		return false, false
 	}
-	return showCmd != swShowMaximized, true
+	if presentation.showCmd != swShowMaximized {
+		return true, true
+	}
+	// Blender's Win32 fullscreen retains WS_THICKFRAME and SW_SHOWMAXIMIZED,
+	// but clears WS_CAPTION. A captioned maximized window stays windowed.
+	const wsCaption = 0x00c00000
+	return presentation.style&wsCaption == 0, true
 }
 
 func seamlessFullscreenIntent(hwnd uintptr, rect seamlessRect) (bool, bool) {
 	if !seamlessCoversMonitor(hwnd, rect) {
 		return false, true
 	}
-	var placement windowPlacementStruct
-	placement.length = uint32(unsafe.Sizeof(placement))
-	ok, _, _ := procGetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&placement)))
-	return seamlessFullscreenFromPlacement(true, ok != 0, placement.showCmd)
+	return seamlessFullscreenFromPlacement(true, nativeReadWindowPresentation(hwnd))
 }
 
 func seamlessProcessBase(pid uint32) string {

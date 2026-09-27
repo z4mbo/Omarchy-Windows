@@ -8,6 +8,7 @@ on:
     paths:
       - .github/workflows/runtime-native-foreground-experimental.yml
       - runtime-build/experimental/native-foreground/**
+      - runtime-build/test-sdl-context.py
       - runtime-build/patches/qemu/0013-bound-native-foreground-permission-to-sdl-grant.patch
 
 permissions:

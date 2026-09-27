@@ -59,6 +59,11 @@ func TestQemuControlArgumentsUsePrivateSockets(t *testing.T) {
 	if count != 3 {
 		t.Fatalf("expected three private control channels, got %d", count)
 	}
+	for _, arg := range args {
+		if arg == "-parallel" {
+			t.Fatal("ordinary QEMU launch must retain its default parallel device")
+		}
+	}
 }
 
 func TestExperimentalNativeControlAddsOnlyPrivateFourthSocket(t *testing.T) {
@@ -80,5 +85,17 @@ func TestExperimentalNativeControlAddsOnlyPrivateFourthSocket(t *testing.T) {
 	}
 	if count != 4 {
 		t.Fatalf("expected four private control channels in experiment, got %d", count)
+	}
+	parallelDisabled := 0
+	for i, arg := range args {
+		if arg == "-parallel" {
+			if i+1 >= len(args) || args[i+1] != "none" {
+				t.Fatalf("unexpected experimental parallel device: %v", args[i:])
+			}
+			parallelDisabled++
+		}
+	}
+	if parallelDisabled != 1 {
+		t.Fatalf("experimental SDL registration needs exactly one disabled parallel device, got %d", parallelDisabled)
 	}
 }

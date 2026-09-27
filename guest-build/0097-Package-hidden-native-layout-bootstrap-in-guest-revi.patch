@@ -1,0 +1,182 @@
+From 7b0dfb08e430e4efb859e845cbe64ce695ddc2aa Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 15:57:45 +0200
+Subject: [PATCH] Package hidden native layout bootstrap in guest revision 43
+
+---
+ .../usr/local/bin/omarchy-windows-native            | 11 ++++++++++-
+ guest/scripts/finalize-rootfs.sh                    |  4 +++-
+ guest/spec.json                                     |  2 +-
+ guest/tests/test_runtime_package.py                 |  8 ++++----
+ guest/tests/test_windows_native_layout.py           | 13 +++++++++++++
+ guest/tests/verify.py                               |  5 +++--
+ 6 files changed, 34 insertions(+), 9 deletions(-)
+
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-native b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+index 3bef8c4..2f08816 100755
+--- a/guest/factory-overlay/usr/local/bin/omarchy-windows-native
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+@@ -102,6 +102,12 @@ def hidden_layout(output: dict, catalog: list[dict]) -> dict:
+         for item in catalog]}
+ 
+ 
++def layout_with_bootstrap(output: dict, catalog: list[dict], normal: dict, ready: bool) -> dict:
++    # The host handoff requires an already committed layout lease. Preserve
++    # every grant in a hidden full-state layout before the first visible tile.
++    return normal if ready else hidden_layout(output, catalog)
++
++
+ def layout_conflict(error: Exception) -> bool:
+     """Only an HTTP 409 from the native layout endpoint gets recovery wording."""
+     cause = error.__cause__ if isinstance(error, BridgeError) else None
+@@ -231,6 +237,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+             self.workspace_history: dict[str, int] = {}
+             self.last_output: dict | None = None
+             self.last_catalog: list[dict] = []
++            self.bootstrapped = False
+             self.sequence = 0
+             self.worker: threading.Thread | None = None
+             self.status = None
+@@ -391,7 +398,8 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+                             layout_error = True
+                             layout = hidden_layout(output, catalog)
+                             GLib.idle_add(self.show_error, f"Native windows are hidden: {exc}")
+-                        suspension = self.send(layout)
++                        suspension = self.send(layout_with_bootstrap(output, catalog, layout, self.bootstrapped))
++                        self.bootstrapped = True  # Only an acknowledged layout establishes the lease.
+                         if not layout_error:
+                             if suspension == "aspect_mismatch":
+                                 GLib.idle_add(self.show_error, "Native Windows apps are hidden because the Omarchy and Windows display shapes do not match. Resize the Omarchy window or use matching display settings.")
+@@ -413,6 +421,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+                         if self.last_output is not None:
+                             try:
+                                 self.send(hidden_layout(self.last_output, self.last_catalog))
++                                self.bootstrapped = True
+                             except (BridgeError, LayoutError):
+                                 pass
+                     finally:
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index 3aab079..66bee5e 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -203,7 +203,9 @@ tar -C / -cf /usr/share/try-omarchy/compat-overlay.tar "${compat_paths[@]}"
+ # routes into the existing-disk compatibility overlay.
+ # Revision 42 shows actionable native layout-conflict guidance on fresh and
+ # existing disks while retaining the HTTP failure in bounded diagnostics.
+-compat_revision=42
++# Revision 43 commits a hidden full-state native layout before the first
++# visible tile, establishing a host lease for the optional foreground handoff.
++compat_revision=43
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Fail the build if DKMS or networking modules were not packaged for this kernel.
+diff --git a/guest/spec.json b/guest/spec.json
+index f4ecfb0..83b053c 100644
+--- a/guest/spec.json
++++ b/guest/spec.json
+@@ -30,7 +30,7 @@
+     "versionFile": "4.0.0.alpha",
+     "channel": "quattro",
+     "license": "MIT",
+-    "packageRelease": 8
++    "packageRelease": 9
+   },
+   "supplyChain": {
+     "omarchyPackagesRepository": "https://github.com/omacom-io/omarchy-pkgs",
+diff --git a/guest/tests/test_runtime_package.py b/guest/tests/test_runtime_package.py
+index c27b31a..b7e6b24 100644
+--- a/guest/tests/test_runtime_package.py
++++ b/guest/tests/test_runtime_package.py
+@@ -38,7 +38,7 @@ class RuntimePackageTests(unittest.TestCase):
+                      'omarchy-update-available', 'omarchy-channel-set'):
+             (self.root / 'usr/share/omarchy/bin' / name).symlink_to('/usr/bin/' + name)
+         self.spec = self.base / 'spec.json'
+-        self.spec.write_text(json.dumps({'upstream': {'version': '4.0.3', 'packageRelease': 8,
++        self.spec.write_text(json.dumps({'upstream': {'version': '4.0.3', 'packageRelease': 9,
+             'repository': 'https://example.invalid/omarchy', 'commit': 'a' * 40},
+             'image': {'sourceDateEpoch': 1789344000}}))
+         self.config = self.base / 'pacman.conf'
+@@ -50,7 +50,7 @@ class RuntimePackageTests(unittest.TestCase):
+         self.fake('zstd', 'cat > "${@: -1}"')
+         self.fake('pacman', '''for arg in "$@"; do
+   if [[ $arg == -U ]]; then cp "${@: -1}" "$CAPTURE"; fi
+-    if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-8'; fi
++    if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-9'; fi
+ done
+ exit 0''')
+         self.capture = self.base / 'package.tar'
+@@ -73,7 +73,7 @@ exit 0''')
+             names = set(archive.getnames())
+             metadata = archive.extractfile('.PKGINFO').read().decode()
+             self.assertIn('.INSTALL', names)
+-            self.assertIn('pkgver = 4.0.3-8', metadata)
++            self.assertIn('pkgver = 4.0.3-9', metadata)
+             self.assertIn('depend = zenity', metadata)
+             self.assertIn('usr/bin/omarchy', names)
+             self.assertIn('usr/bin/omarchy-version', names)
+@@ -105,7 +105,7 @@ exit 0''')
+     def test_database_failure_rejects_package(self):
+         self.fake('pacman', '''for arg in "$@"; do
+   if [[ $arg == -Dk ]]; then exit 1; fi
+-    if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-8'; fi
++    if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-9'; fi
+ done
+ exit 0''')
+         result = self.run_builder()
+diff --git a/guest/tests/test_windows_native_layout.py b/guest/tests/test_windows_native_layout.py
+index fcaf423..6c6f03a 100755
+--- a/guest/tests/test_windows_native_layout.py
++++ b/guest/tests/test_windows_native_layout.py
+@@ -42,6 +42,19 @@ def state():
+ 
+ 
+ class NativeLayoutTest(unittest.TestCase):
++    def test_first_layout_commits_hidden_full_state_before_visible_tile(self):
++        fcntl = types.ModuleType("fcntl")
++        with mock.patch.dict(sys.modules, {"fcntl": fcntl}):
++            script = runpy.run_path(str(helper_dir / "omarchy-windows-native"), run_name="native_bootstrap_test")
++        output = {"width": 1280, "height": 720}
++        catalog = [{"id": WINDOW_ID}]
++        visible = {"output": output, "windows": [
++            {"id": WINDOW_ID, "x": 40, "y": 50, "width": 300, "height": 200, "visible": True}]}
++        initial = script["layout_with_bootstrap"](output, catalog, visible, False)
++        self.assertEqual(initial["windows"], [
++            {"id": WINDOW_ID, "x": 0, "y": 0, "width": 1, "height": 1, "visible": False}])
++        self.assertEqual(script["layout_with_bootstrap"](output, catalog, visible, True), visible)
++
+     def test_layout_conflict_has_actionable_wording_without_losing_http_status(self):
+         fcntl = types.ModuleType("fcntl")
+         with mock.patch.dict(sys.modules, {"fcntl": fcntl}):
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index 1a1234b..994913d 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -47,7 +47,7 @@ def main() -> None:
+     check(spec["runtime"]["virtualMachineMonitor"] == "qemu-system-x86_64", "runtime uses native x86 QEMU")
+     check(spec["runtime"]["hypervisor"] == "whpx", "runtime uses Windows Hypervisor Platform")
+     check(spec["runtime"]["storage"]["expandedSizeMiB"] == 24576, "working disk expands to 24 GiB")
+-    check(spec["upstream"].get("packageRelease") == 8
++    check(spec["upstream"].get("packageRelease") == 9
+           and "depend = zenity" in read(GUEST / "scripts/register-omarchy-runtime.sh"),
+           "the updated Omarchy runtime requires Zenity on existing guest disks")
+     check(set(spec["inputs"]) == {"packages", "packageLock", "pacmanConfig"}, "spec has a minimal input set")
+@@ -273,7 +273,7 @@ def main() -> None:
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     compat_paths = finalize_rootfs.split("compat_paths=(", 1)[1].split(")", 1)[0]
+     check(
+-        "compat_revision=42" in finalize_rootfs
++        "compat_revision=43" in finalize_rootfs
+         and "usr/local/lib/try-omarchy/catch-up" in compat_paths
+         and "usr/share/try-omarchy/vdso-overlay.sha256" in compat_paths
+         and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
+@@ -372,6 +372,7 @@ def main() -> None:
+         and "mapped=proxy_location(ident, clients, os.getpid()) is not None" in windows_native.read_text()
+         and "layout_error_message(exc)" in windows_native.read_text()
+         and "Stop showing Windows app" in windows_native.read_text()
++        and "layout_with_bootstrap(output, catalog, layout, self.bootstrapped)" in windows_native.read_text()
+         and windows_native_layout.exists()
+         and "presentation_mode" in windows_open.read_text()
+         and windows_protocol.exists()
+-- 
+2.53.0.windows.3
+

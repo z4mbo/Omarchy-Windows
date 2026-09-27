@@ -1,42 +1,108 @@
 # Experimental native-window foreground handoff
 
-Status: **design only**. No QEMU command, launcher call, or default behavior is enabled by this document. A fresh Candidate5 test showed a Blender HWND hidden correctly on another Omarchy workspace but remaining behind the fullscreen QEMU SDL window on return. Running QEMU with `SDL_ALLOW_TOPMOST=0` reproduced the failure. The bounded diagnostic added in `afea555` must first establish the actual QEMU/native `WS_EX_TOPMOST` and foreground states during failure.
+Status: **implemented behind an explicit developer flag; build and physical
+validation pending**. Normal launches and the normal runtime pin are unchanged.
+The isolated recipe is documented in
+[`runtime-build/experimental/native-foreground`](../runtime-build/experimental/native-foreground/README.md).
 
-## Why this is a candidate
+## Observed failure
 
-The projector currently tries `SetWindowPos(nativeHWND, HWND_TOP, ..., SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOMOVE | SWP_NOSIZE)` and verifies the native window is above QEMU. Microsoft's [`SetWindowPos` documentation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos) says the process owning a window must have `SetForegroundWindow` permission to bring it to the top. This is a plausible explanation if both windows are non-topmost and QEMU is foreground, **not a confirmed diagnosis**. The same documentation describes the topmost z-order group; making every projected native app topmost would affect unrelated Windows applications.
+Candidates 5 and 6 hid Blender correctly when its Omarchy workspace became
+inactive, but could not bring it back above the fullscreen QEMU display.
+Candidate 6's bounded diagnostic established that both windows were valid,
+visible, non-iconic and non-topmost, with QEMU's exact display HWND foreground.
+The complete revision-41 factory image reproduced the failure. A temporary
+`SDL_ALLOW_TOPMOST=0` experiment did not fix it. See the
+[physical test evidence](evidence/NATIVE-DESKTOP-2026-09-27.md).
 
-The pinned [SDL 2.32.10 Win32 fullscreen implementation](https://raw.githubusercontent.com/libsdl-org/SDL/release-2.32.10/src/video/windows/SDL_windowswindow.c) requests `HWND_TOPMOST` only for `SDL_WINDOW_ALWAYS_ON_TOP`; QEMU's `ui/sdl2.c` creates `SDL_WINDOW_FULLSCREEN_DESKTOP` without that flag. SDL calls [`SDL_ALLOW_TOPMOST`](https://wiki.libsdl.org/SDL2/SDL_HINT_ALLOW_TOPMOST) a debugging aid. The launcher also rejects a topmost QEMU display in `nativeQemuClientRect`, so the physical diagnostic should precede any SDL or z-order patch.
+The projector uses `SetWindowPos` and verifies the native window's z order.
+Microsoft's [`SetWindowPos` documentation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)
+links raising a window to foreground permission. Delegating permission from
+foreground QEMU to the exact native app is therefore a testable explanation;
+it is not yet a demonstrated fix.
 
-## Existing control and authorization boundary
+## Opt-in launcher and private transport
 
-- `app/qemu.go` creates three QMP AF_UNIX endpoints under `os.TempDir()/TryOmarchyIPC`, prepared by `app/qmp_control.go` and `app/qmp_control_windows.go`. The code validates the path, creates the directory with mode `0700`, and inspects stale sockets. It does **not** explicitly inspect or set a Windows DACL; the per-user access assumption needs verification and repair before this new privileged command is tried. The guest cannot reach these sockets through user-mode host loopback. The `tools.sock` role is already used for short host control operations; any new use must be serialized with those callers or receive a fourth private role. QEMU's single-client monitor behavior must be respected.
-- The host bridge, not guest layout JSON, chooses grants. `app/seamless_grant_windows.go` marks each granted HWND with an opaque per-window incarnation property. `app/native_projection_windows.go` validates the HWND, PID, thread, process creation time, marker, visibility and current layout lease before changing placement. The foreground operation must start from that verified host state; no endpoint should accept an arbitrary guest-supplied PID or HWND.
-- `app/main.go` deliberately delays initial QMP contact during WHPX boot. A foreground command must run only after the normal supervisor has established the runtime as ready. It must never probe QMP during early boot or on a disconnected monitor.
+The launcher requires `-experimental-native-foreground`, native presentation
+mode, and exactly one configured display. This adds a fourth local AF_UNIX QMP
+endpoint, `native.sock`; ordinary launches retain their three control endpoints.
+Before QEMU starts, the experiment verifies the expected app-owned control
+directory and installs a protected, inheritable DACL granting the current user
+full control. Before each handoff connection it verifies the socket's owner,
+DACL, private parent and AF_UNIX reparse tag. It does not alter unrelated paths.
 
-The QMP socket is privileged VM control. The grant checks limit what **our launcher** sends, while QEMU repeats identity checks against races. They do not turn a general QMP connection into a separate security boundary against another process already able to use that socket.
+The foreground command is discovered by exact name through `query-commands`.
+Older runtimes take the ordinary placement failure path. Requests begin only
+after the existing supervisor has connected QMP and observed guest readiness;
+the experiment does not probe QMP during early WHPX boot.
 
-## Proposed bounded command
+QMP is privileged VM control. These checks protect the transport and limit
+what this launcher requests. They do not authenticate a QMP peer inside QAPI,
+or establish a new boundary against a process already permitted to control it.
 
-If the diagnostic confirms a non-topmost z-order/foreground-permission problem, add one Windows SDL-only downstream QAPI command. Use a project-owned `__`-prefixed name, as required by [QEMU's downstream QMP naming rules](https://www.qemu.org/docs/master/interop/qmp-spec.html), and discover that exact command through [`query-commands`](https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html) on a verified patched runtime. Stock QEMU and existing bundled runtimes retain their current behavior. Do not infer support from QEMU version alone.
+## Request lifetime and identity
 
-The host request contains the granted native HWND, PID, expected process creation `FILETIME`, exact grant-property name and opaque incarnation value. Bound all integer and string arguments. Before sending, recheck the bridge grant, process/window identity, visible tile, nonexpired layout lease, unlocked/unsuspended presentation, and that the native HWND is the requested tile. Queue at most one outstanding attempt per tile transition; use a short timeout and never send on every heartbeat.
+The host bridge selects grants. Guest layout JSON cannot select arbitrary host
+HWNDs or PIDs. Before sending, the projector rechecks its bridge grant, exact
+HWND/PID/thread/process creation time, per-window incarnation marker, requested
+rectangle, foreground QEMU identity, and live committed layout lease.
 
-QEMU must reject the request unless all checks below hold **at command execution time**:
+All attempts in one layout share a 250 ms budget, starting before layout
+validation. The QMP deadline is the earlier of that budget and the prior
+committed lease. After feature discovery, the host sends an absolute Windows
+uptime expiry capped at 200 ms. QEMU rejects an expired deadline or one more
+than 250 ms in the future, including a repeat check immediately before the
+permission operation. This prevents a delayed queued request from delegating
+permission after its request lifetime.
 
-1. Its one expected SDL display HWND is exactly `GetForegroundWindow()`, visible, and on the active interactive desktop. A foreground window merely owned by the QEMU PID is insufficient. Refuse if the display changed, a secure desktop is active, or multiple SDL displays make the target ambiguous.
-2. The native HWND is a live, visible, non-iconic top-level window with the requested PID. Its exact grant property still equals the requested nonzero incarnation. Recheck immediately before a z-order mutation and after it. Never use a window title as identity.
-3. `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE)` succeeds. While holding that handle, `GetProcessTimes` must match the expected creation `FILETIME`; reject an exited process. Holding the handle through the operation also prevents PID reuse while the referenced process object exists, as described in Microsoft's [process identifier lifetime](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/ns-processthreadsapi-process_information) and [`GetProcessTimes`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes) documentation.
+A visible tile state gets one attempt. A changed rectangle or hidden-to-visible
+transition can retry after a five-second cooldown. Error recovery can itself
+produce that hidden state, so this is a bounded retry, not a promise of one
+attempt per deliberate user action. Revocation and identity changes remove
+the attempt record. An initial visible layout has no committed lease and
+cannot use the handoff; a successfully acknowledged hidden layout can establish
+one. Guest bootstrap handling must preserve that rule.
 
-The first experimental action is `AllowSetForegroundWindow(nativePID)` for that one verified process. Microsoft states the caller must itself be eligible to set foreground and that the delegated right expires on later user input or another grant; see [`AllowSetForegroundWindow`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-allowsetforegroundwindow). Do not use `ASFW_ANY` or persist a grant. Return a bounded result/error without logging titles, property values, or command-line secrets.
+## Runtime operation
 
-An alternative experimental variant performs `AllowSetForegroundWindow(nativePID)` and then `SetWindowPos(nativeHWND, HWND_TOP, ..., SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOMOVE | SWP_NOSIZE)` **inside the same QMP command**, after repeating the HWND/property/process checks. This reduces the input-expiry gap between QMP reply and the launcher's placement attempt. It must verify the postcondition that the native HWND is above QEMU and leave QEMU's foreground activation unchanged. A successful same-command attempt would not by itself prove which call supplied the missing permission: QEMU, as the foreground process, may have been able to reorder the HWND even without `AllowSetForegroundWindow`.
+The separately pinned QEMU patch adds the downstream Windows-only command
+`__omarchy_native_foreground_handoff`. SDL registers its exact single display
+HWND and clears it before destruction and cleanup. QEMU checks:
 
-The launcher must still check the returned result, its current grant/lease, and the observed z order. On any failure or changed identity it stops the attempt and uses the existing recoverable layout error. Do not demote QEMU globally, promote native windows to `HWND_TOPMOST`, call `AttachThreadInput` in a retry loop, or override an unrelated user's foreground window. [`SetForegroundWindow`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow) intentionally restricts such focus transfers.
+1. Its registered display is the exact foreground, visible, non-iconic,
+   non-topmost window on the active interactive desktop.
+2. The target is a visible, non-iconic, non-topmost, responsive top-level native
+   HWND with the requested PID and nonzero incarnation marker.
+3. A held process handle identifies a live process with the expected creation
+   `FILETIME`, in the same session and interactive desktop.
+4. The expiry, display and native identity remain valid immediately before
+   `AllowSetForegroundWindow` grants permission to that exact PID.
 
-## Evidence required before product integration
+The operation uses no `ASFW_ANY`, input injection, topmost promotion, global
+QEMU demotion, or `AttachThreadInput`. It does not move or focus a window.
+Synchronous cross-process placement inside QMP could hang the VM; asynchronous
+placement could outlive a lease, so that variant was not implemented.
 
-1. Capture the new `afea555` diagnostic during a workspace return: both topmost flags, QEMU/native validity, visibility/iconic state, and exact foreground HWND/PID. If QEMU is topmost or not foreground, revise this design before implementing it.
-2. Verify or enforce the Windows ACL on the QMP directory and socket, then build a disposable patched runtime with the command and QAPI validation. Feature-detect its schema over that local QMP endpoint; prove stock/older runtimes take the existing fallback. Keep normal launch default off.
-3. In an isolated guest, compare host-only `SetWindowPos`, `AllowSetForegroundWindow` followed by host placement, and the same-command QEMU variant. Verify the native window appears above QEMU after workspace return, unrelated host windows keep their order, input/focus is unchanged unless explicitly requested, and grants fail after revoke, HWND/process reincarnation, lease expiry and QEMU losing foreground.
-4. Exercise rapid user input between grant and placement, QMP timeout/reconnect, guest lock, app exit, and QEMU restart. The command must fail closed without a stale window surfacing. Only then consider an opt-in launcher integration and later normal launch behavior.
+After the reply, the host rechecks its live context, lease and identity, retries
+ordinary placement once, and verifies z order. Windows can expire delegated
+permission on subsequent input; see
+[`AllowSetForegroundWindow`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-allowsetforegroundwindow).
+A QMP success is therefore not proof that the app was presented successfully.
+
+## Remaining acceptance checks
+
+- Compile the Windows runtime and launcher, and run the QAPI and ACL tests.
+  The headless QMP smoke checks exact identity/display rejection errors but
+  cannot exercise a foreground SDL window.
+- Verify the real single-output launch registers its expected SDL HWND, then
+  compare workspace return with the flag disabled and enabled on a disposable
+  disk. Confirm actual native input and fullscreen synchronization.
+- Exercise revoked grants, app exit/reincarnation, expired leases, QMP delays,
+  guest lock, QEMU restart, and a different foreground Windows app. Failure
+  must leave the recoverable layout error and no stale window surfacing.
+- Check latency under load and ordinary window ordering. The 250 ms shared
+  budget may reject a slow attempt; increasing it needs evidence against the
+  guest request timeout and lease lifetime.
+
+The experiment is not a supported installer feature and establishes no game
+performance or universal app compatibility claim.

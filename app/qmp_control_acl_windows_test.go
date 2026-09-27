@@ -17,6 +17,10 @@ func TestQMPControlPrivateDirectoryACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
+	// Elevated Windows runners may create temporary objects owned by the
+	// Administrators group. Give this positive fixture the account owner that
+	// the production verifier requires; do not relax the verifier itself.
+	setQMPTestCurrentUserOwner(t, dir, 0x02000000) // FILE_FLAG_BACKUP_SEMANTICS
 	previous := qmpControlDirectory
 	qmpControlDirectory = func() (string, error) { return dir, nil }
 	defer func() { qmpControlDirectory = previous }()
@@ -49,6 +53,7 @@ func TestQMPControlPrivateDirectoryACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
+	setQMPTestCurrentUserOwner(t, path, qmpOpenReparsePoint)
 	if err := verifyQMPControlSocketACL(path); err != nil {
 		t.Fatalf("private AF_UNIX socket was not verified: %v", err)
 	}
@@ -101,6 +106,7 @@ func TestQMPControlSocketRejectsNullDACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
+	setQMPTestCurrentUserOwner(t, dir, 0x02000000) // FILE_FLAG_BACKUP_SEMANTICS
 	previous := qmpControlDirectory
 	qmpControlDirectory = func() (string, error) { return dir, nil }
 	defer func() { qmpControlDirectory = previous }()
@@ -116,6 +122,7 @@ func TestQMPControlSocketRejectsNullDACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
+	setQMPTestCurrentUserOwner(t, path, qmpOpenReparsePoint)
 	if err := verifyQMPControlSocketACL(path); err != nil {
 		t.Fatalf("test socket was not private before tampering: %v", err)
 	}
@@ -139,6 +146,48 @@ func TestQMPControlSocketRejectsNullDACL(t *testing.T) {
 	}
 	if err := verifyQMPControlSocketACL(path); err == nil {
 		t.Fatal("accepted a QMP socket with a null DACL")
+	}
+}
+
+func setQMPTestCurrentUserOwner(t *testing.T, path string, flags uint32) {
+	t.Helper()
+	sid, freeSID, err := qmpUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer freeSID()
+	name, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const writeOwner = 0x00080000
+	handle, err := syscall.CreateFile(name, writeOwner,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
+		nil, syscall.OPEN_EXISTING, flags, 0)
+	if err != nil {
+		t.Fatalf("open positive ACL fixture to set owner: %v", err)
+	}
+	defer syscall.CloseHandle(handle)
+	setSecurity := advapi32.NewProc("SetSecurityInfo")
+	status, _, _ := setSecurity.Call(uintptr(handle), qmpSEFileObject,
+		qmpOwnerInformation, sid, 0, 0, 0)
+	if status != 0 {
+		t.Fatalf("set positive ACL fixture owner: %v", syscall.Errno(status))
+	}
+}
+
+func TestQMPControlACLRejectsOtherOwner(t *testing.T) {
+	text, err := syscall.UTF16PtrFromString("S-1-1-0") // Everyone
+	if err != nil {
+		t.Fatal(err)
+	}
+	var other uintptr
+	if ok, _, callErr := qmpSIDFromString.Call(uintptr(unsafe.Pointer(text)), uintptr(unsafe.Pointer(&other))); ok == 0 {
+		t.Fatal(callErr)
+	}
+	defer qmpLocalFree.Call(other)
+	if err := verifyQMPUserOwner(other); err == nil {
+		t.Fatal("accepted a QMP object owned by a different SID")
 	}
 }
 

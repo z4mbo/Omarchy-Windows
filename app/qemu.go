@@ -132,7 +132,10 @@ func buildQemuArgs(cfg *config, cmdline string) []string {
 		"-name", appTitle,
 	)
 	if cfg.experimentalNativeForeground {
-		args = append(args, "-qmp", "unix:"+qemuOptionValue(filepath.Join(cfg.qmpDir, qmpControlName(qmpNativePort)))+",server=on,wait=off")
+		// This SDL-only runtime registers its HWND only with one QemuConsole.
+		// Q35's default parallel VC would otherwise create a second text console.
+		args = append(args, "-parallel", "none",
+			"-qmp", "unix:"+qemuOptionValue(filepath.Join(cfg.qmpDir, qmpControlName(qmpNativePort)))+",server=on,wait=off")
 	}
 	if cfg.share != "" {
 		if cfg.supportsSharing {

@@ -16,28 +16,29 @@ const (
 )
 
 type config struct {
-	desktop                     desktopPreferences
-	dir, hostDir, payloadDir    string
-	winqEmu, share              string
-	fresh, fullscreen, noGpu    bool
-	hostCursor                  bool
-	lanPublic                   bool
-	instant, portable           bool
-	guestDir, vmDir, disk       string
-	qmpDir                      string
-	windowTokenPath             string
-	diskFormat                  string
-	qemu                        string
-	useGpu                      bool
-	supportsSharing             bool
-	audio                       string
-	memMiB                      int
-	displays                    int
-	displayWidth, displayHeight int
-	displaySizes                []guestDisplaySize
-	displayRefreshMilliHz       int
-	forwards                    []portForward
-	sshKey                      string
+	desktop                      desktopPreferences
+	dir, hostDir, payloadDir     string
+	winqEmu, share               string
+	fresh, fullscreen, noGpu     bool
+	hostCursor                   bool
+	lanPublic                    bool
+	instant, portable            bool
+	guestDir, vmDir, disk        string
+	qmpDir                       string
+	experimentalNativeForeground bool
+	windowTokenPath              string
+	diskFormat                   string
+	qemu                         string
+	useGpu                       bool
+	supportsSharing              bool
+	audio                        string
+	memMiB                       int
+	displays                     int
+	displayWidth, displayHeight  int
+	displaySizes                 []guestDisplaySize
+	displayRefreshMilliHz        int
+	forwards                     []portForward
+	sshKey                       string
 	// Guest RAM chosen by the user (settings.json or -memory); 0 = automatic.
 	memOverrideMiB int
 	diskGiB        int

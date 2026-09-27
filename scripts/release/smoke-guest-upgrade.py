@@ -76,6 +76,12 @@ def candidate_checks(revision, compat_path='/usr/share/try-omarchy/compat-versio
             "grep -Fq 'layout_error_message(exc)' /usr/local/bin/omarchy-windows-native",
             "grep -Fq 'Stop showing Windows app' /usr/local/bin/omarchy-windows-native",
         ))
+    if revision >= 43:
+        checks.extend((
+            "grep -Fq 'layout_with_bootstrap(output, catalog, layout, self.bootstrapped)' "
+            "/usr/local/bin/omarchy-windows-native",
+            "grep -Fq 'self.bootstrapped = True' /usr/local/bin/omarchy-windows-native",
+        ))
     return ' && '.join(checks)
 
 

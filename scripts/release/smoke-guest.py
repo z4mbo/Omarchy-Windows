@@ -74,7 +74,7 @@ EXPECTED_FACTS = {
     "icon-cache": "yes",
     "system-ownership": "yes",
     "update-repository": "active",
-    "runtime-package": "4.0.3-8",
+    "runtime-package": "4.0.3-9",
     "package-database": "clean",
     "lock-pam": "yes",
     "pacman-unlocked": "yes",
@@ -305,6 +305,14 @@ def main() -> None:
             "sudo pacman -Qk try-omarchy-runtime >/dev/null 2>&1 && echo yes || echo no"
         )
         EXPECTED_FACTS["windows-native-layout-guidance"] = "yes"
+    if args.compat_revision >= 43:
+        FACT_CHECKS["windows-native-hidden-bootstrap"] = (
+            "grep -Fq 'layout_with_bootstrap(output, catalog, layout, self.bootstrapped)' "
+            "/usr/local/bin/omarchy-windows-native && "
+            "grep -Fq 'self.bootstrapped = True' /usr/local/bin/omarchy-windows-native && "
+            "sudo pacman -Qk try-omarchy-runtime >/dev/null 2>&1 && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-native-hidden-bootstrap"] = "yes"
     add_native_guest_facts(args.compat_revision, FACT_CHECKS, EXPECTED_FACTS)
     add_idle_guest_facts(args.compat_revision, FACT_CHECKS, EXPECTED_FACTS)
 

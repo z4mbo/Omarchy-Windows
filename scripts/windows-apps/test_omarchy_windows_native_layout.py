@@ -42,6 +42,19 @@ def state():
 
 
 class NativeLayoutTest(unittest.TestCase):
+    def test_first_layout_commits_hidden_full_state_before_visible_tile(self):
+        fcntl = types.ModuleType("fcntl")
+        with mock.patch.dict(sys.modules, {"fcntl": fcntl}):
+            script = runpy.run_path(str(helper_dir / "omarchy-windows-native"), run_name="native_bootstrap_test")
+        output = {"width": 1280, "height": 720}
+        catalog = [{"id": WINDOW_ID}]
+        visible = {"output": output, "windows": [
+            {"id": WINDOW_ID, "x": 40, "y": 50, "width": 300, "height": 200, "visible": True}]}
+        initial = script["layout_with_bootstrap"](output, catalog, visible, False)
+        self.assertEqual(initial["windows"], [
+            {"id": WINDOW_ID, "x": 0, "y": 0, "width": 1, "height": 1, "visible": False}])
+        self.assertEqual(script["layout_with_bootstrap"](output, catalog, visible, True), visible)
+
     def test_layout_conflict_has_actionable_wording_without_losing_http_status(self):
         fcntl = types.ModuleType("fcntl")
         with mock.patch.dict(sys.modules, {"fcntl": fcntl}):

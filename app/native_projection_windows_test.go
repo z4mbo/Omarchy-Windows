@@ -158,18 +158,19 @@ func TestNativeFullscreenIntentIgnoresProjectorGeometry(t *testing.T) {
 func TestNativeFullscreenExcludesOrdinaryMaximizedWindow(t *testing.T) {
 	tests := []struct {
 		name                                    string
-		covers, known                           bool
-		showCmd                                 uint32
+		covers                                  bool
+		presentation                            nativeWindowPresentation
 		wantFullscreen, wantClassificationKnown bool
 	}{
-		{"maximized monitor coverage", true, true, swShowMaximized, false, true},
-		{"normal borderless monitor coverage", true, true, swShowNormal, true, true},
-		{"normal windowed", false, true, swShowNormal, false, true},
-		{"unreadable placement", true, false, 0, false, false},
+		{"captioned maximized monitor coverage", true, nativeWindowPresentation{style: 0x00c40000, showCmd: swShowMaximized, valid: true}, false, true},
+		{"Blender captionless thickframe fullscreen", true, nativeWindowPresentation{style: 0x00050000, showCmd: swShowMaximized, valid: true}, true, true},
+		{"normal borderless monitor coverage", true, nativeWindowPresentation{style: 0x80000000, showCmd: swShowNormal, valid: true}, true, true},
+		{"normal windowed", false, nativeWindowPresentation{style: 0x00c40000, showCmd: swShowNormal, valid: true}, false, true},
+		{"unreadable placement", true, nativeWindowPresentation{}, false, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fullscreen, known := seamlessFullscreenFromPlacement(tc.covers, tc.known, tc.showCmd)
+			fullscreen, known := seamlessFullscreenFromPlacement(tc.covers, tc.presentation)
 			if fullscreen != tc.wantFullscreen || known != tc.wantClassificationKnown {
 				t.Fatalf("fullscreen=%t, known=%t; want %t, %t", fullscreen, known,
 					tc.wantFullscreen, tc.wantClassificationKnown)
@@ -204,6 +205,10 @@ func TestNativeFullscreenTracksAppStyleChangeWithoutGeometryChange(t *testing.T)
 	}
 	if !nativeFullscreenFromAppPresentation(true, borderless, false, true) {
 		t.Fatal("later geometry measurement cleared known borderless fullscreen intent")
+	}
+	blenderFullscreen := nativeWindowPresentation{style: 0x00050000, showCmd: swShowMaximized, valid: true}
+	if !nativeFullscreenFromAppPresentation(true, blenderFullscreen, true, false) {
+		t.Fatal("Blender fullscreen retains thick frame but clears caption")
 	}
 	modalStyle := maximized
 	modalStyle.style |= 0x08000000 // WS_DISABLED; unrelated to decoration/fullscreen.

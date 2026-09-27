@@ -231,3 +231,51 @@ handoff is the next experiment, not an established fix; see its
 Graceful guest shutdown restored the native Blender window. Computer Use then
 closed the untouched default scene normally and confirmed its window exited.
 The existing personalized installation and its settings remain untouched.
+
+## Candidate 6: fresh revision-41 disk
+
+A second Candidate 6 test used the complete factory image from CI run 27 in a
+new portable directory. All seven artifact archives matched their GitHub
+digests; five ordered rootfs parts matched the parts index, and the reconstructed
+image, kernel, initramfs and spec matched the original guest manifest. The
+compressed rootfs SHA256 was
+`1b7c7d7ff4c6e5f829cdfabccb40c51716f8a0c3a40e85f72afeb3876e521ec3`.
+The combined local guest/runtime manifest SHA256 was
+`b415c6a60504e637508607b2054327d1f44253de5c51ea5d8a4aa54ec1f4cdf4`.
+The normal, previously verified runtime was retained; no experimental
+foreground command was enabled. The launcher created a new writable disk with
+no copied user settings or development helper installation.
+
+The desktop signed in automatically. The installed compatibility stamp was
+`41:7.2.7-arch1-1`, with `try-omarchy-runtime 4.0.3-7`. Stay Awake was present,
+the desktop was unlocked, and Hyprland reported 2560×1440 at 360.039 Hz.
+
+Computer Use selected the native **Blender 5.2** entry in the packaged guest
+picker. Blender launched, its child HWND was granted, and its default scene
+appeared in the Omarchy tile. Computer Use then executed **Window → Toggle
+Window Fullscreen**. The native title bar disappeared and the captured native
+window filled 2560×1440. However, the host catalog still reported
+`fullscreen: false` with an outer size of 2574×1454, and the guest proxy remained
+windowed at 2536×1390. The native toggle was also successfully reversed through
+the same menu. This is a confirmed fullscreen synchronization failure.
+
+Moving the proxy to workspace 2 through Hyprland IPC hid the native window.
+Clicking workspace 2 in Omarchy's bar exposed the empty proxy rather than
+restoring Blender above QEMU. The bounded host diagnostic again showed QEMU
+foreground, with both windows valid, visible, non-iconic and non-topmost.
+Graceful guest shutdown restored Blender; the untouched default scene was
+closed normally, and both test processes exited. The personalized installation
+was not changed.
+
+## Revision-42 recovery gate
+
+[CI run 28](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36322700652),
+source `c943ed58714cb321580e590026e8ad992f0a9b6a`, passed Windows and Linux
+launcher checks, guest contracts, the complete revision-42 image, five-boot
+existing-disk preservation, and interrupted package-write recovery.
+The recovery evidence artifact `10933241221` matched GitHub's ZIP SHA256
+`1e6a28cada31219770b890be403213ddeae28d6860830f65f9b87974594d1178`.
+Its receipt passed seed, cut, torn, restore and reboot: an independent stopped
+backup restored the old payload, the retry installed the new payload, and the
+source backing chain remained unchanged. This is a disposable Linux CI fixture;
+automatic rollback in the installed Windows product is still unfinished.

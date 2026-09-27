@@ -102,6 +102,12 @@ def hidden_layout(output: dict, catalog: list[dict]) -> dict:
         for item in catalog]}
 
 
+def layout_with_bootstrap(output: dict, catalog: list[dict], normal: dict, ready: bool) -> dict:
+    # The host handoff requires an already committed layout lease. Preserve
+    # every grant in a hidden full-state layout before the first visible tile.
+    return normal if ready else hidden_layout(output, catalog)
+
+
 def layout_conflict(error: Exception) -> bool:
     """Only an HTTP 409 from the native layout endpoint gets recovery wording."""
     cause = error.__cause__ if isinstance(error, BridgeError) else None
@@ -231,6 +237,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
             self.workspace_history: dict[str, int] = {}
             self.last_output: dict | None = None
             self.last_catalog: list[dict] = []
+            self.bootstrapped = False
             self.sequence = 0
             self.worker: threading.Thread | None = None
             self.status = None
@@ -391,7 +398,8 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
                             layout_error = True
                             layout = hidden_layout(output, catalog)
                             GLib.idle_add(self.show_error, f"Native windows are hidden: {exc}")
-                        suspension = self.send(layout)
+                        suspension = self.send(layout_with_bootstrap(output, catalog, layout, self.bootstrapped))
+                        self.bootstrapped = True  # Only an acknowledged layout establishes the lease.
                         if not layout_error:
                             if suspension == "aspect_mismatch":
                                 GLib.idle_add(self.show_error, "Native Windows apps are hidden because the Omarchy and Windows display shapes do not match. Resize the Omarchy window or use matching display settings.")
@@ -413,6 +421,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
                         if self.last_output is not None:
                             try:
                                 self.send(hidden_layout(self.last_output, self.last_catalog))
+                                self.bootstrapped = True
                             except (BridgeError, LayoutError):
                                 pass
                     finally:

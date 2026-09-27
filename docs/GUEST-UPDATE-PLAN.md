@@ -21,7 +21,7 @@ hex characters):
     "release": "v0.0.20-preview",
     "releaseManifestSHA256": "<64 lowercase hex characters>",
     "managedPackages": [
-      { "name": "try-omarchy-integration", "installedVersion": "4.0.3-6" }
+      { "name": "try-omarchy-runtime", "installedVersion": "4.0.3-6" }
     ]
   },
   "target": {
@@ -32,10 +32,10 @@ hex characters):
   },
   "packages": [
     {
-      "name": "try-omarchy-integration",
+      "name": "try-omarchy-runtime",
       "version": "4.0.3-7",
       "architecture": "x86_64",
-      "filename": "try-omarchy-integration-4.0.3-7-x86_64.pkg.tar.zst",
+      "filename": "try-omarchy-runtime-4.0.3-7-x86_64.pkg.tar.zst",
       "sha256": "<64 lowercase hex characters>"
     }
   ]

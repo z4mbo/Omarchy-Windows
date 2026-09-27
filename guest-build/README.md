@@ -135,6 +135,12 @@ on fresh and older guest disks. It gives a safe retry/restore action for the
 observed HTTP 409 condition while retaining the underlying diagnostic error;
 it does not repair the host z-order failure or establish a physical retest.
 
+Patch 0097 (compatibility revision 43) sends an acknowledged hidden full-state
+native layout before the first visible tile on fresh and older guest disks.
+This establishes a host lease for the optional foreground handoff without
+dropping any granted windows. The handoff still requires an isolated runtime
+build and physical validation.
+
 If Arch has moved since the lock was written, refresh it first and review the diff.
 `scripts/release/refresh-guest-lock.sh` does the whole dance: it checks out the
 locked source, applies the patches, resolves the lock in Docker, and writes the

@@ -14,6 +14,7 @@ harness = r'''
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #define SDL_WINDOW_FULLSCREEN_DESKTOP 1
 #define SDL_WINDOW_RESIZABLE 2
 #define SDL_WINDOW_HIDDEN 4
@@ -32,6 +33,25 @@ struct sdl2_console {
 };
 static struct sdl2_console consoles[3];
 static struct sdl2_console *sdl2_console = consoles;
+static int sdl2_num_outputs = 3;
+/* The optional foreground patch queries SDL's native HWND while creating a
+ * window. Keep this GL-context fixture independent of the real Win32 desktop. */
+#define SDL_SYSWM_WINDOWS 1
+#define SDL_VERSION(version) (*(version) = 1)
+typedef struct {
+    int version, subsystem;
+    struct { struct { uintptr_t window; } win; } info;
+} SDL_SysWMinfo;
+static uintptr_t registered_window;
+static int native_info_available = 1;
+static int SDL_GetWindowWMInfo(int window, SDL_SysWMinfo *info) {
+    info->subsystem = SDL_SYSWM_WINDOWS;
+    info->info.win.window = (uintptr_t)window;
+    return native_info_available;
+}
+static void qemu_omarchy_set_sdl_window(uintptr_t window) {
+    registered_window = window;
+}
 static int gui_fullscreen, current_context, sharing, next_window = 10;
 static int surface_width(void *s) { return 800; }
 static int surface_height(void *s) { return 600; }
@@ -60,7 +80,8 @@ static int SDL_GL_CreateContext(int window) {
 static void SDL_GL_SetSwapInterval(int interval) {}
 static int SDL_CreateRenderer(int window, int index, int flags) { return 1; }
 static void sdl_update_caption(struct sdl2_console *s) {}
-''' + create + r'''
+''' + ('\n#define OMARCHY_HAS_FOREGROUND_HANDOFF 1\n'
+       if 'qemu_omarchy_set_sdl_window(' in create else '') + create + r'''
 int main(void) {
     struct options opts = {0};
     for (int i = 0; i < 3; i++) {
@@ -84,6 +105,21 @@ int main(void) {
     current_context = 0;
     sdl2_window_create(&consoles[1]);
     assert(!consoles[1].winctx && !current_context);
+#if defined(_WIN32) && defined(OMARCHY_HAS_FOREGROUND_HANDOFF)
+    /* Multiple consoles must never register a guessed single display. The
+     * one-output path must register the HWND returned by SDL, and an SDL
+     * lookup failure must not register a fabricated handle. */
+    assert(!registered_window);
+    sdl2_num_outputs = 1;
+    consoles[0].real_window = consoles[0].winctx = 0;
+    sdl2_window_create(&consoles[0]);
+    assert(registered_window == (uintptr_t)consoles[0].real_window);
+    registered_window = 0;
+    native_info_available = 0;
+    consoles[0].real_window = consoles[0].winctx = 0;
+    sdl2_window_create(&consoles[0]);
+    assert(!registered_window);
+#endif
     return 0;
 }
 '''
