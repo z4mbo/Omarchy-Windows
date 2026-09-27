@@ -20,11 +20,12 @@ package transactions; that distinction remains a release gate.
 See the [current install/update audit](evidence/NATIVE-INSTALL-GATES-2026-09-26.md)
 for implemented checks and remaining work.
 
-## Current update mechanism
+## Current guarded update path
 
 The launcher can deliver a newer Omarchy runtime without replacing the writable
-VM disk. After updating the launcher and guest image, open **Update > Omarchy**
-inside the guest to install it. Resetting the installation is not required.
+VM disk. The Windows app checks authenticated launcher releases on startup and
+offers a manual check from **Settings > About and updates**. This does not yet
+approve a guest package transaction.
 
 The authenticated image carries the local package repository in its initramfs.
 At boot, a service checks the payload hashes, copies new package archives, and
@@ -32,11 +33,22 @@ replaces the repository database atomically. It does not run pacman or modify it
 lock. Old archives remain available to transactions that read the previous
 repository. An older image cannot lower the repository's runtime version.
 
-The normal Omarchy updater installs the runtime and its dependencies through
-pacman. System configuration shipped by the runtime uses pacman's backup
-handling, so local edits can be retained with a `.pacnew` file for review.
-Personal files stay on the existing disk. The launcher continues to supply the
+The installed **Update > Omarchy**, `omarchy update`, and update badge now use a
+fork-owned gate. Channel changes also stop at that gate. It gives a visible
+explanation and makes no package, AUR, or repository change. The update badge
+does not advertise a live upstream package update that the product cannot yet
+apply safely. Manual root package management remains possible, but lies outside
+the managed update and recovery path. The launcher continues to supply the
 external kernel and matching modules; the guest's linux package stays held.
+
+The missing supported transaction requires a release-approved, frozen package
+plan and a verified checkpoint of the **stopped** VM disk before package writes.
+It then needs journaled success and failure handling, including a stopped-disk
+rollback if the package transaction or readiness checks fail. The existing
+launcher/payload rollback protects boot assets, not package changes already
+written to the guest disk. Until that transaction is implemented and validated,
+the gate reports that no managed guest package update is available. It does not
+promise that unknown future upstream packages are compatible.
 
 If repository publication fails, inspect:
 
@@ -50,10 +62,9 @@ Fix the reported cause, such as insufficient disk space, then retry:
 sudo systemctl restart try-omarchy-update-repository.service
 ```
 
-A failed package transaction must be diagnosed through the normal updater. The
-publisher never removes `/var/lib/pacman/db.lck`. Keep a stopped-VM backup before
-release-candidate testing. This update mechanism is not a backup or a rollback of
-an already installed desktop.
+The publisher never removes `/var/lib/pacman/db.lck`. Keep a stopped-VM backup
+before release-candidate testing. Repository publication is not an installed
+desktop update or a rollback.
 
 Older previews also copied the build account's ownership onto some system paths.
 A boot service repairs only the paths supplied by the image overlays, without
@@ -107,7 +118,13 @@ The default mode requires `qemu-img`; `--disk-mode raw` retains the earlier
 sparse-copy test path. CI checks at least 35 GiB free on a separate runner before
 fetching the baseline, after reclaiming that disposable runner's unused language
 tool cache. For manual tests, size the available storage for the
-verified baseline and the changes written during package updates.
+verified baseline and the changes written during package updates. From
+compatibility revision 40, its disposable Linux guest first proves the installed
+Update/channel commands make no package or repository changes, then invokes the
+retained pinned upstream updater by its explicit test-only path. The later
+successful package upgrade validates compatibility of that candidate package
+set; it does not validate a supported one-click Windows guest updater or
+automatic recovery.
 
 
 The guest contract suite tests corrupt and incomplete payloads, interrupted
@@ -129,7 +146,7 @@ Passed on a disposable 24 GiB disk under QEMU/KVM:
   and modified system configuration with recorded checksums.
 - Booted the candidate without changing the installed runtime first.
 - Confirmed a test-owned pacman lock blocks an update and remains untouched.
-- Ran the complete `omarchy-update -y` command successfully. Optional prompts
+- Ran the then-installed complete `omarchy-update -y` command successfully. Optional prompts
   timed out without being accepted. Package hooks reported no execution errors.
 - Verified runtime `4.0.3-2`, media-tool dependencies, all previously explicit
   packages, and unchanged preservation fixtures. Repeated migrations succeeded.
@@ -160,8 +177,9 @@ python3 scripts/release/smoke-package-recovery.py \
 
 The runner copies the factory image to a new disposable 24 GiB disk and retains
 that disk and four serial logs. Allow enough host space for the image and package
-updates. Network access is needed for the fresh guest's normal Omarchy updater.
-It checks the initial lock state, runs the updater, then installs a local fixture
+updates. Network access is needed for the disposable guest's source-pinned
+upstream updater, invoked outside the supported menu path. It checks the initial
+lock state, runs that test-only updater, then installs a local fixture
 package whose pre-transaction hook pauses while pacman holds its real lock. A
 competing transaction must fail without changing the lock. The test kills only
 that fixture's systemd service, powers the VM off, and reboots. On the next boot

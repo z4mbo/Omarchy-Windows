@@ -15,6 +15,11 @@ documents `-process_name`, `-output_file`, and `-timed`. Verify the bundled
 binary's accepted options at collection time; do not change tracing privileges
 or install another tool just to make this first comparison.
 
+The installed binary's `--help` was checked on September 27. Despite its
+1.9.12728.0 file version, it advertises the newer double-dash options below and
+an explicit `--v1_metrics` switch. Use that switch for this repository's analyzer,
+which reads `MsBetweenPresents` and the other version-1 CSV columns.
+
 ## Controlled capture
 
 1. Save a small, deterministic Blender 5.2 `.blend` scene with a timed camera or
@@ -28,11 +33,11 @@ or install another tool just to make this first comparison.
    (for example standalone, integrated, integrated, standalone, then repeat).
    Use the same collector and process name `blender.exe` in both conditions.
    FrameView/PresentMon follows the **Windows application process**, not QEMU.
-   Its upstream reference describes a timed capture like:
+   The installed collector accepts a timed capture like:
 
    ```powershell
    $collector = 'C:\Program Files\NVIDIA Corporation\FrameViewSDK\bin\PresentMon_x64.exe'
-   & $collector -process_name blender.exe -output_file 'C:\captures\standalone-1.csv' -timed 40 -no_top
+   & $collector --process_name blender.exe --output_file 'C:\captures\standalone-1.csv' --timed 40 --terminate_after_timed --no_console_stats --v1_metrics --session_name OmarchyNativeComparison
    ```
 
    Repeat with distinct paths for every run. Keep the actual CSVs and their

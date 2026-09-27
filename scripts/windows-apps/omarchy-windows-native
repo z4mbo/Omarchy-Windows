@@ -124,6 +124,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
             self.window.set_child(label)
             self.close_handler = self.window.connect("close-request", self.close)
             self.fullscreen = False
+            self.mapped = False
             self.retiring = False
             self.workspace_target = workspace
             self.retry_on_fullscreen = False
@@ -138,9 +139,16 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
             if self.move.target is not None:
                 self.move.source_id = GLib.timeout_add(150, self.move_to_inherited_workspace)
 
-        def update(self, metadata: dict) -> None:
+        def update(self, metadata: dict, mapped: bool | None = None) -> None:
             self.metadata = metadata
             self.window.set_title((metadata["title"] or metadata["process"] or "Windows app") + marker_for(self.ident))
+            if mapped is not None:
+                # GTK fullscreen is an asynchronous compositor request. A
+                # request before Hyprland maps the proxy can be lost; allow a
+                # fresh request after the mapped client is observed.
+                if self.mapped and not mapped:
+                    self.fullscreen = None  # Reconcile after a real unmap/remap.
+                self.mapped = mapped
             wanted = metadata["fullscreen"] is True
             if not wanted and (self.move.target is not None or self.move.failed):
                 self.move.cancel(GLib.source_remove)
@@ -151,8 +159,8 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
                 self.move = WorkspaceMove(self.workspace_target)
                 self.retry_on_fullscreen = False
                 self.move.source_id = GLib.timeout_add(150, self.move_to_inherited_workspace)
-            if wanted and not self.move.can_fullscreen():
-                return  # Only fullscreen after Hyprland confirms the move.
+            if not self.mapped or (wanted and not self.move.can_fullscreen()):
+                return  # Change fullscreen only after mapping and any verified move.
             if wanted != self.fullscreen:
                 self.fullscreen = wanted
                 if wanted:
@@ -170,7 +178,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
                 location = None
             if location is not None and location[0] == target:
                 self.move.complete()
-                self.update(self.metadata)
+                self.update(self.metadata, mapped=True)
                 return False
             if location is not None:
                 self.controller.move_syntax = dispatch_workspace_move(
@@ -274,7 +282,8 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
                 if ident in dismissed:
                     continue
                 if ident in self.views:
-                    self.views[ident].update(metadata)
+                    self.views[ident].update(
+                        metadata, mapped=proxy_location(ident, clients, os.getpid()) is not None)
                 else:
                     workspace = (inherited_workspace(metadata["appGroup"], known, clients,
                                                      os.getpid(), self.workspace_history)

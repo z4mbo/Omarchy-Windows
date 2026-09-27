@@ -153,6 +153,23 @@ class UpgradeHarnessTests(unittest.TestCase):
         self.assertNotIn('legacy_dispatch_needs_lua', upgrade.candidate_checks(37))
         self.assertIn('legacy_dispatch_needs_lua', upgrade.candidate_checks(38))
 
+    def test_revision40_checks_installed_update_gate_on_older_disks(self) -> None:
+        self.assertNotIn('/usr/bin/omarchy-update', upgrade.candidate_checks(39))
+        checks = upgrade.candidate_checks(40)
+        for path in ('/usr/bin/omarchy-update', '/usr/bin/omarchy-channel-set',
+                     '/usr/bin/omarchy-update-available',
+                     '/usr/local/lib/try-omarchy/update-gate',
+                     '/usr/share/try-omarchy/upstream-commands/omarchy-update'):
+            self.assertIn('test -x ' + path, checks)
+
+    def test_revision41_checks_named_routes_and_mapped_proxy_on_older_disks(self) -> None:
+        self.assertNotIn('matching_new', upgrade.candidate_checks(40))
+        checks = upgrade.candidate_checks(41)
+        self.assertIn('omarchy-windows-open explorer', checks)
+        self.assertIn('omarchy-windows-open league', checks)
+        self.assertIn("grep -Fq 'matching_new'", checks)
+        self.assertIn("grep -Fq 'self.mapped = False'", checks)
+
     def test_qcow2_overlay_uses_raw_backing_without_copying_or_mutating_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

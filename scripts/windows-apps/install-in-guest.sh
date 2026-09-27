@@ -44,9 +44,9 @@ fi
 cat > "$applications_dir/omarchy-windows-explorer.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=File Explorer on Windows host
-Comment=Open File Explorer on the Windows host
-Exec="$bin_dir/omarchy-windows-app" explorer
+Name=File Explorer in Omarchy (Preview)
+Comment=Open Windows File Explorer in the Omarchy desktop
+Exec="$bin_dir/omarchy-windows-open" explorer
 Icon=system-file-manager
 Terminal=false
 Categories=System;FileManager;
@@ -55,9 +55,9 @@ EOF
 cat > "$applications_dir/omarchy-windows-league.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=League on Windows host
-Comment=Launch the native Windows game on the host
-Exec="$bin_dir/omarchy-windows-app" league
+Name=League in Omarchy (Preview)
+Comment=Open League of Legends in the Omarchy desktop
+Exec="$bin_dir/omarchy-windows-open" league
 Icon=applications-games
 Terminal=false
 Categories=Game;

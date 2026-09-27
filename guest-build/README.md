@@ -115,9 +115,20 @@ Patch 0047 supplies the upstream lock PAM profile in fresh images and repairs
 only missing profiles on older guests. Existing administrator policies remain
 intact, including during runtime package upgrades.
 
-Existing guests can install the image's Omarchy runtime through the normal
-**Update > Omarchy** action. See [guest upgrades](../docs/GUEST-UPGRADES.md) for
-the delivery mechanism, recovery, and validation requirements.
+Patch 0094 (compatibility revision 40) routes installed Update, update badge,
+and channel commands through a visible Windows-managed gate. Normal actions do
+not run live pacman/AUR or upstream channel replacement. The pinned upstream
+commands remain archived only for provenance and disposable Linux compatibility
+tests. Existing guest disks receive the gate through the initramfs compatibility
+overlay. A release-approved package plan and stopped-disk checkpoint/rollback
+transaction are still required before managed guest updates can resume; see
+[guest upgrades](../docs/GUEST-UPGRADES.md).
+
+Patch 0095 (compatibility revision 41) carries the named File Explorer/League
+launcher routes and mapped-proxy fullscreen request guard into fresh images and
+older disks. It does not claim that those apps or fullscreen transitions pass
+physical acceptance tests; the current Blender fullscreen and workspace-return
+failures remain documented in [desktop evidence](../docs/evidence/NATIVE-DESKTOP-2026-09-27.md).
 
 If Arch has moved since the lock was written, refresh it first and review the diff.
 `scripts/release/refresh-guest-lock.sh` does the whole dance: it checks out the

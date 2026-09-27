@@ -87,11 +87,14 @@ cover bounds, host grants, hidden-window retention, layout acknowledgements,
 key routing, transport recovery, and bounded restoration bookkeeping. These
 checks do not prove actual window placement, text entry, gameplay, or latency.
 A [September 27 isolated physical test](evidence/NATIVE-DESKTOP-2026-09-27.md)
-now verifies Character Map input, tiling beside a Linux picker, and workspace
-hide/restore. Native frame capture was rejected after activation. The test uses
-candidate 4 plus development guest helpers, not a complete released image.
-Blender launch tracking, fullscreen, broad application coverage and performance
-remain open.
+verifies Character Map input, tiling beside a Linux picker, and workspace
+hide/restore with candidate 4 plus development guest helpers. Native frame
+capture was rejected after activation. Candidate 5 subsequently booted the
+complete revision-39 factory image on Windows and verified automatic Blender
+child-process granting and native viewport input using the packaged helpers.
+That test also reproduced incorrect fullscreen metadata and a failure to raise
+Blender above QEMU when returning to its workspace. Fullscreen, reliable
+workspace restoration, broad application coverage and performance remain open.
 
 Revision 38 adds support for Hyprland's Lua workspace dispatch while preserving
 legacy syntax for older configurations. A real compositor test confirmed moving

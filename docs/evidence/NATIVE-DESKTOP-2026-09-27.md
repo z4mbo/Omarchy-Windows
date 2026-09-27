@@ -138,4 +138,65 @@ preference controls both the automatic screensaver and idle lock.
 
 Guest patch 0093 seeds this preference only in the new-user skeleton and raises
 the compatibility revision to 39. It does not rewrite existing users' choices.
-The new factory-image default awaits its CI boot check.
+The new factory-image default subsequently passed CI and the fresh physical
+test described below.
+
+## Candidate 5: complete factory image and Blender
+
+[CI run 26](https://github.com/z4mbo/Omarchy-Windows/actions/runs/36320246763),
+source `70ab843774f2ed8614c284d241fe06ed4fb4cea8`, passed all applicable jobs:
+Windows and Linux launcher checks, guest contracts, a complete revision-39
+desktop boot, five-boot existing-disk preservation, and interrupted package-write
+recovery. Those recovery tests run under Linux KVM.
+
+A new isolated portable test directory was prepared on the physical Windows
+host using this run's launcher and complete factory root filesystem. The
+launcher SHA256 was
+`f46675a78ade17a05a32f9e4ba175a8e2c85f6dbf3345d1d118f2b8b7e9b122b`.
+The compressed root filesystem SHA256 was
+`4a24d33249f88b7024df1be0adaf7edeb34aae1a05221b0f9a5ea823cf1e8248`.
+Each bounded artifact ZIP was checked against its GitHub digest, then the
+ordered parts against the parts index and the original guest manifest. The
+combined local guest/runtime manifest SHA256 was
+`ada2693e2211c9468ed1a1e2f10eac0e8cc08f30eab117c4c52e4e77942dc8e5`.
+The previously verified runtime was reused; no development guest helper was
+installed into this disk. This remains an unsigned test build.
+
+The launcher created the fresh test disk, started the desktop, and signed in
+automatically. The packaged Stay Awake default was present: idle disabled,
+Stay Awake enabled, timers stopped, and lock state false. Hyprland reported
+2560×1440 at 360.039 Hz, matching the host's 2560×1440 / 360 Hz mode to virtual
+mode rounding. This verifies the current single-monitor factory default, not
+live monitor changes or multi-output behavior.
+
+The packaged `omarchy-windows-open` desktop command was started through
+Hyprland IPC. Computer Use then selected **Blender 5.2** in the visible guest
+picker and confirmed launch. The host granted the descendant `blender.exe`
+window automatically, and it appeared inside the Omarchy tile with the guest
+bar and borders visible. Native keypad input changed the viewport to Right
+Orthographic. This fixes the earlier launcher-to-child grant failure for the
+tested Blender shortcut.
+
+Two integration failures remain in this candidate:
+
+- Initial maximized Blender geometry was reported as fullscreen, while the
+  Hyprland proxy remained windowed. Blender's own **Window → Toggle Window
+  Fullscreen** changed the native window, but did not produce the required
+  matching proxy state. The host classifier and guest mapping lifecycle need
+  their subsequent source fixes and a new physical test.
+- Moving the proxy to another workspace hid Blender. Clicking that workspace
+  in Omarchy's bar failed to restore it above QEMU: the proxy and an HTTP 409
+  message appeared instead, and the host logged `window remained behind QEMU
+  after z order repair`. Graceful guest shutdown restored the native Windows
+  window, which was then closed normally.
+
+A separate restart of the same candidate with the temporary environment
+setting `SDL_ALLOW_TOPMOST=0` reproduced the workspace-return failure even
+without toggling Blender fullscreen. That setting was confined to the test
+process and is not a product fix. SDL's topmost setting therefore does not
+resolve this observed failure. Window-order and foreground diagnostics are
+needed before claiming workspace restoration works broadly.
+
+No gameplay, frame-time comparison, latency measurement, or native-performance
+equivalence was established. The existing personalized installation was not
+replaced.

@@ -29,8 +29,23 @@ if sudo pacman -Syu --noconfirm > /tmp/upgrade-lock-test.log 2>&1; then exit 1; 
 grep -q 'unable to lock database' /tmp/upgrade-lock-test.log
 grep -qx 'upgrade-test-owned-lock' /var/lib/pacman/db.lck
 sudo rm /var/lib/pacman/db.lck
-# Let optional reboot/orphan prompts time out without accepting them.
-GUM_CONFIRM_TIMEOUT=1s omarchy-update -y > /tmp/upgrade-packages.log 2>&1 || { cat /tmp/upgrade-packages.log; exit 1; }
+# The installed/default updater is a gate until signed package plans and
+# stopped-disk rollback are implemented. Prove it does not start an upgrade.
+packages_before=$(pacman -Q)
+pacman_config_before=$(sha256sum /etc/pacman.conf /etc/pacman.d/mirrorlist)
+if omarchy-update -y > /tmp/default-update-gate.log 2>&1; then exit 1; fi
+grep -q 'No packages were changed' /tmp/default-update-gate.log
+if omarchy update -y > /tmp/default-update-cli-gate.log 2>&1; then exit 1; fi
+grep -q 'No packages were changed' /tmp/default-update-cli-gate.log
+if omarchy-channel-set stable > /tmp/default-channel-gate.log 2>&1; then exit 1; fi
+grep -q 'not changed' /tmp/default-channel-gate.log
+if omarchy-update-available > /tmp/default-update-badge.log 2>&1; then exit 1; fi
+[[ $(pacman -Q) == "$packages_before" ]]
+[[ $(sha256sum /etc/pacman.conf /etc/pacman.d/mirrorlist) == "$pacman_config_before" ]]
+# Disposable CI-only compatibility probe: invoke the source-pinned upstream
+# updater by its explicit archived path on this throwaway disk. This is not a
+# supported user update or evidence that the default gate has rollback.
+GUM_CONFIRM_TIMEOUT=1s /usr/share/try-omarchy/upstream-commands/omarchy-update -y > /tmp/upgrade-packages.log 2>&1 || { cat /tmp/upgrade-packages.log; exit 1; }
 if grep -q "command failed to execute correctly" /tmp/upgrade-packages.log; then cat /tmp/upgrade-packages.log; exit 1; fi
 [[ $(pacman -Q try-omarchy-runtime) == "try-omarchy-runtime $CANDIDATE_RUNTIME" ]]
 command -v zenity

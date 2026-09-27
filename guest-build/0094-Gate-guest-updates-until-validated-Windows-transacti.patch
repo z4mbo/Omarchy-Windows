@@ -1,0 +1,465 @@
+From 7c02508e9dbbeaec953552fd3262128e3d5d2ed6 Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 15:09:08 +0200
+Subject: [PATCH] Gate guest updates until validated Windows transaction exists
+
+---
+ .../usr/bin/omarchy-channel-set               |  4 +
+ guest/factory-overlay/usr/bin/omarchy-update  |  4 +
+ .../usr/bin/omarchy-update-available          |  2 +
+ .../try-omarchy/show-factory-update-notice    |  4 +-
+ .../usr/local/lib/try-omarchy/update-gate     | 50 ++++++++++
+ guest/scripts/configure-rootfs.sh             |  6 ++
+ guest/scripts/finalize-rootfs.sh              | 10 +-
+ guest/scripts/materialize-omarchy.sh          |  5 +-
+ guest/scripts/register-omarchy-runtime.sh     |  5 +-
+ guest/spec.json                               |  2 +-
+ guest/tests/test_runtime_package.py           | 26 +++--
+ guest/tests/test_update_gate.py               | 96 +++++++++++++++++++
+ guest/tests/verify.py                         | 32 ++++++-
+ 13 files changed, 227 insertions(+), 19 deletions(-)
+ create mode 100755 guest/factory-overlay/usr/bin/omarchy-channel-set
+ create mode 100755 guest/factory-overlay/usr/bin/omarchy-update
+ create mode 100755 guest/factory-overlay/usr/bin/omarchy-update-available
+ create mode 100755 guest/factory-overlay/usr/local/lib/try-omarchy/update-gate
+ create mode 100644 guest/tests/test_update_gate.py
+
+diff --git a/guest/factory-overlay/usr/bin/omarchy-channel-set b/guest/factory-overlay/usr/bin/omarchy-channel-set
+new file mode 100755
+index 0000000..7b2a5c8
+--- /dev/null
++++ b/guest/factory-overlay/usr/bin/omarchy-channel-set
+@@ -0,0 +1,4 @@
++#!/bin/bash
++# omarchy:summary=Request a validated Omarchy Windows channel change
++# omarchy:args=<stable|rc|edge|dev>
++exec /usr/local/lib/try-omarchy/update-gate channel "$@"
+diff --git a/guest/factory-overlay/usr/bin/omarchy-update b/guest/factory-overlay/usr/bin/omarchy-update
+new file mode 100755
+index 0000000..032259a
+--- /dev/null
++++ b/guest/factory-overlay/usr/bin/omarchy-update
+@@ -0,0 +1,4 @@
++#!/bin/bash
++# omarchy:summary=Check for a validated Omarchy Windows update
++# omarchy:args=[-y]
++exec /usr/local/lib/try-omarchy/update-gate update "$@"
+diff --git a/guest/factory-overlay/usr/bin/omarchy-update-available b/guest/factory-overlay/usr/bin/omarchy-update-available
+new file mode 100755
+index 0000000..a7afefe
+--- /dev/null
++++ b/guest/factory-overlay/usr/bin/omarchy-update-available
+@@ -0,0 +1,2 @@
++#!/bin/bash
++exec /usr/local/lib/try-omarchy/update-gate available "$@"
+diff --git a/guest/factory-overlay/usr/local/lib/try-omarchy/show-factory-update-notice b/guest/factory-overlay/usr/local/lib/try-omarchy/show-factory-update-notice
+index b09ed62..3603b2e 100755
+--- a/guest/factory-overlay/usr/local/lib/try-omarchy/show-factory-update-notice
++++ b/guest/factory-overlay/usr/local/lib/try-omarchy/show-factory-update-notice
+@@ -13,8 +13,8 @@ mkdir -p "$(dirname "$state")"
+ # Retry startup failures, and mark the notice shown only after delivery succeeds.
+ for attempt in {1..20}; do
+   if timeout 3 notify-send -a "Try Omarchy" -u normal -t 20000 \
+-    "Omarchy update available" \
+-    "Your files and settings were preserved. Open Update > Omarchy to install the desktop update. You do not need to reset this installation."; then
++    "Omarchy package update staged" \
++    "Your files and settings were preserved. Open Update > Omarchy for the Windows update status. Package installation waits for a validated update plan and stopped-disk recovery; you do not need to reset this installation."; then
+     printf '%s\n' "$version" >"$state"
+     exit 0
+   fi
+diff --git a/guest/factory-overlay/usr/local/lib/try-omarchy/update-gate b/guest/factory-overlay/usr/local/lib/try-omarchy/update-gate
+new file mode 100755
+index 0000000..cb60f2c
+--- /dev/null
++++ b/guest/factory-overlay/usr/local/lib/try-omarchy/update-gate
+@@ -0,0 +1,50 @@
++#!/bin/bash
++# The default guest update commands must not run a moving pacman/AUR or
++# upstream-channel transaction before the Windows launcher can checkpoint the
++# stopped disk and apply an authenticated, tested package plan.
++set -euo pipefail
++
++action=${1:-}
++[[ $# -gt 0 ]] && shift
++
++notice() {
++  local message=$1
++  printf '%s\n' "$message" >&2
++  if [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} && $EUID -ne 0 ]]; then
++    if command -v zenity >/dev/null 2>&1; then
++      timeout 30 zenity --warning --title='Omarchy updates' --width=520 --text="$message" >/dev/null 2>&1 || true
++    elif command -v notify-send >/dev/null 2>&1; then
++      notify-send -a 'Omarchy' -u normal -t 20000 'Omarchy updates' "$message" >/dev/null 2>&1 || true
++    fi
++  fi
++}
++
++case "$action" in
++  update)
++    if [[ $# -gt 1 || ( $# -eq 1 && $1 != -y ) ]]; then
++      printf 'Usage: omarchy-update [-y]\n' >&2
++      exit 2
++    fi
++    notice 'Omarchy package updates are waiting for a validated Windows update path. No packages were changed. In the Windows Omarchy app, Settings > About and updates checks signed launcher releases. Guest package installation will be offered only after a tested update plan and stopped-disk recovery are available.'
++    exit 1
++    ;;
++  channel)
++    if [[ $# -ne 1 || ! $1 =~ ^(stable|rc|edge|dev)$ ]]; then
++      printf 'Usage: omarchy-channel-set <stable|rc|edge|dev>\n' >&2
++      exit 2
++    fi
++    notice "Switching to the $1 channel is waiting for a validated Windows update plan. Your channel and packages were not changed. Check signed launcher releases in Windows Omarchy Settings > About and updates."
++    exit 1
++    ;;
++  available)
++    [[ $# -eq 0 ]] || exit 2
++    # The upstream badge checks live package repositories. Suppress that
++    # misleading signal until a fork-approved plan can be queried instead.
++    printf 'Omarchy Windows updates are managed by the Windows launcher.\n'
++    exit 1
++    ;;
++  *)
++    printf 'Unknown Omarchy update action\n' >&2
++    exit 2
++    ;;
++esac
+diff --git a/guest/scripts/configure-rootfs.sh b/guest/scripts/configure-rootfs.sh
+index 02e11ab..86123fa 100755
+--- a/guest/scripts/configure-rootfs.sh
++++ b/guest/scripts/configure-rootfs.sh
+@@ -57,6 +57,12 @@ profile=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["guest
+ [[ $profile == factory ]] || fail "native guest profile must be factory"
+ 
+ mkdir -p "$root/etc" "$root/etc/skel" "$root/usr/share/try-omarchy"
++upstream_commands="$root/usr/share/try-omarchy/upstream-commands"
++mkdir -p "$upstream_commands"
++for name in omarchy-update omarchy-update-available omarchy-channel-set; do
++  [[ -f $root/usr/bin/$name && ! -L $root/usr/bin/$name ]] || fail "missing pinned upstream command: $name"
++  install -m 0755 "$root/usr/bin/$name" "$upstream_commands/$name"
++done
+ cp -a --no-preserve=ownership "$guest_dir/factory-overlay/." "$root/"
+ 
+ # Session-config customizations are additive, so each fragment remains
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index d1434e5..2d70f66 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -101,6 +101,11 @@ compat_paths=(
+   etc/systemd/system/try-omarchy-system-ownership.service
+   etc/systemd/system/sysinit.target.wants/try-omarchy-system-ownership.service
+   usr/share/try-omarchy/update-repository
++  usr/share/try-omarchy/upstream-commands
++  usr/local/lib/try-omarchy/update-gate
++  usr/bin/omarchy-update
++  usr/bin/omarchy-update-available
++  usr/bin/omarchy-channel-set
+   usr/local/lib/try-omarchy/publish-update-repository
+   etc/systemd/system/try-omarchy-update-repository.service
+   etc/systemd/system/multi-user.target.wants/try-omarchy-update-repository.service
+@@ -191,7 +196,10 @@ tar -C / -cf /usr/share/try-omarchy/compat-overlay.tar "${compat_paths[@]}"
+ # Revision 38 accepts Hyprland's Lua workspace dispatcher while retaining the
+ # older dispatcher syntax for guests that still use hyprlang configuration.
+ # Revision 39 seeds Omarchy's stay-awake preference for new homes only.
+-compat_revision=39
++# Revision 40 routes normal update and channel commands through the Windows
++# gate on fresh and existing disks. The pinned upstream commands are retained
++# for source provenance and disposable compatibility tests, not menu use.
++compat_revision=40
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Fail the build if DKMS or networking modules were not packaged for this kernel.
+diff --git a/guest/scripts/materialize-omarchy.sh b/guest/scripts/materialize-omarchy.sh
+index 036f163..e9dbf51 100755
+--- a/guest/scripts/materialize-omarchy.sh
++++ b/guest/scripts/materialize-omarchy.sh
+@@ -121,8 +121,9 @@ omarchy_root="$root/usr/share/omarchy"
+ rm -rf "$omarchy_root"
+ mkdir -p "$omarchy_root/bin" "$omarchy_root/themes"
+ 
+-# Match the upstream package's runtime layout. Every copied byte comes from the
+-# pinned Basecamp repository; the web-only profile is applied later in /etc/skel.
++# Match the upstream package's runtime layout. Every byte copied at this stage
++# comes from the pinned Basecamp repository. configure-rootfs later preserves
++# the three upstream update commands and overlays Windows-managed gate wrappers.
+ for tree in config default install migrations shell applications; do
+   copy_tree "$source_dir/$tree" "$omarchy_root/$tree"
+ done
+diff --git a/guest/scripts/register-omarchy-runtime.sh b/guest/scripts/register-omarchy-runtime.sh
+index bac832f..8b58173 100755
+--- a/guest/scripts/register-omarchy-runtime.sh
++++ b/guest/scripts/register-omarchy-runtime.sh
+@@ -142,7 +142,7 @@ cat >"$stage/.PKGINFO" <<EOF
+ pkgname = $package_name
+ pkgbase = $package_name
+ pkgver = $package_version
+-pkgdesc = Pinned Basecamp Omarchy runtime $commit for the Try Omarchy guest
++pkgdesc = Pinned Basecamp Omarchy runtime $commit with Windows update gate
+ url = $repository
+ builddate = $source_date_epoch
+ packager = Try Omarchy reproducible guest builder
+@@ -173,7 +173,8 @@ tar \
+   -cf - .PKGINFO .INSTALL usr etc |
+   zstd --force --quiet -12 --threads=1 -o "$archive"
+ 
+-# The payload is already present and was verified against the pinned source.
++# The pinned upstream source was verified before the three Windows update
++# command wrappers were applied. The package registers the final staged bytes.
+ # --dbonly registers ownership/version metadata without replacing a single
+ # upstream byte. The local package resolves `pacman -Q omarchy` via provides.
+ pacman \
+diff --git a/guest/spec.json b/guest/spec.json
+index d97772e..1e94bc0 100644
+--- a/guest/spec.json
++++ b/guest/spec.json
+@@ -30,7 +30,7 @@
+     "versionFile": "4.0.0.alpha",
+     "channel": "quattro",
+     "license": "MIT",
+-    "packageRelease": 5
++    "packageRelease": 6
+   },
+   "supplyChain": {
+     "omarchyPackagesRepository": "https://github.com/omacom-io/omarchy-pkgs",
+diff --git a/guest/tests/test_runtime_package.py b/guest/tests/test_runtime_package.py
+index 69c017e..128f68f 100644
+--- a/guest/tests/test_runtime_package.py
++++ b/guest/tests/test_runtime_package.py
+@@ -1,6 +1,7 @@
+ import json
+ import os
+ from pathlib import Path
++import shutil
+ import subprocess
+ import tarfile
+ import tempfile
+@@ -24,14 +25,20 @@ class RuntimePackageTests(unittest.TestCase):
+         (self.root / 'usr/share/licenses/omarchy/LICENSE').write_text('license\n')
+         (self.root / 'etc/sudoers.d/test').write_text('fixture\n')
+         (self.root / 'usr/share/try-omarchy/runtime-config-files').write_text('etc/sudoers.d/test\n')
+-        for name in ('omarchy', 'omarchy-version', 'omarchy-nvim-setup', 'omarchy-neighbor'):
++        for name in ('omarchy', 'omarchy-version', 'omarchy-nvim-setup', 'omarchy-neighbor',
++                     'omarchy-update', 'omarchy-update-available', 'omarchy-channel-set'):
+             command = self.root / 'usr/bin' / name
+-            command.write_text('#!/bin/sh\nexit 0\n')
++            gate = Path(__file__).resolve().parents[1] / 'factory-overlay/usr/bin' / name
++            if gate.exists():
++                shutil.copyfile(gate, command)
++            else:
++                command.write_text('#!/bin/sh\nexit 0\n')
+             command.chmod(0o755)
+-        for name in ('omarchy', 'omarchy-version'):
++        for name in ('omarchy', 'omarchy-version', 'omarchy-update',
++                     'omarchy-update-available', 'omarchy-channel-set'):
+             (self.root / 'usr/share/omarchy/bin' / name).symlink_to('/usr/bin/' + name)
+         self.spec = self.base / 'spec.json'
+-        self.spec.write_text(json.dumps({'upstream': {'version': '4.0.3', 'packageRelease': 5,
++        self.spec.write_text(json.dumps({'upstream': {'version': '4.0.3', 'packageRelease': 6,
+             'repository': 'https://example.invalid/omarchy', 'commit': 'a' * 40},
+             'image': {'sourceDateEpoch': 1789344000}}))
+         self.config = self.base / 'pacman.conf'
+@@ -43,7 +50,7 @@ class RuntimePackageTests(unittest.TestCase):
+         self.fake('zstd', 'cat > "${@: -1}"')
+         self.fake('pacman', '''for arg in "$@"; do
+   if [[ $arg == -U ]]; then cp "${@: -1}" "$CAPTURE"; fi
+-  if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-5'; fi
++  if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-6'; fi
+ done
+ exit 0''')
+         self.capture = self.base / 'package.tar'
+@@ -66,10 +73,15 @@ exit 0''')
+             names = set(archive.getnames())
+             metadata = archive.extractfile('.PKGINFO').read().decode()
+             self.assertIn('.INSTALL', names)
+-            self.assertIn('pkgver = 4.0.3-5', metadata)
++            self.assertIn('pkgver = 4.0.3-6', metadata)
+             self.assertIn('depend = zenity', metadata)
+             self.assertIn('usr/bin/omarchy', names)
+             self.assertIn('usr/bin/omarchy-version', names)
++            for name in ('omarchy-update', 'omarchy-update-available', 'omarchy-channel-set'):
++                self.assertIn('usr/bin/' + name, names)
++                self.assertEqual(archive.extractfile('usr/bin/' + name).read(),
++                                 (Path(__file__).resolve().parents[1] /
++                                  'factory-overlay/usr/bin' / name).read_bytes())
+             self.assertNotIn('usr/bin/omarchy-nvim-setup', names)
+             self.assertNotIn('usr/bin/omarchy-neighbor', names)
+         self.assertTrue((self.root / 'usr/bin/omarchy-nvim-setup').exists())
+@@ -93,7 +105,7 @@ exit 0''')
+     def test_database_failure_rejects_package(self):
+         self.fake('pacman', '''for arg in "$@"; do
+   if [[ $arg == -Dk ]]; then exit 1; fi
+-  if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-5'; fi
++  if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-6'; fi
+ done
+ exit 0''')
+         result = self.run_builder()
+diff --git a/guest/tests/test_update_gate.py b/guest/tests/test_update_gate.py
+new file mode 100644
+index 0000000..6f3f93e
+--- /dev/null
++++ b/guest/tests/test_update_gate.py
+@@ -0,0 +1,96 @@
++"""The installed update entry points fail closed without a package transaction."""
++
++from __future__ import annotations
++
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import tempfile
++import unittest
++
++
++OVERLAY = Path(__file__).resolve().parents[1] / "factory-overlay"
++GATE = OVERLAY / "usr/local/lib/try-omarchy/update-gate"
++COMMANDS = {
++    "omarchy-update": "update",
++    "omarchy-channel-set": "channel",
++    "omarchy-update-available": "available",
++}
++
++
++class UpdateGateTests(unittest.TestCase):
++    def setUp(self) -> None:
++        self.root = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.root, True)
++        self.bin = self.root / "bin"
++        self.bin.mkdir()
++        self.calls = self.root / "calls"
++        for name in ("pacman", "yay", "sudo", "omarchy-refresh-pacman", "curl", "git", "zenity", "notify-send"):
++            command = self.bin / name
++            command.write_text(f'#!/bin/sh\nprintf "%s\\n" "{name}" >>"{self.calls}"\nexit 95\n')
++            command.chmod(0o755)
++        self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}")
++        self.env.pop("WAYLAND_DISPLAY", None)
++        self.env.pop("DISPLAY", None)
++
++    def run_gate(self, action: str, *args: str) -> subprocess.CompletedProcess[str]:
++        return subprocess.run(["bash", str(GATE), action, *args], env=self.env,
++                              capture_output=True, text=True, timeout=5)
++
++    def assert_no_package_or_network_command(self) -> None:
++        self.assertFalse(self.calls.exists(), self.calls.read_text() if self.calls.exists() else "")
++
++    def test_update_menu_cli_and_unattended_entry_fail_closed(self) -> None:
++        for args in ((), ("-y",)):
++            with self.subTest(args=args):
++                result = self.run_gate("update", *args)
++                self.assertEqual(result.returncode, 1)
++                self.assertIn("No packages were changed", result.stderr)
++                self.assertIn("About and updates", result.stderr)
++                self.assert_no_package_or_network_command()
++
++    def test_every_upstream_channel_name_is_guarded(self) -> None:
++        for channel in ("stable", "rc", "edge", "dev"):
++            with self.subTest(channel=channel):
++                result = self.run_gate("channel", channel)
++                self.assertEqual(result.returncode, 1)
++                self.assertIn("not changed", result.stderr)
++                self.assert_no_package_or_network_command()
++
++    def test_invalid_inputs_do_not_start_update(self) -> None:
++        for action, args in (("update", ("--force",)), ("update", ("-y", "extra")),
++                             ("channel", ()), ("channel", ("unknown",)),
++                             ("available", ("extra",)), ("unknown", ())):
++            with self.subTest(action=action, args=args):
++                self.assertEqual(self.run_gate(action, *args).returncode, 2)
++                self.assert_no_package_or_network_command()
++
++    def test_badge_does_not_advertise_unapproved_upstream_updates(self) -> None:
++        result = self.run_gate("available")
++        self.assertEqual(result.returncode, 1)
++        self.assertIn("managed by the Windows launcher", result.stdout)
++        self.assert_no_package_or_network_command()
++
++    def test_graphical_update_attempt_shows_a_bounded_notice(self) -> None:
++        if not hasattr(os, "geteuid") or os.geteuid() == 0:
++            self.skipTest("graphical guest notice is shown for a normal user")
++        self.env["WAYLAND_DISPLAY"] = "wayland-test"
++        result = self.run_gate("update")
++        self.assertEqual(result.returncode, 1)
++        self.assertEqual(self.calls.read_text(), "zenity\n")
++
++    def test_installed_commands_route_to_fork_gate(self) -> None:
++        for name, action in COMMANDS.items():
++            with self.subTest(name=name):
++                wrapper = OVERLAY / "usr/bin" / name
++                content = wrapper.read_text()
++                self.assertTrue(content.startswith("#!/bin/bash\n"))
++                self.assertIn(f'exec /usr/local/lib/try-omarchy/update-gate {action} "$@"', content)
++                self.assertNotIn("pacman", content)
++                self.assertTrue(wrapper.stat().st_mode & 0o111)
++        self.assertTrue(GATE.stat().st_mode & 0o111)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index 104b2fb..ad455e0 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -47,7 +47,7 @@ def main() -> None:
+     check(spec["runtime"]["virtualMachineMonitor"] == "qemu-system-x86_64", "runtime uses native x86 QEMU")
+     check(spec["runtime"]["hypervisor"] == "whpx", "runtime uses Windows Hypervisor Platform")
+     check(spec["runtime"]["storage"]["expandedSizeMiB"] == 24576, "working disk expands to 24 GiB")
+-    check(spec["upstream"].get("packageRelease") == 5
++    check(spec["upstream"].get("packageRelease") == 6
+           and "depend = zenity" in read(GUEST / "scripts/register-omarchy-runtime.sh"),
+           "the updated Omarchy runtime requires Zenity on existing guest disks")
+     check(set(spec["inputs"]) == {"packages", "packageLock", "pacmanConfig"}, "spec has a minimal input set")
+@@ -273,7 +273,7 @@ def main() -> None:
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     compat_paths = finalize_rootfs.split("compat_paths=(", 1)[1].split(")", 1)[0]
+     check(
+-        "compat_revision=39" in finalize_rootfs
++        "compat_revision=40" in finalize_rootfs
+         and "usr/local/lib/try-omarchy/catch-up" in compat_paths
+         and "usr/share/try-omarchy/vdso-overlay.sha256" in compat_paths
+         and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
+@@ -287,6 +287,29 @@ def main() -> None:
+         and "etc/systemd/user/graphical-session.target.wants/clipboard-bridge.service" in compat_paths,
+         "launcher integration has an explicit revision for persistent-disk upgrades",
+     )
++    gate = GUEST / "factory-overlay/usr/local/lib/try-omarchy/update-gate"
++    gate_text = read(gate)
++    wrappers = {"omarchy-update": "update", "omarchy-update-available": "available",
++                "omarchy-channel-set": "channel"}
++    check(
++        all(
++            (GUEST / "factory-overlay/usr/bin" / name).stat().st_mode & stat.S_IXUSR
++            and f'exec /usr/local/lib/try-omarchy/update-gate {action} "$@"'
++            in read(GUEST / "factory-overlay/usr/bin" / name)
++            and f"usr/bin/{name}" in compat_paths
++            for name, action in wrappers.items()
++        )
++        and gate.stat().st_mode & stat.S_IXUSR
++        and "usr/local/lib/try-omarchy/update-gate" in compat_paths
++        and "usr/share/try-omarchy/upstream-commands" in compat_paths
++        and "No packages were changed" in gate_text
++        and "pacman -Syu" not in gate_text
++        and "omarchy-refresh-pacman" not in gate_text
++        and "upstream_commands" in configure
++        and configure.index('install -m 0755 "$root/usr/bin/$name" "$upstream_commands/$name"')
++            < configure.index('cp -a --no-preserve=ownership "$guest_dir/factory-overlay/." "$root/"'),
++        "installed update, badge, and channel commands route through a fail-closed fork gate",
++    )
+     check(
+         "usr/local/lib/try-omarchy/clear-stale-pacman-lock" in compat_paths
+         and "etc/systemd/system/try-omarchy-pacman-lock.service" in compat_paths
+@@ -430,10 +453,11 @@ def main() -> None:
+     check(
+         "factory-update-available" in update_notice_unit
+         and "Update > Omarchy" in update_notice
+-        and "You do not need to reset" in update_notice
++        and "validated update plan" in update_notice
++        and "do not need to reset" in update_notice
+         and "vercmp" in update_notice
+         and (GUEST / "factory-overlay/etc/systemd/user/graphical-session.target.wants/try-omarchy-factory-update-notice.service").is_symlink(),
+-        "older persistent guests offer an in-place desktop update",
++        "older persistent guests describe the guarded package update honestly",
+     )
+ 
+     finalizer = read(GUEST / "scripts/finalize-rootfs.sh")
+-- 
+2.53.0.windows.3
+

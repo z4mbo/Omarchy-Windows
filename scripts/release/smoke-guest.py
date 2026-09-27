@@ -74,7 +74,7 @@ EXPECTED_FACTS = {
     "icon-cache": "yes",
     "system-ownership": "yes",
     "update-repository": "active",
-    "runtime-package": "4.0.3-5",
+    "runtime-package": "4.0.3-7",
     "package-database": "clean",
     "lock-pam": "yes",
     "pacman-unlocked": "yes",
@@ -268,6 +268,36 @@ def main() -> None:
             "python3 -c 'import omarchy_windows_presenter_input' >/dev/null 2>&1 && echo yes || echo no"
         )
         EXPECTED_FACTS["windows-apps-input-helper"] = "yes"
+    if args.compat_revision >= 40:
+        FACT_CHECKS["managed-update-gate"] = (
+            "(test -x /usr/bin/omarchy-update && "
+            "test -x /usr/bin/omarchy-channel-set && "
+            "test -x /usr/bin/omarchy-update-available && "
+            "test -x /usr/local/lib/try-omarchy/update-gate && "
+            "test -x /usr/share/try-omarchy/upstream-commands/omarchy-update && "
+            "before=$(pacman -Q); "
+            "if omarchy-update -y >/tmp/tryomarchy-gated-update.log 2>&1; then exit 1; fi; "
+            "grep -q 'No packages were changed' /tmp/tryomarchy-gated-update.log && "
+            "if omarchy update -y >/tmp/tryomarchy-gated-cli.log 2>&1; then exit 1; fi; "
+            "grep -q 'No packages were changed' /tmp/tryomarchy-gated-cli.log && "
+            "if omarchy-channel-set stable >/tmp/tryomarchy-gated-channel.log 2>&1; then exit 1; fi; "
+            "grep -q 'not changed' /tmp/tryomarchy-gated-channel.log && "
+            "if omarchy-update-available >/dev/null 2>&1; then exit 1; fi; "
+            "test \"$before\" = \"$(pacman -Q)\" && "
+            "sudo pacman -Qk try-omarchy-runtime >/dev/null 2>&1) && echo yes || echo no"
+        )
+        EXPECTED_FACTS["managed-update-gate"] = "yes"
+    if args.compat_revision >= 41:
+        FACT_CHECKS["windows-named-native-routes"] = (
+            "grep -Fqx 'Exec=/usr/local/bin/omarchy-windows-open explorer' "
+            "/usr/share/applications/omarchy-windows-explorer.desktop && "
+            "grep -Fqx 'Exec=/usr/local/bin/omarchy-windows-open league' "
+            "/usr/share/applications/omarchy-windows-league.desktop && "
+            "grep -Fq 'matching_new' /usr/local/bin/omarchy-windows-open && "
+            "grep -Fq 'self.mapped = False' /usr/local/bin/omarchy-windows-native && "
+            "sudo pacman -Qk try-omarchy-runtime >/dev/null 2>&1 && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-named-native-routes"] = "yes"
     add_native_guest_facts(args.compat_revision, FACT_CHECKS, EXPECTED_FACTS)
     add_idle_guest_facts(args.compat_revision, FACT_CHECKS, EXPECTED_FACTS)
 

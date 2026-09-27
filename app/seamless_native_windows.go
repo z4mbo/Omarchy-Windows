@@ -119,6 +119,7 @@ func seamlessEnumWindow(hwnd, _ uintptr) uintptr {
 	process := seamlessProcessBase(pid)
 	visibleRect := rect
 	_ = seamlessVisibleRect(hwnd, &visibleRect)
+	fullscreen, _ := seamlessFullscreenIntent(hwnd, visibleRect)
 	seamlessEnumerated = append(seamlessEnumerated, seamlessWindow{
 		HWND:       fmt.Sprintf("%x", hwnd),
 		PID:        pid,
@@ -130,7 +131,7 @@ func seamlessEnumWindow(hwnd, _ uintptr) uintptr {
 		Y:          rect.top,
 		Width:      width,
 		Height:     height,
-		Fullscreen: seamlessCoversMonitor(hwnd, visibleRect),
+		Fullscreen: fullscreen,
 		handle:     hwnd,
 		created:    seamlessProcessCreationOrZero(pid),
 		threadID:   uint32(threadID),
@@ -163,6 +164,29 @@ func seamlessCoversMonitor(hwnd uintptr, rect seamlessRect) bool {
 	const tolerance = 2
 	return rect.left <= m.left+tolerance && rect.top <= m.top+tolerance &&
 		rect.right >= m.right-tolerance && rect.bottom >= m.bottom-tolerance
+}
+
+// A maximized ordinary application can cover the monitor while retaining its
+// normal caption and task-switching behavior. Do not ask Hyprland to fullscreen
+// its proxy merely because the Windows application started maximized.
+func seamlessFullscreenFromPlacement(coversMonitor bool, placementKnown bool, showCmd uint32) (bool, bool) {
+	if !coversMonitor {
+		return false, true
+	}
+	if !placementKnown {
+		return false, false
+	}
+	return showCmd != swShowMaximized, true
+}
+
+func seamlessFullscreenIntent(hwnd uintptr, rect seamlessRect) (bool, bool) {
+	if !seamlessCoversMonitor(hwnd, rect) {
+		return false, true
+	}
+	var placement windowPlacementStruct
+	placement.length = uint32(unsafe.Sizeof(placement))
+	ok, _, _ := procGetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&placement)))
+	return seamlessFullscreenFromPlacement(true, ok != 0, placement.showCmd)
 }
 
 func seamlessProcessBase(pid uint32) string {

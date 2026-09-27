@@ -96,13 +96,29 @@ type nativeForegroundSnapshot struct {
 }
 
 type nativeForegroundWindow struct {
-	key  seamlessWindowKey
-	rect seamlessRect
+	key           seamlessWindowKey
+	rect          seamlessRect
+	threadID      uint32
+	incarnation   uintptr
+	grantProperty string
+}
+
+type nativeForegroundRelation struct {
+	root      uintptr
+	rootOwner uintptr
+	pid       uint32
+}
+
+type nativeWindowPresentation struct {
+	style   uintptr
+	showCmd uint32
+	valid   bool
 }
 
 type nativeProjectedWindow struct {
 	window            seamlessWindow
 	fullscreenIntent  bool // App state, independent of projector-issued window geometry.
+	lastPresentation  nativeWindowPresentation
 	created           uint64
 	original          windowPlacementStruct
 	originalVisible   bool
@@ -124,6 +140,8 @@ type nativeProjectedWindow struct {
 	// to detect a later application-owned region change before restoring NULL.
 	lastRegion    uintptr
 	lastZOrderLog time.Time
+	ownedPopups   map[uintptr]nativeOwnedPopup
+	lastPopupLog  time.Time
 }
 
 var (
@@ -196,6 +214,15 @@ func (p *nativeProjection) watch() {
 				p.deadline = time.Time{}
 			}
 			p.retryRestoreLocked()
+			for _, state := range p.tracked {
+				if state.pendingRestore || state.lastVisible {
+					continue
+				}
+				if err := p.syncOwnedPopupsLocked(state, false); err != nil && time.Since(state.lastPopupLog) >= 5*time.Second {
+					logf("native owned popup hide is retrying (PID %d): %v", state.window.PID, err)
+					state.lastPopupLog = time.Now()
+				}
+			}
 			if grantChanged {
 				p.publishForegroundLocked()
 			}
@@ -295,6 +322,7 @@ func (p *nativeProjection) HiddenWindows(visible []seamlessWindow) []seamlessWin
 			continue
 		}
 		if !nativeIdentityMatches(state) {
+			p.dropOwnedPopupsLocked(state)
 			nativeFreeRegion(state)
 			delete(p.tracked, key)
 			continue
@@ -332,34 +360,78 @@ func (p *nativeProjection) StabilizeFullscreen(windows []seamlessWindow) {
 	}
 }
 
-func nativeIndependentFullscreenChange(state *nativeProjectedWindow, current seamlessRect, shown bool) bool {
-	return !state.uncertainMutation && shown && current != state.lastRect
+func nativeReadWindowPresentation(hwnd uintptr) nativeWindowPresentation {
+	var placement windowPlacementStruct
+	placement.length = uint32(unsafe.Sizeof(placement))
+	ok, _, _ := procGetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&placement)))
+	style, _, _ := nativeGetWindowLongPtr.Call(hwnd, ^uintptr(15)) // GWL_STYLE
+	return nativeWindowPresentation{style: style, showCmd: placement.showCmd, valid: ok != 0 && style != 0}
 }
 
-func nativeResolvedFullscreen(state *nativeProjectedWindow, current seamlessRect, shown, measured, coversMonitor bool) bool {
-	if nativeIndependentFullscreenChange(state, current, shown) && measured {
+func nativePresentationChanged(previous, current nativeWindowPresentation) bool {
+	return previous.valid && current.valid &&
+		(nativeDecorationChanged(previous, current) || previous.showCmd != current.showCmd)
+}
+
+func nativeDecorationChanged(previous, current nativeWindowPresentation) bool {
+	const fullscreenStyle = 0x80000000 | 0x00c00000 | 0x00040000 // WS_POPUP | WS_CAPTION | WS_THICKFRAME
+	return previous.valid && current.valid && previous.style&fullscreenStyle != current.style&fullscreenStyle
+}
+
+func nativeIndependentFullscreenChange(state *nativeProjectedWindow, current seamlessRect, shown, presentationChanged bool) bool {
+	return !state.uncertainMutation && shown && (current != state.lastRect || presentationChanged)
+}
+
+func nativeFullscreenFromAppPresentation(covers bool, presentation nativeWindowPresentation, styleChanged, previousIntent bool) bool {
+	if !covers || !presentation.valid {
+		return false
+	}
+	if presentation.showCmd == swShowMinimized {
+		return false
+	}
+	if presentation.showCmd != swShowMaximized {
+		return true
+	}
+	const decorated = 0x00c00000 | 0x00040000 // WS_CAPTION | WS_THICKFRAME
+	return presentation.style&decorated == 0 && (styleChanged || previousIntent)
+}
+
+func nativeResolvedFullscreen(state *nativeProjectedWindow, current seamlessRect, shown, measured, coversMonitor, presentationChanged bool) bool {
+	if nativeIndependentFullscreenChange(state, current, shown, presentationChanged) && measured {
 		return coversMonitor
 	}
 	return state.fullscreenIntent
 }
 
 func nativeObserveFullscreen(state *nativeProjectedWindow, current seamlessRect, shown bool) {
-	if !nativeIndependentFullscreenChange(state, current, shown) {
+	presentation := nativeReadWindowPresentation(state.window.handle)
+	if presentation.valid && presentation.showCmd == swShowMinimized {
+		return // Minimizing does not express a new fullscreen preference.
+	}
+	changed := nativePresentationChanged(state.lastPresentation, presentation)
+	if !nativeIndependentFullscreenChange(state, current, shown, changed) {
 		return
 	}
 	var visible seamlessRect
 	measured := seamlessVisibleRect(state.window.handle, &visible)
 	covers := false
 	if measured {
-		covers = seamlessCoversMonitor(state.window.handle, visible)
+		covers = nativeFullscreenFromAppPresentation(
+			seamlessCoversMonitor(state.window.handle, visible), presentation,
+			nativeDecorationChanged(state.lastPresentation, presentation), state.fullscreenIntent)
+		measured = presentation.valid
 		var verified seamlessRect
 		visibleNow, _, _ := procIsWindowVisible.Call(state.window.handle)
+		verifiedPresentation := nativeReadWindowPresentation(state.window.handle)
 		if ok, _, _ := seamlessGetRect.Call(state.window.handle, uintptr(unsafe.Pointer(&verified))); ok == 0 ||
-			verified != current || visibleNow == 0 {
+			verified != current || visibleNow == 0 || verifiedPresentation != presentation {
 			measured = false // The app moved while we sampled its bounds.
 		}
 	}
-	state.fullscreenIntent = nativeResolvedFullscreen(state, current, shown, measured, covers)
+	state.fullscreenIntent = nativeResolvedFullscreen(state, current, shown, measured, covers, changed)
+	if measured {
+		state.lastPresentation = presentation
+	}
 }
 
 func nativeProcessCreated(pid uint32) (uint64, error) {
@@ -429,10 +501,13 @@ func nativeSnapshot(w seamlessWindow) (*nativeProjectedWindow, error) {
 	if shown != 0 {
 		var visible seamlessRect
 		if seamlessVisibleRect(w.handle, &visible) {
-			w.Fullscreen = seamlessCoversMonitor(w.handle, visible)
+			if intent, known := seamlessFullscreenIntent(w.handle, visible); known {
+				w.Fullscreen = intent
+			}
 		}
 	}
-	return &nativeProjectedWindow{window: w, fullscreenIntent: w.Fullscreen, created: created, original: placement,
+	return &nativeProjectedWindow{window: w, fullscreenIntent: w.Fullscreen,
+		lastPresentation: nativeReadWindowPresentation(w.handle), created: created, original: placement,
 		originalVisible: shown != 0, restorePlacement: placement, restoreVisible: shown != 0,
 		lastRect: rect, lastVisible: shown != 0}, nil
 }
@@ -809,12 +884,11 @@ func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
 	if aspectMismatch {
 		clientErr = errors.New("QEMU viewport does not match guest output aspect")
 	}
-	foreground, _, _ := nativeGetForegroundWindow.Call()
-	foregroundRoot, _, _ := nativeGetAncestor.Call(foreground, 2)
-	active := foregroundRoot == qemuHwnd.Load()
+	foreground := nativeReadForegroundRelation()
+	active := foreground.root == qemuHwnd.Load()
 	if !active {
 		for key, tile := range requested {
-			if key.handle == foregroundRoot && tile.Visible {
+			if nativeForegroundBelongsToProjected(foreground, key, tile.Visible, nativeIdentityMatches(states[key])) {
 				active = true
 				break
 			}
@@ -855,12 +929,25 @@ func (p *nativeProjection) Apply(l nativeLayout) (string, error) {
 		var rect seamlessRect
 		if tile.Visible {
 			rect = nativeScaleTile(tile, l.Output.Width, l.Output.Height, client)
+		} else if err := p.syncOwnedPopupsLocked(state, false); err != nil {
+			p.markAllRestoreLocked()
+			p.retryRestoreLocked()
+			p.foreground.Store(nil)
+			return "", fmt.Errorf("hiding owned Windows popups: %w", err)
 		}
 		if err := p.placeLocked(state, tile, rect); err != nil {
 			p.markAllRestoreLocked()
 			p.retryRestoreLocked()
 			p.foreground.Store(nil)
 			return "", err
+		}
+		if tile.Visible {
+			if err := p.syncOwnedPopupsLocked(state, true); err != nil {
+				p.markAllRestoreLocked()
+				p.retryRestoreLocked()
+				p.foreground.Store(nil)
+				return "", fmt.Errorf("restoring owned Windows popups: %w", err)
+			}
 		}
 		var clips []seamlessRect
 		if tile.Visible && len(tile.Occlusions) != 0 {
@@ -916,6 +1003,35 @@ func nativeQemuAbove(hwnd uintptr) bool {
 	return false
 }
 
+func nativeReadForegroundRelation() nativeForegroundRelation {
+	foreground, _, _ := nativeGetForegroundWindow.Call()
+	if foreground == 0 {
+		return nativeForegroundRelation{}
+	}
+	root, _, _ := nativeGetAncestor.Call(foreground, 2) // GA_ROOT
+	if root == 0 {
+		return nativeForegroundRelation{}
+	}
+	rootOwner, _, _ := nativeGetAncestor.Call(root, 3) // GA_ROOTOWNER
+	var pid uint32
+	procGetWindowThreadProcessId.Call(root, uintptr(unsafe.Pointer(&pid)))
+	return nativeForegroundRelation{root: root, rootOwner: rootOwner, pid: pid}
+}
+
+// An owned popup may be foreground while its granted app tile stays visible.
+// Matching the process and the actual owner excludes unrelated windows in the
+// same process, and identityValid must be checked against the live grant.
+func nativeForegroundBelongsToProjected(foreground nativeForegroundRelation, key seamlessWindowKey, visible, identityValid bool) bool {
+	return visible && identityValid && foreground.root != 0 && foreground.pid == key.pid &&
+		(foreground.root == key.handle || foreground.rootOwner == key.handle)
+}
+
+func nativeForegroundSnapshotIdentity(candidate nativeForegroundWindow, ownerPID, ownerThread uint32, liveMarker uintptr) bool {
+	return candidate.key.pid != 0 && candidate.threadID != 0 &&
+		ownerPID == candidate.key.pid && ownerThread == candidate.threadID &&
+		candidate.incarnation != 0 && candidate.grantProperty != "" && liveMarker == candidate.incarnation
+}
+
 // A heartbeat may keep a previous placement only while its requested
 // visibility still matches the actual window. App-chosen geometry is kept,
 // but a window that hid itself must be shown again for a visible guest tile.
@@ -927,9 +1043,11 @@ func nativeCanKeepPlacement(state *nativeProjectedWindow, tile nativeTile, rect 
 func nativeRaiseAboveQemu(hwnd uintptr) error {
 	const zFlags = 0x0010 | 0x0200 | 0x0001 | 0x0002 // NOACTIVATE | NOOWNERZORDER | NOSIZE | NOMOVE
 	if ok, _, _ := procSetWindowPos.Call(hwnd, 0, 0, 0, 0, 0, zFlags); ok == 0 {
+		nativeLogZOrderFailure("SetWindowPos failed", hwnd)
 		return errors.New("window z order failed")
 	}
 	if nativeQemuAbove(hwnd) {
+		nativeLogZOrderFailure("QEMU remained above", hwnd)
 		return errors.New("window remained behind QEMU after z order repair")
 	}
 	return nil
@@ -952,7 +1070,10 @@ func (p *nativeProjection) publishForegroundLocked() {
 		shown, _, _ := procIsWindowVisible.Call(key.handle)
 		if shown != 0 {
 			if ok, _, _ := seamlessGetRect.Call(key.handle, uintptr(unsafe.Pointer(&rect))); ok != 0 && rect == state.lastRect {
-				s.windows[s.count] = nativeForegroundWindow{key, rect}
+				s.windows[s.count] = nativeForegroundWindow{
+					key: key, rect: rect, threadID: state.window.threadID,
+					incarnation: state.window.incarnation, grantProperty: state.window.grantProperty,
+				}
 				s.count++
 			}
 		}
@@ -961,7 +1082,8 @@ func (p *nativeProjection) publishForegroundLocked() {
 }
 
 // Low-level keyboard hooks may call this without taking the projection lock.
-// Only a currently leased, visible, granted top-level app qualifies.
+// Only a currently leased, visible, granted app or its same-process owned
+// top-level popup qualifies.
 func nativeProjectionForeground() bool {
 	restore, err := nativeDPIEnter()
 	if err != nil {
@@ -976,21 +1098,30 @@ func nativeProjectionForeground() bool {
 	if s == nil || !time.Now().Before(s.until) {
 		return false
 	}
-	hwnd, _, _ := nativeGetForegroundWindow.Call()
-	root, _, _ := nativeGetAncestor.Call(hwnd, 2)
+	foreground := nativeReadForegroundRelation()
 	for i := 0; i < s.count; i++ {
-		key := s.windows[i].key
-		if root != key.handle {
+		candidate := s.windows[i]
+		key := candidate.key
+		if foreground.root != key.handle && foreground.rootOwner != key.handle {
 			continue
 		}
-		var pid uint32
-		procGetWindowThreadProcessId.Call(root, uintptr(unsafe.Pointer(&pid)))
-		if pid != key.pid {
-			return false
+		var ownerPID uint32
+		ownerThread, _, _ := procGetWindowThreadProcessId.Call(key.handle, uintptr(unsafe.Pointer(&ownerPID)))
+		var marker uintptr
+		if candidate.grantProperty != "" {
+			marker = nativeWindowProperty(key.handle, candidate.grantProperty)
+		}
+		if !nativeForegroundBelongsToProjected(foreground, key, true,
+			nativeForegroundSnapshotIdentity(candidate, ownerPID, uint32(ownerThread), marker)) {
+			continue
+		}
+		shown, _, _ := procIsWindowVisible.Call(key.handle)
+		if shown == 0 {
+			continue
 		}
 		var rect seamlessRect
-		ok, _, _ := seamlessGetRect.Call(root, uintptr(unsafe.Pointer(&rect)))
-		return ok != 0 && rect == s.windows[i].rect
+		ok, _, _ := seamlessGetRect.Call(key.handle, uintptr(unsafe.Pointer(&rect)))
+		return ok != 0 && rect == candidate.rect
 	}
 	return false
 }
@@ -1016,7 +1147,6 @@ func (p *nativeProjection) placeLocked(state *nativeProjectedWindow, tile native
 			// so repair it even after an app-initiated resize.
 			if tile.Visible && nativeQemuAbove(state.window.handle) {
 				if err := nativeRaiseAboveQemu(state.window.handle); err != nil {
-					logf("native projection z order repair failed (PID %d): %v", state.window.PID, err)
 					return err
 				}
 				if time.Since(state.lastZOrderLog) >= 5*time.Second {
@@ -1066,6 +1196,7 @@ func (p *nativeProjection) placeLocked(state *nativeProjectedWindow, tile native
 	state.uncertainMutation = false
 	shown, _, _ = procIsWindowVisible.Call(state.window.handle)
 	state.lastVisible = shown != 0
+	state.lastPresentation = nativeReadWindowPresentation(state.window.handle)
 	state.requestedRect = rect
 	state.requestedShown = tile.Visible
 	state.applied = true
@@ -1074,7 +1205,6 @@ func (p *nativeProjection) placeLocked(state *nativeProjectedWindow, tile native
 	}
 	if tile.Visible && nativeQemuAbove(state.window.handle) {
 		if err := nativeRaiseAboveQemu(state.window.handle); err != nil {
-			logf("native projection initial z order failed (PID %d): %v", state.window.PID, err)
 			return err
 		}
 		logf("native projection initial z order repaired (PID %d)", state.window.PID)
@@ -1095,6 +1225,7 @@ func nativeRecordAppliedState(state *nativeProjectedWindow) {
 	state.uncertainMutation = false
 	shown, _, _ := procIsWindowVisible.Call(state.window.handle)
 	state.lastVisible = shown != 0
+	state.lastPresentation = nativeReadWindowPresentation(state.window.handle)
 	state.applied = true
 }
 
@@ -1102,6 +1233,7 @@ func nativeRecordAppliedState(state *nativeProjectedWindow) {
 // HWNDs and user-changed HWNDs are deliberately dropped without mutation.
 func (p *nativeProjection) releaseLocked(state *nativeProjectedWindow) bool {
 	if !nativeIdentityMatches(state) {
+		p.dropOwnedPopupsLocked(state)
 		nativeFreeRegion(state)
 		return true
 	}
@@ -1109,7 +1241,7 @@ func (p *nativeProjection) releaseLocked(state *nativeProjectedWindow) bool {
 		return false
 	}
 	if !state.applied {
-		return true
+		return p.restoreOwnedPopupsLocked(state) == nil
 	}
 	var rect seamlessRect
 	if ok, _, _ := seamlessGetRect.Call(state.window.handle, uintptr(unsafe.Pointer(&rect))); ok == 0 {
@@ -1122,7 +1254,7 @@ func (p *nativeProjection) releaseLocked(state *nativeProjectedWindow) bool {
 		compareRect, compareShown = state.restoreRect, state.restoreShown
 	}
 	if !state.uncertainMutation && (rect != compareRect || (shown != 0) != compareShown) {
-		return true
+		return p.restoreOwnedPopupsLocked(state) == nil
 	}
 	if hung, _, _ := seamlessIsHung.Call(state.window.handle); hung != 0 {
 		return false
@@ -1151,7 +1283,7 @@ func (p *nativeProjection) releaseLocked(state *nativeProjectedWindow) bool {
 	if state.restoreVisible && (actual.showCmd != placement.showCmd || actual.normalPosition != placement.normalPosition) {
 		return false
 	}
-	return true
+	return p.restoreOwnedPopupsLocked(state) == nil
 }
 
 func (p *nativeProjection) markAllRestoreLocked() {

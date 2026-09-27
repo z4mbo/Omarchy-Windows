@@ -55,6 +55,7 @@ class NativeLayoutTest(unittest.TestCase):
         class FakeWindow:
             def __init__(self, **_kwargs):
                 self.fullscreen_calls = 0
+                self.unfullscreen_calls = 0
                 self.present_calls = 0
                 self.visible = False
 
@@ -83,7 +84,7 @@ class NativeLayoutTest(unittest.TestCase):
                 self.fullscreen_calls += 1
 
             def unfullscreen(self):
-                pass
+                self.unfullscreen_calls += 1
 
             def close(self):
                 pass
@@ -159,6 +160,30 @@ class NativeLayoutTest(unittest.TestCase):
             controller.apply_catalog([game, failed, {**game, "id": retiring_id}], [])
             controller.views[retiring_id].retire()
             self.assertIn(73, removed_sources)
+
+            # An already-fullscreen host app can appear in the first catalog
+            # before its GTK proxy is mapped. Defer the one request until
+            # Hyprland reports that exact proxy as a mapped client.
+            standalone_id = "e" * 32
+            standalone = {**game, "id": standalone_id, "title": "Blender",
+                          "appGroup": "blender"}
+            controller.apply_catalog([standalone], [])
+            standalone_view = controller.views[standalone_id]
+            self.assertEqual(standalone_view.window.fullscreen_calls, 0)
+            mapped = {"pid": os.getpid(), "title": "Blender" + marker_for(standalone_id),
+                      "address": "0x5678", "mapped": True,
+                      "workspace": {"id": 2, "name": "2"}}
+            controller.apply_catalog([standalone], [mapped])
+            self.assertEqual(standalone_view.window.fullscreen_calls, 1)
+            controller.apply_catalog([standalone], [mapped])
+            self.assertEqual(standalone_view.window.fullscreen_calls, 1)
+            controller.apply_catalog([standalone], [])
+            controller.apply_catalog([standalone], [mapped])
+            self.assertEqual(standalone_view.window.fullscreen_calls, 2)
+            controller.apply_catalog([{**standalone, "fullscreen": False}], [mapped])
+            self.assertEqual(standalone_view.window.unfullscreen_calls, 1)
+            controller.apply_catalog([standalone], [mapped])
+            self.assertEqual(standalone_view.window.fullscreen_calls, 3)
 
     def test_new_fullscreen_game_inherits_client_workspace(self):
         _, clients, _ = state()

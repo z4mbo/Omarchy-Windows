@@ -54,6 +54,23 @@ def candidate_checks(revision, compat_path='/usr/share/try-omarchy/compat-versio
         checks.append(source_smoke_guest().native_fullscreen_workspace_probe(bin_dir))
     if revision >= 38:
         checks.append(source_smoke_guest().native_lua_dispatch_probe(bin_dir))
+    if revision >= 40:
+        checks.extend((
+            'test -x /usr/bin/omarchy-update',
+            'test -x /usr/bin/omarchy-channel-set',
+            'test -x /usr/bin/omarchy-update-available',
+            'test -x /usr/local/lib/try-omarchy/update-gate',
+            'test -x /usr/share/try-omarchy/upstream-commands/omarchy-update',
+        ))
+    if revision >= 41:
+        checks.extend((
+            "grep -Fqx 'Exec=/usr/local/bin/omarchy-windows-open explorer' "
+            "/usr/share/applications/omarchy-windows-explorer.desktop",
+            "grep -Fqx 'Exec=/usr/local/bin/omarchy-windows-open league' "
+            "/usr/share/applications/omarchy-windows-league.desktop",
+            "grep -Fq 'matching_new' /usr/local/bin/omarchy-windows-open",
+            "grep -Fq 'self.mapped = False' /usr/local/bin/omarchy-windows-native",
+        ))
     return ' && '.join(checks)
 
 

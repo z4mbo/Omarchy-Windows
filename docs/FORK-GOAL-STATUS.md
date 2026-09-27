@@ -51,8 +51,12 @@ the native mode must not poll frames or relay application keystrokes.
 
 The first prototype is opt-in and limited to one output. Character Map has
 passed a [physical native input, tiling and workspace test](evidence/NATIVE-DESKTOP-2026-09-27.md).
-Fullscreen, broader app coverage, focus, popup ownership, DPI and reliable
-restoration still need validation before installation or default use. Native rendering removes the existing PNG-stream bottleneck, but does not
+The fresh revision-39 factory image also passed automatic login and its Stay
+Awake default on Windows. Blender launched and accepted native viewport input
+inside its tile, but fullscreen state and workspace return failed. Fullscreen,
+broader app coverage, focus, popup ownership, DPI and reliable restoration still
+need validation before installation or default use. Native rendering removes
+the existing PNG-stream bottleneck, but does not
 prove that all apps behave correctly or that performance equals bare metal.
 
 WSL remains the measured candidate for Linux GPU compute and selected graphics

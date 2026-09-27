@@ -61,6 +61,52 @@ func TestNativeHeartbeatKeepsAppResizeButRepairsLostVisibility(t *testing.T) {
 	}
 }
 
+func TestNativeOwnedForegroundRequiresVisibleGrantedOwnerAndSameProcess(t *testing.T) {
+	key := seamlessWindowKey{pid: 73, handle: 0x100}
+	owned := nativeForegroundRelation{root: 0x200, rootOwner: key.handle, pid: key.pid}
+	if !nativeForegroundBelongsToProjected(owned, key, true, true) {
+		t.Fatal("same-process owned popup should keep its granted tile active")
+	}
+	for name, relation := range map[string]nativeForegroundRelation{
+		"same-process unowned": {root: 0x200, rootOwner: 0x200, pid: key.pid},
+		"unrelated owner":      {root: 0x200, rootOwner: 0x300, pid: key.pid},
+		"other process":        {root: 0x200, rootOwner: key.handle, pid: 74},
+		"missing foreground":   {},
+	} {
+		if nativeForegroundBelongsToProjected(relation, key, true, true) {
+			t.Fatalf("accepted %s foreground", name)
+		}
+	}
+	if nativeForegroundBelongsToProjected(owned, key, false, true) {
+		t.Fatal("hidden workspace popup kept projection active")
+	}
+	if nativeForegroundBelongsToProjected(owned, key, true, false) {
+		t.Fatal("stale grant identity kept projection active")
+	}
+	if !nativeForegroundBelongsToProjected(nativeForegroundRelation{root: key.handle, rootOwner: key.handle, pid: key.pid}, key, true, true) {
+		t.Fatal("direct foreground granted window was rejected")
+	}
+}
+
+func TestNativeForegroundSnapshotRejectsReusedWindowIdentity(t *testing.T) {
+	candidate := nativeForegroundWindow{
+		key: seamlessWindowKey{pid: 73, handle: 0x100}, threadID: 91,
+		incarnation: 0x1234, grantProperty: "Omarchy.Windows.Grant.test",
+	}
+	if !nativeForegroundSnapshotIdentity(candidate, 73, 91, 0x1234) {
+		t.Fatal("current granted window identity was rejected")
+	}
+	if nativeForegroundSnapshotIdentity(candidate, 73, 91, 0x5678) ||
+		nativeForegroundSnapshotIdentity(candidate, 74, 91, 0x1234) ||
+		nativeForegroundSnapshotIdentity(candidate, 73, 92, 0x1234) {
+		t.Fatal("changed grant marker, process, or GUI thread was accepted")
+	}
+	candidate.grantProperty = ""
+	if nativeForegroundSnapshotIdentity(candidate, 73, 91, 0x1234) {
+		t.Fatal("missing grant property was accepted")
+	}
+}
+
 func TestTrayReconciliationRetainsHiddenNativeGrant(t *testing.T) {
 	w := seamlessWindow{PID: 4711, handle: 0xabc, Class: "OwnedEditor", Title: "Editor"}
 	backend := &fakeSeamlessBackend{items: []seamlessWindow{w}}
@@ -87,24 +133,86 @@ func TestNativeFullscreenIntentIgnoresProjectorGeometry(t *testing.T) {
 	projected := seamlessRect{100, 200, 900, 700}
 	fullscreen := seamlessRect{0, 0, 2560, 1440}
 	state := &nativeProjectedWindow{fullscreenIntent: true, lastRect: projected, applied: true}
-	if got := nativeResolvedFullscreen(state, projected, true, true, false); !got {
+	if got := nativeResolvedFullscreen(state, projected, true, true, false, false); !got {
 		t.Fatal("projector resize cleared the app's fullscreen intent")
 	}
 	state.fullscreenIntent = false
 	state.lastRect = fullscreen
-	if got := nativeResolvedFullscreen(state, fullscreen, true, true, true); got {
+	if got := nativeResolvedFullscreen(state, fullscreen, true, true, true, false); got {
 		t.Fatal("projector-owned monitor geometry invented app fullscreen")
 	}
 	state.lastRect = projected
-	if got := nativeResolvedFullscreen(state, fullscreen, false, true, true); got {
+	if got := nativeResolvedFullscreen(state, fullscreen, false, true, true, false); got {
 		t.Fatal("hiding the projected window changed fullscreen intent")
 	}
-	if got := nativeResolvedFullscreen(state, fullscreen, true, false, true); got {
+	if got := nativeResolvedFullscreen(state, fullscreen, true, false, true, false); got {
 		t.Fatal("unmeasured app geometry changed fullscreen intent")
 	}
 	state.uncertainMutation = true
-	if got := nativeResolvedFullscreen(state, fullscreen, true, true, true); got {
+	if got := nativeResolvedFullscreen(state, fullscreen, true, true, true, false); got {
 		t.Fatal("uncertain projector mutation was classified as app fullscreen")
+	}
+}
+
+func TestNativeFullscreenExcludesOrdinaryMaximizedWindow(t *testing.T) {
+	tests := []struct {
+		name                                    string
+		covers, known                           bool
+		showCmd                                 uint32
+		wantFullscreen, wantClassificationKnown bool
+	}{
+		{"maximized monitor coverage", true, true, swShowMaximized, false, true},
+		{"normal borderless monitor coverage", true, true, swShowNormal, true, true},
+		{"normal windowed", false, true, swShowNormal, false, true},
+		{"unreadable placement", true, false, 0, false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fullscreen, known := seamlessFullscreenFromPlacement(tc.covers, tc.known, tc.showCmd)
+			if fullscreen != tc.wantFullscreen || known != tc.wantClassificationKnown {
+				t.Fatalf("fullscreen=%t, known=%t; want %t, %t", fullscreen, known,
+					tc.wantFullscreen, tc.wantClassificationKnown)
+			}
+		})
+	}
+}
+
+func TestNativeFullscreenTracksAppStyleChangeWithoutGeometryChange(t *testing.T) {
+	outer := seamlessRect{0, 0, 2560, 1440}
+	maximized := nativeWindowPresentation{style: 0x00c40000, showCmd: swShowMaximized, valid: true}
+	borderless := nativeWindowPresentation{style: 0x80000000, showCmd: swShowMaximized, valid: true}
+	state := &nativeProjectedWindow{lastRect: outer, lastPresentation: maximized, applied: true}
+	if !nativePresentationChanged(maximized, borderless) {
+		t.Fatal("same-rect app style transition was ignored")
+	}
+	fullscreen := nativeFullscreenFromAppPresentation(true, borderless, true, false)
+	if !nativeResolvedFullscreen(state, outer, true, true, fullscreen, true) {
+		t.Fatal("app borderless transition did not set fullscreen intent")
+	}
+	state.fullscreenIntent, state.lastPresentation = true, borderless
+	windowed := nativeFullscreenFromAppPresentation(true, maximized, true, true)
+	if nativeResolvedFullscreen(state, outer, true, true, windowed, true) {
+		t.Fatal("return to decorated maximized style stayed fullscreen")
+	}
+	state.fullscreenIntent, state.lastPresentation = false, maximized
+	if nativeResolvedFullscreen(state, outer, true, true, true, nativePresentationChanged(maximized, maximized)) {
+		t.Fatal("unchanged projector-owned presentation invented fullscreen")
+	}
+	if nativePresentationChanged(maximized, nativeWindowPresentation{}) {
+		t.Fatal("unreadable presentation was treated as an app transition")
+	}
+	if !nativeFullscreenFromAppPresentation(true, borderless, false, true) {
+		t.Fatal("later geometry measurement cleared known borderless fullscreen intent")
+	}
+	modalStyle := maximized
+	modalStyle.style |= 0x08000000 // WS_DISABLED; unrelated to decoration/fullscreen.
+	if nativePresentationChanged(maximized, modalStyle) || nativeDecorationChanged(maximized, modalStyle) {
+		t.Fatal("unrelated modal/visibility style change was treated as fullscreen")
+	}
+	minimized := maximized
+	minimized.showCmd = swShowMinimized
+	if nativeFullscreenFromAppPresentation(true, minimized, true, false) {
+		t.Fatal("minimized placement was classified as fullscreen")
 	}
 }
 
@@ -112,16 +220,16 @@ func TestNativeFullscreenIntentAcceptsIndependentAppResize(t *testing.T) {
 	projected := seamlessRect{100, 200, 900, 700}
 	fullscreen := seamlessRect{0, 0, 2560, 1440}
 	state := &nativeProjectedWindow{lastRect: projected, applied: true}
-	if got := nativeResolvedFullscreen(state, fullscreen, true, true, true); !got {
+	if got := nativeResolvedFullscreen(state, fullscreen, true, true, true, false); !got {
 		t.Fatal("independent app fullscreen transition was missed")
 	}
 	state.fullscreenIntent = true
 	state.lastRect = fullscreen
-	if got := nativeResolvedFullscreen(state, projected, true, true, false); got {
+	if got := nativeResolvedFullscreen(state, projected, true, true, false, false); got {
 		t.Fatal("independent app return to windowed geometry was missed")
 	}
 	state.applied = false // Snapshot exists but the first projection has not run.
-	if got := nativeResolvedFullscreen(state, projected, true, true, false); got {
+	if got := nativeResolvedFullscreen(state, projected, true, true, false, false); got {
 		t.Fatal("app resize before first projection was missed")
 	}
 }
