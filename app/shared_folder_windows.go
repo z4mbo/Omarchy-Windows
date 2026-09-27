@@ -98,7 +98,7 @@ func validateWindowsSharedFolder(path, dataDir, home string) (string, error) {
 		}
 	}
 	if dataDir != "" && pathsOverlapWindows(canonical, dataDir) {
-		return "", fmt.Errorf("the shared folder and Try Omarchy data directory cannot contain each other")
+		return "", fmt.Errorf("the shared folder and Omarchy data directory cannot contain each other")
 	}
 	return canonical, nil
 }

@@ -3,7 +3,7 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"runtime"
 	"sync/atomic"
 	"syscall"
@@ -19,17 +19,18 @@ import (
 // own screen capture on it system-wide, so Omarchy's screenshot binding would
 // otherwise fire together with Snipping Tool.
 
-type forwardedKey struct {
-	qcode string
-	down  bool
-}
+const (
+	wmKeyup    = 0x101
+	wmSyskeyup = 0x105
+)
 
 var (
-	qemuPid   atomic.Uint32 // current QEMU child, set by the supervisor
-	guestUp   atomic.Bool   // supervisor handshake succeeded for this launch
-	winDown   bool          // hook-thread only
-	printDown bool          // hook-thread only
-	keyEvents = make(chan forwardedKey, 64)
+	qemuPid         atomic.Uint32 // current QEMU child, set by the supervisor
+	guestUp         atomic.Bool   // supervisor handshake succeeded for this launch
+	winDown         bool          // hook-thread only
+	printDown       bool          // hook-thread only
+	winKeys         = newWinKeyTransport()
+	nativeKeyRouter nativeProjectionKeyRouter // hook-thread only
 )
 
 // forwardKey hands a key state change to the QMP drain without blocking the
@@ -37,9 +38,9 @@ var (
 func forwardKey(state *bool, qcode string, down bool) uintptr {
 	if down != *state {
 		*state = down
-		select {
-		case keyEvents <- forwardedKey{qcode: qcode, down: down}:
-		default:
+		if !winKeys.enqueue([]nativeQKeyEvent{{QCode: qcode, Down: down}}) {
+			// Recovery releases every possibly delivered down before new input.
+			_ = nativeKeyRouter.Release()
 		}
 	}
 	return 1
@@ -49,16 +50,30 @@ func forwardKey(state *bool, qcode string, down bool) uintptr {
 func releaseKey(state *bool, qcode string) {
 	if *state {
 		*state = false
-		select {
-		case keyEvents <- forwardedKey{qcode: qcode, down: false}:
-		default:
+		if !winKeys.enqueue([]nativeQKeyEvent{{QCode: qcode, Down: false}}) {
+			_ = nativeKeyRouter.Release()
 		}
+	}
+}
+
+func forwardNativeKeys(events []nativeQKeyEvent) {
+	if len(events) != 0 && !winKeys.enqueue(events) {
+		// Preserve consumed physical-up tracking while dropping the active chord.
+		_ = nativeKeyRouter.Release()
 	}
 }
 
 func hookCallback(nCode, wParam, lParam uintptr) uintptr {
 	if int32(nCode) >= 0 {
-		vk := *(*uint32)(unsafe.Pointer(lParam))  // KBDLLHOOKSTRUCT.vkCode
+		vk := *(*uint32)(unsafe.Pointer(lParam)) // KBDLLHOOKSTRUCT.vkCode
+		if wParam == wmKeydown || wParam == wmSyskeydown || wParam == wmKeyup || wParam == wmSyskeyup {
+			down := wParam == wmKeydown || wParam == wmSyskeydown
+			decision := nativeKeyRouter.Step(vk, down, nativeProjectionForeground())
+			forwardNativeKeys(decision.Events)
+			if decision.Swallow {
+				return 1
+			}
+		}
 		if vk == vkF4 && wParam == wmSyskeydown { // Alt+F4 on the VM window
 			if pid := qemuPid.Load(); pid != 0 && foregroundPid() == pid {
 				requestQuitConfirm()
@@ -122,6 +137,13 @@ func runWinKeyHook() {
 				break
 			}
 		}
+		if !nativeProjectionForeground() {
+			forwardNativeKeys(nativeKeyRouter.Release())
+		}
+		if pid := qemuPid.Load(); pid == 0 || foregroundPid() != pid {
+			releaseKey(&winDown, "meta_l")
+			releaseKey(&printDown, "print")
+		}
 		procUnhookWindowsHookEx.Call(h)
 		h = install()
 		if h == 0 {
@@ -138,34 +160,24 @@ func runWinKeyHook() {
 func runWinKeyQmp() {
 	for {
 		if !guestUp.Load() {
+			winKeys.invalidate()
 			time.Sleep(time.Second)
 			continue
 		}
-		c := qmpConnect(qmpFwdPort, 8*time.Second)
-		if c == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		c, err := dialQMPControl(ctx, qmpFwdPort)
+		cancel()
+		if err != nil {
+			winKeys.invalidate()
 			time.Sleep(2 * time.Second)
 			continue
 		}
 		logf("winkey: QMP connected on %d", qmpFwdPort)
-		lines := c.readLines()
-	drain:
-		for {
-			select {
-			case key := <-keyEvents:
-				if key.qcode != "meta_l" && key.down {
-					logf("winkey: forwarded %s to the guest", key.qcode)
-				}
-				ev := fmt.Sprintf(`{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":%t,"key":{"type":"qcode","data":%q}}}]}}`, key.down, key.qcode)
-				if err := c.writeLine(ev); err != nil {
-					break drain
-				}
-			case _, ok := <-lines:
-				if !ok {
-					break drain
-				}
-			}
+		err = winKeys.runSession(context.Background(), qmpWinKeySender{client: c}, guestUp.Load)
+		if err != nil && guestUp.Load() {
+			logf("winkey: QMP input unavailable: %v", err)
 		}
-		c.close()
+		c.Close()
 		time.Sleep(2 * time.Second)
 	}
 }

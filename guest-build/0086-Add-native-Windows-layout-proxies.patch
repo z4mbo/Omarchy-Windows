@@ -1,0 +1,838 @@
+From 46a177fd3360bbae1ba9095caffd028a3da776a9 Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sat, 26 Sep 2026 20:01:45 +0200
+Subject: [PATCH] Add opt-in native Windows layout proxies and mode negotiation
+
+---
+ .../usr/local/bin/omarchy-windows-native      | 338 ++++++++++++++++++
+ .../usr/local/bin/omarchy-windows-open        |  17 +-
+ .../bin/omarchy_windows_native_layout.py      | 136 +++++++
+ .../usr/local/bin/omarchy_windows_protocol.py |  28 +-
+ guest/scripts/finalize-rootfs.sh              |   4 +-
+ guest/tests/test_windows_native_layout.py     | 110 ++++++
+ guest/tests/test_windows_present_protocol.py  |  26 ++
+ guest/tests/verify.py                         |   9 +-
+ 8 files changed, 658 insertions(+), 10 deletions(-)
+ create mode 100755 guest/factory-overlay/usr/local/bin/omarchy-windows-native
+ create mode 100644 guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
+ create mode 100755 guest/tests/test_windows_native_layout.py
+
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-native b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+new file mode 100755
+index 0000000..b76dac0
+--- /dev/null
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+@@ -0,0 +1,338 @@
++#!/usr/bin/env python3
++"""Opt-in native Windows HWND projection controlled by Hyprland proxy tiles.
++
++No pixels or synthetic input cross this guest process. The authenticated host
++bridge positions its own granted HWNDs over the corresponding GTK tiles.
++"""
++
++from __future__ import annotations
++
++import argparse
++import fcntl
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import threading
++import time
++import urllib.error
++
++from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, output_state, parse_layout_ack, parse_locked, parse_presentation
++from omarchy_windows_protocol import Bridge, BridgeError, load_token
++
++POLL_SECONDS = 0.4
++HYPRCTL_TIMEOUT = 0.5
++EXCLUDED_PROCESSES = {"tryomarchy.exe", "qemu-system-x86_64.exe", "qemu-system-x86_64w.exe"}
++
++
++class AlreadyRunning(Exception):
++    """An existing controller already follows every newly granted window."""
++
++
++def hyprctl_json(command: str) -> object:
++    if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
++        raise LayoutError("Open native Windows apps from the Omarchy desktop.")
++    try:
++        result = subprocess.run(["hyprctl", "-j", command], capture_output=True,
++                                text=True, timeout=HYPRCTL_TIMEOUT, check=True)
++        return json.loads(result.stdout)
++    except (OSError, subprocess.SubprocessError, ValueError) as exc:
++        raise LayoutError(f"Hyprland {command} state is unavailable.") from exc
++
++
++def presentation_probe(bridge: Bridge) -> None:
++    try:
++        parse_presentation(json.loads(bridge.request("/v1/presentation", timeout=1)))
++    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
++        raise LayoutError("The host returned an invalid native presentation response.") from exc
++
++
++def singleton_lock() -> int:
++    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", ""))
++    if not runtime.is_dir() or runtime == Path("."):
++        raise LayoutError("The Omarchy user runtime directory is unavailable.")
++    fd = os.open(runtime / "omarchy-windows-native.lock", os.O_CREAT | os.O_RDWR, 0o600)
++    try:
++        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError as exc:
++        os.close(fd)
++        raise AlreadyRunning from exc
++    return fd
++
++
++def eligible(catalog: list[dict]) -> list[dict]:
++    allowed = []
++    for item in catalog:
++        process = item["process"].replace("\\", "/").rsplit("/", 1)[-1].lower()
++        if process not in EXCLUDED_PROCESSES:
++            marker_for(item["id"])  # Reject invalid IDs before any layout is sent.
++            allowed.append(item)
++    if len(allowed) > 8:
++        raise LayoutError("More than eight native Windows windows are granted; close some on Windows.")
++    return allowed
++
++
++def hidden_layout(output: dict, catalog: list[dict]) -> dict:
++    return {"output": output, "windows": [
++        {"id": item["id"], "x": 0, "y": 0, "width": 1, "height": 1, "visible": False}
++        for item in catalog]}
++
++
++def start_gtk(bridge: Bridge, lock_fd: int) -> int:
++    try:
++        import gi
++        gi.require_version("Gtk", "4.0")
++        from gi.repository import Gio, GLib, Gtk
++    except (ImportError, ValueError) as exc:
++        print(f"Native Windows apps need GTK4 and python-gobject: {exc}", file=sys.stderr)
++        os.close(lock_fd)
++        return 1
++
++    class NativeWindow:
++        def __init__(self, controller: "Controller", metadata: dict):
++            self.controller = controller
++            self.ident = metadata["id"]
++            self.window = Gtk.ApplicationWindow(application=controller)
++            self.window.set_title((metadata["title"] or metadata["process"] or "Windows app") + marker_for(self.ident))
++            self.window.set_default_size(min(metadata["width"], 1100), min(metadata["height"], 750))
++            label = Gtk.Label(label="This Windows app is drawn directly by Windows in this Omarchy tile.")
++            label.set_wrap(True)
++            self.window.set_child(label)
++            self.close_handler = self.window.connect("close-request", self.close)
++            self.fullscreen = False
++            self.window.present()
++            self.update(metadata)
++
++        def update(self, metadata: dict) -> None:
++            self.window.set_title((metadata["title"] or metadata["process"] or "Windows app") + marker_for(self.ident))
++            wanted = metadata["fullscreen"] is True
++            if wanted != self.fullscreen:
++                self.fullscreen = wanted
++                if wanted:
++                    self.window.fullscreen()
++                else:
++                    self.window.unfullscreen()
++
++        def close(self, *_args: object) -> bool:
++            self.controller.dismiss(self.ident)
++            return False
++
++        def retire(self) -> None:
++            self.window.disconnect(self.close_handler)
++            self.window.close()
++
++    class Controller(Gtk.Application):
++        def __init__(self):
++            super().__init__(application_id="dev.omarchy.WindowsNative", flags=Gio.ApplicationFlags.NON_UNIQUE)
++            self.bridge = bridge
++            self.stop = threading.Event()
++            self.state_lock = threading.Lock()
++            self.dismissed: set[str] = set()
++            self.pending_close: dict[str, tuple[int, float]] = {}
++            self.views: dict[str, NativeWindow] = {}
++            self.last_output: dict | None = None
++            self.last_catalog: list[dict] = []
++            self.sequence = 0
++            self.worker: threading.Thread | None = None
++            self.status = None
++            self.status_label = None
++            self.error = ""
++
++        def do_activate(self):
++            if self.worker is not None:
++                return
++            self.hold()
++            self.status = Gtk.ApplicationWindow(application=self)
++            self.status.set_title("Native Windows apps in Omarchy")
++            self.status.set_default_size(430, 110)
++            self.status_label = Gtk.Label(label="Connecting to the Windows app bridge…")
++            self.status_label.set_wrap(True)
++            self.status.set_child(self.status_label)
++            self.status.connect("close-request", lambda *_args: self.quit() or False)
++            self.status.present()
++            self.worker = threading.Thread(target=self.run_controller, name="omarchy-native-layout", daemon=True)
++            self.worker.start()
++
++        def do_shutdown(self):
++            self.stop.set()
++            if self.worker is not None:
++                self.worker.join(timeout=3)
++            super().do_shutdown()
++
++        def dismiss(self, ident: str) -> None:
++            with self.state_lock:
++                self.dismissed.add(ident)
++                self.pending_close[ident] = (0, 0.0)
++            self.views.pop(ident, None)
++
++        def update_status(self) -> None:
++            if self.status is None:
++                return
++            message = self.error or ("No native Windows app windows are open. Close this controller or open an app on Windows."
++                                     if not self.views else "")
++            if message:
++                if self.status_label.get_text() != message:
++                    self.status_label.set_text(message)
++                # A repeated catalog/error poll must not steal the app's focus.
++                if not self.status.get_visible():
++                    self.status.present()
++            elif self.status.get_visible():
++                self.status.hide()
++
++        def apply_catalog(self, catalog: list[dict]) -> bool:
++            with self.state_lock:
++                dismissed = set(self.dismissed)
++            live = {item["id"] for item in catalog}
++            for ident in list(self.views):
++                if ident not in live:
++                    self.views.pop(ident).retire()
++            for metadata in catalog:
++                ident = metadata["id"]
++                if ident in dismissed:
++                    continue
++                if ident in self.views:
++                    self.views[ident].update(metadata)
++                else:
++                    self.views[ident] = NativeWindow(self, metadata)
++            self.update_status()
++            return False
++
++        def show_error(self, message: str) -> bool:
++            self.error = message
++            self.update_status()
++            return False
++
++        def clear_error(self) -> bool:
++            self.error = ""
++            self.update_status()
++            return False
++
++        def send(self, layout: dict) -> str:
++            self.sequence = max(self.sequence + 1, time.monotonic_ns())
++            body = {"sequence": self.sequence, **layout}
++            try:
++                response = json.loads(self.bridge.request("/v1/layout", payload=body, timeout=0.6))
++            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
++                raise LayoutError("The host returned an invalid layout acknowledgement.") from exc
++            return parse_layout_ack(response)
++
++        def flush_pending_close(self) -> None:
++            now = time.monotonic()
++            with self.state_lock:
++                ready = next(((ident, attempts) for ident, (attempts, when) in self.pending_close.items()
++                              if when <= now), None)
++            if ready is None:
++                return
++            ident, attempts = ready
++            try:
++                # Reuse the authenticated close endpoint, with a short per-try
++                # timeout so one stalled close cannot starve layout renewal.
++                self.bridge.request(self.bridge.window_path(ident) + "/close", payload={}, timeout=0.5)
++            except BridgeError as exc:
++                if isinstance(exc.__cause__, urllib.error.HTTPError) and exc.__cause__.code == 404:
++                    with self.state_lock:
++                        self.pending_close.pop(ident, None)
++                    return  # Already closed on the host.
++                with self.state_lock:
++                    if ident in self.pending_close:
++                        self.pending_close[ident] = (min(attempts + 1, 4),
++                                                     now + min(5.0, 0.5 * (2 ** attempts)))
++                GLib.idle_add(self.show_error, "A Windows app could not be closed yet. Omarchy will retry.")
++                return
++            with self.state_lock:
++                self.pending_close.pop(ident, None)
++
++        def run_controller(self) -> None:
++            try:
++                while not self.stop.is_set():
++                    started = time.monotonic()
++                    try:
++                        catalog = eligible(self.bridge.windows(timeout=0.7))
++                        with self.state_lock:
++                            live = {item["id"] for item in catalog}
++                            # A temporarily hidden/minimized host window can
++                            # disappear from the catalog before /close succeeds.
++                            self.dismissed.intersection_update(live | self.pending_close.keys())
++                            dismissed = set(self.dismissed)
++                        catalog = [item for item in catalog if item["id"] not in dismissed]
++                        self.last_catalog = catalog
++                        GLib.idle_add(self.apply_catalog, catalog)
++                        monitors = hyprctl_json("monitors")
++                        output, _monitor = output_state(monitors)
++                        self.last_output = output
++                        layout_error = False
++                        try:
++                            clients = hyprctl_json("clients")
++                            locked = parse_locked(hyprctl_json("locked"))
++                            layout = compute_layout(catalog, clients, monitors, locked, os.getpid())
++                        except LayoutError as exc:
++                            layout_error = True
++                            layout = hidden_layout(output, catalog)
++                            GLib.idle_add(self.show_error, f"Native windows are hidden: {exc}")
++                        suspension = self.send(layout)
++                        if not layout_error:
++                            if suspension == "aspect_mismatch":
++                                GLib.idle_add(self.show_error, "Native Windows apps are hidden because the Omarchy and Windows display shapes do not match. Resize the Omarchy window or use matching display settings.")
++                            elif suspension == "display_unavailable":
++                                GLib.idle_add(self.show_error, "Native Windows apps are hidden because the Omarchy display window is unavailable. Restore the Omarchy window.")
++                            else:
++                                # host_inactive is expected while another host
++                                # window has focus; it must not raise a popup.
++                                GLib.idle_add(self.clear_error)
++                    except (BridgeError, LayoutError) as exc:
++                        GLib.idle_add(self.show_error, str(exc))
++                        # Keep native content hidden through transient Hyprland
++                        # failures when an authenticated session remains reachable.
++                        if self.last_output is not None:
++                            try:
++                                self.send(hidden_layout(self.last_output, self.last_catalog))
++                            except (BridgeError, LayoutError):
++                                pass
++                    finally:
++                        # A layout or monitor failure cannot discard a user's
++                        # close request. One bounded retry runs each cycle.
++                        self.flush_pending_close()
++                    self.stop.wait(max(0, POLL_SECONDS - (time.monotonic() - started)))
++            finally:
++                # Omission releases every host HWND immediately. The host lease
++                # is the fallback if this process or transport dies first.
++                if self.last_output is not None:
++                    try:
++                        self.send({"output": self.last_output, "windows": []})
++                    except (BridgeError, LayoutError):
++                        pass
++
++    try:
++        return Controller().run([])
++    finally:
++        os.close(lock_fd)
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description="Show native Windows apps in Omarchy-managed tiles")
++    parser.add_argument("--probe", action="store_true", help="check native host mode and grants without opening windows")
++    parser.add_argument("--id", help="granted Windows window selected by the app picker")
++    parser.add_argument("--group", help="Windows application group selected by the app picker")
++    args = parser.parse_args()
++    try:
++        bridge = Bridge(load_token())
++        presentation_probe(bridge)
++        catalog = eligible(bridge.windows())
++        if args.id is not None and args.id not in {item["id"] for item in catalog}:
++            raise LayoutError("The selected Windows window is no longer granted by the host.")
++        if args.probe:
++            return 0
++        if not os.environ.get("WAYLAND_DISPLAY") or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
++            raise LayoutError("Open native Windows apps from the Omarchy desktop.")
++        lock_fd = singleton_lock()
++    except AlreadyRunning:
++        return 0
++    except (BridgeError, LayoutError, OSError) as exc:
++        print(str(exc), file=sys.stderr)
++        return 1
++    return start_gtk(bridge, lock_fd)
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-open b/guest/factory-overlay/usr/local/bin/omarchy-windows-open
+index 34dc857..c18b2ad 100755
+--- a/guest/factory-overlay/usr/local/bin/omarchy-windows-open
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-open
+@@ -53,20 +53,24 @@ def choose_window(windows: list[dict]) -> dict | None:
+ 
+ def main() -> int:
+     scripts = Path(__file__).resolve().parent
+-    presenter = scripts / "omarchy-windows-present"
+     picker = scripts / "omarchy-windows-app"
+     if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+         message("Open this from the Omarchy desktop.")
+         return 1
+-    if not presenter.is_file() or not picker.is_file():
++    if not picker.is_file():
+         message("The Windows app integration is incomplete. Update Omarchy.")
+         return 1
+     try:
+         bridge = Bridge(load_token())
++        mode = bridge.presentation_mode()
++        presenter = scripts / ("omarchy-windows-native" if mode == "native" else "omarchy-windows-present")
+         before = bridge.windows()
+     except BridgeError as exc:
+         message(str(exc))
+         return 1
++    if not presenter.is_file():
++        message("The selected Windows app integration is missing. Update the Omarchy guest integration.")
++        return 1
+     if subprocess.run([str(presenter), "--probe"], check=False).returncode != 0:
+         message("The per-window presenter is unavailable. Check GTK4 and the Omarchy Windows launcher.")
+         return 1
+@@ -94,13 +98,18 @@ def main() -> int:
+             break
+         time.sleep(0.3)
+ 
+-    selected = choose_window(new_windows or all_windows)
++    # Native mode uses one controller for the complete granted layout. Starting
++    # separate controllers per app would make them restore each other's windows.
++    selected = (next(iter(new_windows or all_windows), None) if mode == "native"
++                else choose_window(new_windows or all_windows))
+     if selected is None:
+         message("The app opened on Windows, but no window was selected for the Omarchy preview. Use the host display or try again.")
+         return 1
+     try:
++        arguments = ([str(presenter)] if mode == "native" else
++                     [str(presenter), "--id", selected["id"], "--group", selected["appGroup"]])
+         subprocess.Popen(
+-            [str(presenter), "--id", selected["id"], "--group", selected["appGroup"]],
++            arguments,
+             stdin=subprocess.DEVNULL,
+             stdout=subprocess.DEVNULL,
+             stderr=subprocess.DEVNULL,
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py b/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
+new file mode 100644
+index 0000000..ef51781
+--- /dev/null
++++ b/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
+@@ -0,0 +1,136 @@
++"""Pure, fail-closed Hyprland-to-host layout translation for native projection."""
++
++from __future__ import annotations
++
++import hashlib
++import math
++import re
++
++MAX_WINDOWS = 8
++MAX_DIMENSION = 8192
++WINDOW_ID = re.compile(r"[0-9a-f]{32}\Z")
++
++
++class LayoutError(ValueError):
++    """Hyprland state cannot be mapped safely onto the host output."""
++
++
++def _integer(value: object) -> bool:
++    return isinstance(value, int) and not isinstance(value, bool)
++
++
++def marker_for(ident: str) -> str:
++    if not isinstance(ident, str) or not WINDOW_ID.fullmatch(ident):
++        raise LayoutError("The host provided an invalid native window ID.")
++    return f" [Omarchy Native {hashlib.sha256(ident.encode('ascii')).hexdigest()[:16]}]"
++
++
++def parse_presentation(document: object) -> None:
++    if not isinstance(document, dict) or type(document.get("protocol")) is not int or document["protocol"] != 1:
++        raise LayoutError("The host does not support native window protocol 1.")
++    mode = document.get("mode")
++    if mode != "native":
++        if mode == "capture":
++            raise LayoutError("Native Windows presentation is disabled in the Windows launcher.")
++        raise LayoutError("The host returned an unknown window presentation mode.")
++
++
++def parse_layout_ack(document: object) -> str:
++    """Return the host suspension reason from an acknowledged full layout."""
++    if not isinstance(document, dict) or document.get("accepted") is not True:
++        raise LayoutError("The host rejected the native window layout.")
++    reason = document.get("suspended", "")
++    if reason not in ("", "host_inactive", "display_unavailable", "aspect_mismatch"):
++        raise LayoutError("The host returned an unknown native window suspension reason.")
++    return reason
++
++
++def parse_locked(document: object) -> bool:
++    """Accept explicit lock state only; missing/unknown state must hide windows."""
++    if isinstance(document, bool):
++        return document
++    if isinstance(document, dict) and isinstance(document.get("locked"), bool):
++        return document["locked"]
++    raise LayoutError("Hyprland lock state is unavailable.")
++
++
++def output_state(monitors: object) -> tuple[dict, dict]:
++    if not isinstance(monitors, list) or len(monitors) != 1 or not isinstance(monitors[0], dict):
++        raise LayoutError("Native windows currently require exactly one Omarchy output.")
++    monitor = monitors[0]
++    for key in ("id", "x", "y", "width", "height", "transform"):
++        if not _integer(monitor.get(key)):
++            raise LayoutError(f"Hyprland returned an invalid output {key}.")
++    width, height = monitor["width"], monitor["height"]
++    if not (64 <= width <= MAX_DIMENSION and 64 <= height <= MAX_DIMENSION):
++        raise LayoutError("The Omarchy output dimensions are unsupported.")
++    scale = monitor.get("scale")
++    if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale != 1:
++        raise LayoutError("Native windows currently require output scale 100%.")
++    if monitor["transform"] != 0:
++        raise LayoutError("Native windows currently require an unrotated output.")
++    workspace = monitor.get("activeWorkspace")
++    if not isinstance(workspace, dict) or not _integer(workspace.get("id")) or workspace["id"] <= 0:
++        raise LayoutError("The active Omarchy workspace is unknown.")
++    special = monitor.get("specialWorkspace")
++    if not isinstance(special, dict) or not _integer(special.get("id")):
++        raise LayoutError("The Omarchy special workspace state is unknown.")
++    return {"width": width, "height": height}, monitor
++
++
++def compute_layout(windows: object, clients: object, monitors: object, locked: bool, pid: int) -> dict:
++    output, monitor = output_state(monitors)
++    if not isinstance(locked, bool):
++        raise LayoutError("The Omarchy lock state is unknown.")
++    if not isinstance(windows, list) or len(windows) > MAX_WINDOWS:
++        raise LayoutError("Too many native Windows windows are selected.")
++    if not isinstance(clients, list):
++        raise LayoutError("Hyprland returned an invalid client list.")
++    if not _integer(pid) or pid <= 0:
++        raise LayoutError("The native proxy process is unknown.")
++    ids = [item.get("id") if isinstance(item, dict) else None for item in windows]
++    if len(ids) != len(set(ids)):
++        raise LayoutError("The host returned duplicate native window IDs.")
++    result = []
++    for ident in ids:
++        marker = marker_for(ident)
++        matches = [client for client in clients if isinstance(client, dict)
++                   and client.get("pid") == pid and isinstance(client.get("title"), str)
++                   and client["title"].endswith(marker)]
++        if len(matches) > 1:
++            raise LayoutError("Hyprland returned duplicate native proxy windows.")
++        hidden = {"id": ident, "x": 0, "y": 0, "width": 1, "height": 1, "visible": False}
++        if not matches:
++            result.append(hidden)
++            continue
++        client = matches[0]
++        workspace = client.get("workspace")
++        if not isinstance(workspace, dict) or not _integer(workspace.get("id")):
++            raise LayoutError("The native proxy workspace is unknown.")
++        name = workspace.get("name")
++        if not isinstance(name, str):
++            raise LayoutError("The native proxy workspace name is unknown.")
++        special = monitor["specialWorkspace"]
++        active = monitor["activeWorkspace"]
++        visible = (not locked and monitor.get("dpmsStatus") is True
++                   and special["id"] == 0 and not name.startswith("special:")
++                   and client.get("mapped") is True and client.get("visible") is True
++                   and client.get("hidden") is False and client.get("monitor") == monitor["id"]
++                   and (workspace["id"] == active["id"] or client.get("pinned") is True))
++        if not visible:
++            result.append(hidden)
++            continue
++        at, size = client.get("at"), client.get("size")
++        if not (isinstance(at, list) and isinstance(size, list) and len(at) == len(size) == 2
++                and all(_integer(value) for value in at + size)):
++            raise LayoutError("Hyprland returned malformed native proxy coordinates.")
++        x, y = at[0] - monitor["x"], at[1] - monitor["y"]
++        width, height = size
++        if not (0 <= x < output["width"] and 0 <= y < output["height"]
++                and 0 < width <= output["width"] - x and 0 < height <= output["height"] - y):
++            # An offscreen or partly cropped proxy must not steer the host window.
++            result.append(hidden)
++            continue
++        result.append({"id": ident, "x": x, "y": y, "width": width,
++                       "height": height, "visible": True})
++    return {"output": output, "windows": result}
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy_windows_protocol.py b/guest/factory-overlay/usr/local/bin/omarchy_windows_protocol.py
+index fe3f9b5..afc3a31 100644
+--- a/guest/factory-overlay/usr/local/bin/omarchy_windows_protocol.py
++++ b/guest/factory-overlay/usr/local/bin/omarchy_windows_protocol.py
+@@ -17,7 +17,7 @@ import urllib.request
+ BASE_URL = "http://10.0.2.2:4457"
+ TOKEN_FILE = Path("/run/try-omarchy/seamless-token")
+ MAX_JSON = 1024 * 1024
+-MAX_PNG = 16 * 1024 * 1024
++MAX_PNG = 64 * 1024 * 1024
+ MAX_IMAGE_DIMENSION = 8192
+ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+ 
+@@ -111,9 +111,9 @@ class Bridge:
+     def window_path(ident: str) -> str:
+         return "/v1/windows/" + urllib.parse.quote(ident, safe="")
+ 
+-    def windows(self) -> list[dict]:
++    def windows(self, *, timeout: float = 2) -> list[dict]:
+         try:
+-            document = json.loads(self.request("/v1/windows"))
++            document = json.loads(self.request("/v1/windows", timeout=timeout))
+         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+             raise BridgeError("The Windows bridge returned invalid window data.") from exc
+         raw = document.get("windows") if isinstance(document, dict) else None
+@@ -121,8 +121,28 @@ class Bridge:
+             raise BridgeError("The Windows bridge returned an invalid window list.")
+         return [validate_window(item) for item in raw]
+ 
++    def presentation_mode(self) -> str:
++        """Select the host's transport; never silently capture in native mode."""
++        try:
++            document = json.loads(self.request("/v1/presentation"))
++        except BridgeError as exc:
++            # Older launchers predate negotiation and only support capture.
++            # Authentication, transport, and other errors must remain errors.
++            cause = exc.__cause__
++            if isinstance(cause, urllib.error.HTTPError) and cause.code == 404:
++                return "capture"
++            raise
++        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
++            raise BridgeError("The Windows bridge returned an invalid presentation mode.") from exc
++        if (not isinstance(document, dict)
++                or type(document.get("protocol")) is not int
++                or document["protocol"] != 1
++                or document.get("mode") not in ("capture", "native")):
++            raise BridgeError("The Windows bridge presentation mode is unsupported. Update the guest integration.")
++        return document["mode"]
++
+     def frame(self, ident: str) -> tuple[bytes, tuple[int, int]]:
+-        image = self.request(self.window_path(ident) + "/frame", limit=MAX_PNG, timeout=2)
++        image = self.request(self.window_path(ident) + "/frame", limit=MAX_PNG, timeout=6)
+         return image, validate_png(image)
+ 
+     def input(self, ident: str, payload: dict) -> None:
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index 0bc5552..d6a377a 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -107,6 +107,8 @@ compat_paths=(
+   usr/local/bin/omarchy-windows-desktop
+   usr/local/bin/omarchy-windows-open
+   usr/local/bin/omarchy-windows-present
++  usr/local/bin/omarchy-windows-native
++  usr/local/bin/omarchy_windows_native_layout.py
+   usr/local/bin/omarchy_windows_protocol.py
+   usr/local/bin/omarchy_windows_presenter_input.py
+   usr/local/lib/try-omarchy/export-seamless-token
+@@ -168,7 +170,7 @@ kernel_release=$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d -printf '
+ # the transfer fallback when a direct paste cannot be confirmed.
+ # Revision 28 receives file drops in the background directly into folders.
+ # Revision 30 adds Windows Apps and first-run Moonlight launchers.
+-compat_revision=33
++compat_revision=34
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Fail the build if DKMS or networking modules were not packaged for this kernel.
+diff --git a/guest/tests/test_windows_native_layout.py b/guest/tests/test_windows_native_layout.py
+new file mode 100755
+index 0000000..7ed0db3
+--- /dev/null
++++ b/guest/tests/test_windows_native_layout.py
+@@ -0,0 +1,110 @@
++"""Recorded Hyprland client shape and native projection safety cases."""
++
++import copy
++from pathlib import Path
++import sys
++import unittest
++
++script_dir = Path(__file__).resolve().parent
++helper_dir = script_dir if (script_dir / "omarchy_windows_native_layout.py").exists() else script_dir.parent / "factory-overlay/usr/local/bin"
++sys.path.insert(0, str(helper_dir))
++
++from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, parse_layout_ack, parse_locked, parse_presentation
++
++WINDOW_ID = "a" * 32
++PID = 4607
++
++
++def state():
++    windows = [{"id": WINDOW_ID}]
++    monitors = [{
++        "id": 0, "name": "Virtual-1", "x": 0, "y": 0, "width": 1280,
++        "height": 720, "scale": 1.0, "transform": 0, "dpmsStatus": True,
++        "activeWorkspace": {"id": 1, "name": "1"},
++        "specialWorkspace": {"id": 0, "name": ""},
++    }]
++    # Client fields are from the disposable guest's recorded hyprctl output.
++    clients = [{
++        "address": "0x563190857090", "mapped": True, "hidden": False,
++        "visible": True, "at": [490, 260], "size": [300, 226],
++        "workspace": {"id": 1, "name": "1"}, "monitor": 0,
++        "pid": PID, "pinned": False, "title": "Character Map" + marker_for(WINDOW_ID),
++    }]
++    return windows, clients, monitors
++
++
++class NativeLayoutTest(unittest.TestCase):
++    def test_mapped_client_uses_output_relative_rect(self):
++        windows, clients, monitors = state()
++        monitors[0]["x"] = 100
++        monitors[0]["y"] = 50
++        layout = compute_layout(windows, clients, monitors, False, PID)
++        self.assertEqual(layout, {"output": {"width": 1280, "height": 720}, "windows": [
++            {"id": WINDOW_ID, "x": 390, "y": 210, "width": 300, "height": 226, "visible": True}]})
++
++    def test_workspace_lock_sleep_special_and_offscreen_hide(self):
++        for variant in ("workspace", "lock", "sleep", "special", "offscreen", "missing", "wrong_pid"):
++            with self.subTest(variant=variant):
++                windows, clients, monitors = state()
++                locked = False
++                if variant == "workspace":
++                    monitors[0]["activeWorkspace"]["id"] = 2
++                elif variant == "lock":
++                    locked = True
++                elif variant == "sleep":
++                    monitors[0]["dpmsStatus"] = False
++                elif variant == "special":
++                    monitors[0]["specialWorkspace"]["id"] = -99
++                elif variant == "offscreen":
++                    clients[0]["at"] = [1200, 260]
++                elif variant == "missing":
++                    clients = []
++                else:
++                    clients[0]["pid"] = PID + 1
++                layout = compute_layout(windows, clients, monitors, locked, PID)
++                self.assertEqual(layout["windows"], [
++                    {"id": WINDOW_ID, "x": 0, "y": 0, "width": 1, "height": 1, "visible": False}])
++
++    def test_ambiguous_or_unsupported_state_fails_closed(self):
++        for mutation in ("two_outputs", "scale", "transform", "missing_special", "bad_client_geometry", "duplicate"):
++            with self.subTest(mutation=mutation):
++                windows, clients, monitors = state()
++                if mutation == "two_outputs":
++                    monitors.append(copy.deepcopy(monitors[0]))
++                elif mutation == "scale":
++                    monitors[0]["scale"] = 1.25
++                elif mutation == "transform":
++                    monitors[0]["transform"] = 1
++                elif mutation == "missing_special":
++                    del monitors[0]["specialWorkspace"]
++                elif mutation == "bad_client_geometry":
++                    clients[0]["size"] = [False, 200]
++                else:
++                    clients.append(copy.deepcopy(clients[0]))
++                with self.assertRaises(LayoutError):
++                    compute_layout(windows, clients, monitors, False, PID)
++
++    def test_mode_and_lock_require_explicit_values(self):
++        parse_presentation({"mode": "native", "protocol": 1})
++        self.assertFalse(parse_locked({"locked": False}))
++        self.assertTrue(parse_locked(True))
++        for document in ({"mode": "capture", "protocol": 1}, {"mode": "native", "protocol": 2}):
++            with self.assertRaises(LayoutError):
++                parse_presentation(document)
++        for document in (None, {}, {"locked": "false"}):
++            with self.assertRaises(LayoutError):
++                parse_locked(document)
++
++    def test_layout_ack_distinguishes_focus_suspension_from_display_failure(self):
++        self.assertEqual(parse_layout_ack({"accepted": True}), "")
++        self.assertEqual(parse_layout_ack({"accepted": True, "suspended": "host_inactive"}), "host_inactive")
++        self.assertEqual(parse_layout_ack({"accepted": True, "suspended": "aspect_mismatch"}), "aspect_mismatch")
++        self.assertEqual(parse_layout_ack({"accepted": True, "suspended": "display_unavailable"}), "display_unavailable")
++        for document in (None, {}, {"accepted": False}, {"accepted": 1},
++                         {"accepted": True, "suspended": "other"}):
++            with self.assertRaises(LayoutError):
++                parse_layout_ack(document)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/guest/tests/test_windows_present_protocol.py b/guest/tests/test_windows_present_protocol.py
+index bda6a11..6da77b2 100644
+--- a/guest/tests/test_windows_present_protocol.py
++++ b/guest/tests/test_windows_present_protocol.py
+@@ -7,6 +7,8 @@ import sys
+ import tempfile
+ import threading
+ import unittest
++from unittest.mock import patch
++from urllib.error import HTTPError
+ 
+ script_dir = Path(__file__).resolve().parent
+ protocol_dir = script_dir if (script_dir / "omarchy_windows_protocol.py").exists() else script_dir.parent / "factory-overlay/usr/local/bin"
+@@ -48,6 +50,30 @@ class Handler(BaseHTTPRequestHandler):
+ 
+ 
+ class ProtocolTests(unittest.TestCase):
++    def test_presentation_mode_requires_supported_explicit_protocol(self):
++        bridge = Bridge(TOKEN)
++        for mode in ("native", "capture"):
++            with patch.object(bridge, "request", return_value=(
++                    '{"mode":"' + mode + '","protocol":1}').encode()):
++                self.assertEqual(bridge.presentation_mode(), mode)
++        for data in (b'{}', b'[]', b'not json', b'{"mode":"native","protocol":true}',
++                     b'{"mode":"native","protocol":2}', b'{"mode":"unknown","protocol":1}'):
++            with self.subTest(data=data), patch.object(bridge, "request", return_value=data):
++                with self.assertRaises(BridgeError):
++                    bridge.presentation_mode()
++
++    def test_only_legacy_not_found_falls_back_to_capture(self):
++        bridge = Bridge(TOKEN)
++        for status in (404, 401, 409, 500):
++            error = BridgeError("host response")
++            error.__cause__ = HTTPError("http://127.0.0.1/v1/presentation", status, "test", {}, None)
++            with self.subTest(status=status), patch.object(bridge, "request", side_effect=error):
++                if status == 404:
++                    self.assertEqual(bridge.presentation_mode(), "capture")
++                else:
++                    with self.assertRaises(BridgeError):
++                        bridge.presentation_mode()
++
+     def test_token_must_be_64_hex_digits(self):
+         with tempfile.TemporaryDirectory() as directory:
+             path = Path(directory) / "token"
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index 49767d9..cb29222 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -266,7 +266,7 @@ def main() -> None:
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     compat_paths = finalize_rootfs.split("compat_paths=(", 1)[1].split(")", 1)[0]
+     check(
+-        "compat_revision=33" in finalize_rootfs
++        "compat_revision=34" in finalize_rootfs
+         and "usr/local/lib/try-omarchy/catch-up" in compat_paths
+         and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
+         and "etc/skel/.config/nvim/lua/plugins/theme.lua" in compat_paths
+@@ -307,6 +307,8 @@ def main() -> None:
+     windows_desktop = GUEST / "factory-overlay/usr/local/bin/omarchy-windows-desktop"
+     windows_open = GUEST / "factory-overlay/usr/local/bin/omarchy-windows-open"
+     windows_present = GUEST / "factory-overlay/usr/local/bin/omarchy-windows-present"
++    windows_native = GUEST / "factory-overlay/usr/local/bin/omarchy-windows-native"
++    windows_native_layout = GUEST / "factory-overlay/usr/local/bin/omarchy_windows_native_layout.py"
+     windows_protocol = GUEST / "factory-overlay/usr/local/bin/omarchy_windows_protocol.py"
+     windows_input = GUEST / "factory-overlay/usr/local/bin/omarchy_windows_presenter_input.py"
+     token_export = GUEST / "factory-overlay/usr/local/lib/try-omarchy/export-seamless-token"
+@@ -317,6 +319,8 @@ def main() -> None:
+             "usr/local/bin/omarchy-windows-desktop",
+             "usr/local/bin/omarchy-windows-open",
+             "usr/local/bin/omarchy-windows-present",
++            "usr/local/bin/omarchy-windows-native",
++            "usr/local/bin/omarchy_windows_native_layout.py",
+             "usr/local/bin/omarchy_windows_protocol.py",
+             "usr/local/bin/omarchy_windows_presenter_input.py",
+             "usr/local/lib/try-omarchy/export-seamless-token",
+@@ -332,6 +336,9 @@ def main() -> None:
+         and windows_desktop.stat().st_mode & stat.S_IXUSR != 0
+         and windows_open.stat().st_mode & stat.S_IXUSR != 0
+         and windows_present.stat().st_mode & stat.S_IXUSR != 0
++        and windows_native.stat().st_mode & stat.S_IXUSR != 0
++        and windows_native_layout.exists()
++        and "presentation_mode" in windows_open.read_text()
+         and windows_protocol.exists()
+         and windows_input.exists()
+         and "MAX_PENDING_INPUT = 256" in windows_input.read_text()
+-- 
+2.53.0.windows.3
+

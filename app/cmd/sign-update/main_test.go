@@ -9,6 +9,24 @@ import (
 	"testing"
 )
 
+func TestValidForkRelease(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		release string
+		want    bool
+	}{
+		{"v0.0.21-preview", "https://github.com/z4mbo/Omarchy-Windows/releases/download/v0.0.21-preview", true},
+		{"v1.0.0", "https://github.com/z4mbo/Omarchy-Windows/releases/download/v1.0.0", true},
+		{"v1.0.0", "https://github.com/omacom/try-omarchy-windows/releases/download/v1.0.0", false},
+		{"v1.0.0", "https://github.com/z4mbo/Omarchy-Windows/releases/download/v1.0.1", false},
+		{"v01.0.0", "https://github.com/z4mbo/Omarchy-Windows/releases/download/v01.0.0", false},
+	} {
+		if got := validForkRelease(tc.version, tc.release); got != tc.want {
+			t.Errorf("validForkRelease(%q, %q) = %t", tc.version, tc.release, got)
+		}
+	}
+}
+
 func TestVerifyBridge(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

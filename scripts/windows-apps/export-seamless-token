@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Run as root at boot. The QEMU fw_cfg raw file is root-only in Linux.
+set -euo pipefail
+
+source_file=/sys/firmware/qemu_fw_cfg/by_name/opt/omarchy/seamless-token/raw
+runtime_dir=/run/try-omarchy
+runtime_file=$runtime_dir/seamless-token
+
+if [[ ! -e $source_file ]]; then
+  modprobe qemu_fw_cfg
+fi
+if [[ ! -e $source_file ]]; then
+  rm -f -- "$runtime_file"
+  exit 0  # Older launchers do not supply the per-window bridge token.
+fi
+
+token=$(<"$source_file")
+if [[ ! $token =~ ^[[:xdigit:]]{64}$ ]]; then
+  printf 'Invalid Omarchy seamless-window token from QEMU fw_cfg.\n' >&2
+  exit 1
+fi
+
+install -d -m 0750 -o root -g video -- "$runtime_dir"
+umask 077
+temporary=$(mktemp "$runtime_dir/.seamless-token.XXXXXXXX")
+trap 'rm -f -- "$temporary"' EXIT
+printf '%s\n' "$token" >"$temporary"
+chown root:video "$temporary"
+chmod 0640 "$temporary"
+mv -f -- "$temporary" "$runtime_file"

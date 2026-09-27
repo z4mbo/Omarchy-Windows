@@ -186,7 +186,7 @@ func runCheckpointUI(dir string) error {
 					if disk, err := inspectInstallationDisk(retained); err == nil && disk.Format == "qcow2" {
 						recoveryFolder = filepath.Dir(retained)
 					}
-					message := "Snapshot restored. Open Try Omarchy normally to use it.\n\nYour previous state is retained at:\n\n" + recoveryFolder
+					message := "Snapshot restored. Open Omarchy normally to use it.\n\nYour previous state is retained at:\n\n" + recoveryFolder
 					if err := createRollbackRecoveryLaunchers(retained, dir); err != nil {
 						message += "\n\nCould not create recovery shortcuts: " + err.Error()
 					}
@@ -244,7 +244,7 @@ func runCheckpointUI(dir string) error {
 	if y < work[1] {
 		y = work[1]
 	}
-	title, _ := syscall.UTF16PtrFromString("Try Omarchy snapshots")
+	title, _ := syscall.UTF16PtrFromString("Omarchy snapshots")
 	var createErr error
 	hwnd, _, createErr = procCreateWindowExW.Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(title)), style|wsVisible, uintptr(x), uintptr(y), uintptr(w), uintptr(h), 0, 0, hInst, 0)
 	if hwnd == 0 {

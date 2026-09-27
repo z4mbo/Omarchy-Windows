@@ -1,0 +1,322 @@
+diff --git a/include/ui/console.h b/include/ui/console.h
+index bb777e6..e3eb6ac 100644
+--- a/include/ui/console.h
++++ b/include/ui/console.h
+@@ -413,6 +413,8 @@ int qemu_console_get_height(QemuConsole *con, int fallback);
+ int qemu_console_get_window_id(QemuConsole *con);
+ /* Set the low-level window id for the console */
+ void qemu_console_set_window_id(QemuConsole *con, int window_id);
++/* Downstream Windows SDL foreground handoff; 0 unregisters a destroyed HWND. */
++void qemu_omarchy_set_sdl_window(uintptr_t hwnd);
+ 
+ void qemu_console_resize(QemuConsole *con, int width, int height);
+ DisplaySurface *qemu_console_surface(QemuConsole *con);
+diff --git a/qapi/ui.json b/qapi/ui.json
+index 9ad68f4..945a80e 100644
+--- a/qapi/ui.json
++++ b/qapi/ui.json
+@@ -1740,3 +1740,32 @@
+ ##
+ { 'event': 'DISPLAY_FILE_DROP',
+   'data': { 'display': 'int', 'files': [ 'str' ] } }
++
++##
++# @__omarchy_native-foreground-handoff:
++#
++# Experimental Windows SDL-only foreground permission handoff.
++# QEMU verifies the native grant, process creation time, short uptime
++# deadline and its foreground SDL window before delegating permission.
++# This requires private host QMP transport; QAPI cannot identify its
++# caller.
++#
++# @hwnd: Native top-level window handle, encoded without truncation.
++#
++# @pid: Exact native process ID; zero and ASFW_ANY are rejected.
++#
++# @created: Expected process creation FILETIME as a 64-bit integer.
++#
++# @property: Exact per-session Omarchy window grant property name.
++#
++# @incarnation: Nonzero grant value attached to this window instance.
++#
++# @expires: Absolute GetTickCount64 deadline, in milliseconds; must be
++#     in the future and at most 250 milliseconds ahead when executed.
++#
++# Since: 11.0 (downstream)
++##
++{ 'command': '__omarchy_native-foreground-handoff',
++  'data': { 'hwnd': 'uint64', 'pid': 'uint32', 'created': 'uint64',
++            'property': 'str', 'incarnation': 'uint64', 'expires': 'uint64' },
++  'if': 'CONFIG_WIN32' }
+diff --git a/ui/meson.build b/ui/meson.build
+index 69404bc..baff5f7 100644
+--- a/ui/meson.build
++++ b/ui/meson.build
+@@ -16,6 +16,9 @@ system_ss.add(files(
+   'ui-qmp-cmds.c',
+   'util.c',
+ ))
++if host_os == 'windows'
++  system_ss.add(files('omarchy-foreground-win32.c'))
++endif
+ system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
+ if dbus_display
+   system_ss.add(files('dbus-module.c'))
+diff --git a/ui/omarchy-foreground-win32.c b/ui/omarchy-foreground-win32.c
+new file mode 100644
+index 0000000..5f92889
+--- /dev/null
++++ b/ui/omarchy-foreground-win32.c
+@@ -0,0 +1,202 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Bounded experimental native-window foreground permission for Omarchy.
++ * This QMP command is deliberately Windows SDL-only. The launcher must keep
++ * its QMP transport private and authenticate the layout lease; QEMU cannot
++ * identify a QMP client, but rechecks live Win32 identity at execution time.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/qapi-commands-ui.h"
++#include "qapi/error.h"
++#include "qemu/atomic.h"
++#include "ui/console.h"
++
++#include <windows.h>
++
++static uintptr_t omarchy_sdl_window;
++
++void qemu_omarchy_set_sdl_window(uintptr_t hwnd)
++{
++    qatomic_set(&omarchy_sdl_window, hwnd);
++}
++
++static bool omarchy_property_name(const char *name, WCHAR wide[64])
++{
++    static const char prefix[] = "Omarchy.Windows.Grant.";
++    size_t prefix_len = sizeof(prefix) - 1;
++    size_t length;
++    size_t i;
++
++    if (!name) {
++        return false;
++    }
++    length = strlen(name);
++    if (length != prefix_len + 32 || length >= 64 ||
++        memcmp(name, prefix, prefix_len) != 0) {
++        return false;
++    }
++    for (i = prefix_len; i < length; i++) {
++        if (!g_ascii_isxdigit(name[i]) ||
++            (name[i] >= 'A' && name[i] <= 'F')) {
++            return false;
++        }
++    }
++    for (i = 0; i < length; i++) {
++        wide[i] = (unsigned char)name[i];
++    }
++    wide[length] = 0;
++    return true;
++}
++
++static bool omarchy_on_input_desktop(HWND display)
++{
++    DWORD display_thread = GetWindowThreadProcessId(display, NULL);
++    HDESK display_desktop;
++    HDESK input_desktop;
++    WCHAR display_name[128];
++    WCHAR input_name[128];
++    DWORD needed;
++    bool same = false;
++
++    if (!display_thread) {
++        return false;
++    }
++    display_desktop = GetThreadDesktop(display_thread);
++    input_desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
++    if (!display_desktop || !input_desktop) {
++        if (input_desktop) {
++            CloseDesktop(input_desktop);
++        }
++        return false;
++    }
++    if (GetUserObjectInformationW(display_desktop, UOI_NAME, display_name,
++                                  sizeof(display_name), &needed) &&
++        GetUserObjectInformationW(input_desktop, UOI_NAME, input_name,
++                                  sizeof(input_name), &needed)) {
++        same = lstrcmpW(display_name, input_name) == 0;
++    }
++    CloseDesktop(input_desktop);
++    return same;
++}
++
++static bool omarchy_display_is_foreground(HWND display)
++{
++    DWORD pid = 0;
++
++    return display && IsWindow(display) &&
++           GetAncestor(display, GA_ROOT) == display &&
++           GetWindowThreadProcessId(display, &pid) != 0 &&
++           pid == GetCurrentProcessId() &&
++           GetForegroundWindow() == display &&
++           IsWindowVisible(display) && !IsIconic(display) &&
++           !(GetWindowLongPtrW(display, GWL_EXSTYLE) & WS_EX_TOPMOST) &&
++           omarchy_on_input_desktop(display);
++}
++
++static bool omarchy_native_window_matches(HWND native, DWORD pid,
++                                           const WCHAR *property,
++                                           uintptr_t incarnation)
++{
++    DWORD actual_pid = 0;
++    DWORD native_thread;
++
++    if (!native || !IsWindow(native)) {
++        return false;
++    }
++    native_thread = GetWindowThreadProcessId(native, &actual_pid);
++    return native_thread != 0 &&
++           GetAncestor(native, GA_ROOT) == native &&
++           actual_pid == pid && IsWindowVisible(native) &&
++           !IsIconic(native) && !IsHungAppWindow(native) &&
++           !(GetWindowLongPtrW(native, GWL_EXSTYLE) & WS_EX_TOPMOST) &&
++           (uintptr_t)GetPropW(native, property) == incarnation &&
++           omarchy_on_input_desktop(native);
++}
++
++static bool omarchy_deadline_valid(uint64_t expires)
++{
++    uint64_t now = GetTickCount64();
++
++    return expires > now && expires - now <= 250;
++}
++
++void qmp___omarchy_native_foreground_handoff(uint64_t hwnd, uint32_t pid,
++                                               uint64_t created,
++                                               const char *property,
++                                               uint64_t incarnation,
++                                               uint64_t expires,
++                                               Error **errp)
++{
++    HWND display = (HWND)qatomic_read(&omarchy_sdl_window);
++    HWND native = (HWND)(uintptr_t)hwnd;
++    WCHAR property_wide[64];
++    HANDLE process = NULL;
++    FILETIME creation, exit_time, kernel_time, user_time;
++    uint64_t actual_created;
++    DWORD current_session, native_session;
++
++    if (!pid || pid == UINT32_MAX || pid == GetCurrentProcessId() ||
++        !created || !hwnd ||
++        (uint64_t)(uintptr_t)hwnd != hwnd || !incarnation ||
++        (uint64_t)(uintptr_t)incarnation != incarnation ||
++        !omarchy_property_name(property, property_wide)) {
++        error_setg(errp, "invalid native foreground handoff identity");
++        return;
++    }
++    if (!omarchy_display_is_foreground(display)) {
++        error_setg(errp, "Omarchy SDL display is not the interactive foreground window");
++        return;
++    }
++    if (!omarchy_deadline_valid(expires)) {
++        error_setg(errp, "native foreground handoff expired");
++        return;
++    }
++    process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
++                          FALSE, pid);
++    if (!process || WaitForSingleObject(process, 0) != WAIT_TIMEOUT ||
++        !GetProcessTimes(process, &creation, &exit_time, &kernel_time,
++                         &user_time)) {
++        error_setg(errp, "native process is unavailable");
++        goto done;
++    }
++    actual_created = ((uint64_t)creation.dwHighDateTime << 32) |
++                     creation.dwLowDateTime;
++    if (actual_created != created ||
++        !ProcessIdToSessionId(GetCurrentProcessId(), &current_session) ||
++        !ProcessIdToSessionId(pid, &native_session) ||
++        current_session != native_session ||
++        !omarchy_native_window_matches(native, pid, property_wide,
++                                        (uintptr_t)incarnation)) {
++        error_setg(errp, "native window grant identity changed");
++        goto done;
++    }
++
++    /* Do not call SetWindowPos from the QMP main loop: a target GUI thread
++     * can hang after IsHungAppWindow, and async placement could surface a
++     * stale window after the layout lease expires. Only delegate the exact
++     * process permission. The launcher makes one placement attempt and
++     * verifies the result immediately after this reply. */
++    if (qatomic_read(&omarchy_sdl_window) != (uintptr_t)display ||
++        !omarchy_deadline_valid(expires) ||
++        !omarchy_display_is_foreground(display) ||
++        !omarchy_native_window_matches(native, pid, property_wide,
++                                        (uintptr_t)incarnation)) {
++        error_setg(errp, "native foreground handoff state changed");
++        goto done;
++    }
++    if (!AllowSetForegroundWindow(pid)) {
++        error_setg(errp, "Windows denied native foreground permission");
++        goto done;
++    }
++    if (qatomic_read(&omarchy_sdl_window) != (uintptr_t)display ||
++        !omarchy_display_is_foreground(display) ||
++        !omarchy_native_window_matches(native, pid, property_wide,
++                                        (uintptr_t)incarnation)) {
++        error_setg(errp, "native foreground handoff postcondition failed");
++    }
++done:
++    if (process) {
++        CloseHandle(process);
++    }
++}
+diff --git a/ui/sdl2.c b/ui/sdl2.c
+index 7983a09..3a65621 100644
+--- a/ui/sdl2.c
++++ b/ui/sdl2.c
+@@ -116,6 +116,23 @@ void sdl2_window_create(struct sdl2_console *scon)
+                                          surface_width(scon->surface),
+                                          surface_height(scon->surface),
+                                          flags);
++#ifdef _WIN32
++    /* Register only the one exact SDL display HWND. The QMP command never
++     * discovers windows by title or accepts a caller-supplied display HWND.
++     * SDL window APIs stay on the SDL thread; QMP reads this registration.
++     */
++    if (sdl2_num_outputs == 1 && scon == &sdl2_console[0] &&
++        scon->real_window) {
++        SDL_SysWMinfo native_info;
++
++        SDL_VERSION(&native_info.version);
++        if (SDL_GetWindowWMInfo(scon->real_window, &native_info) &&
++            native_info.subsystem == SDL_SYSWM_WINDOWS) {
++            qemu_omarchy_set_sdl_window(
++                (uintptr_t)native_info.info.win.window);
++        }
++    }
++#endif
+     if (scon->opengl) {
+         const char *driver = "opengl";
+ 
+@@ -157,6 +174,11 @@ void sdl2_window_destroy(struct sdl2_console *scon)
+     if (!scon->real_window) {
+         return;
+     }
++#ifdef _WIN32
++    if (sdl2_num_outputs == 1 && scon == &sdl2_console[0]) {
++        qemu_omarchy_set_sdl_window(0);
++    }
++#endif
+ 
+     if (scon->winctx) {
+         SDL_GL_DeleteContext(scon->winctx);
+@@ -901,6 +923,9 @@ static void sdl_mouse_define(DisplayChangeListener *dcl,
+ 
+ static void sdl_cleanup(void)
+ {
++#ifdef _WIN32
++    qemu_omarchy_set_sdl_window(0);
++#endif
+     if (guest_sprite) {
+         SDL_FreeCursor(guest_sprite);
+     }

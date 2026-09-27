@@ -1,0 +1,112 @@
+diff --git a/accel/whpx/whpx-common.c b/accel/whpx/whpx-common.c
+index 2ab6830911..a97e3d02b5 100644
+--- a/accel/whpx/whpx-common.c
++++ b/accel/whpx/whpx-common.c
+@@ -348,7 +348,11 @@ static void whpx_set_phys_mem(MemoryRegionSection *section, bool add)
+      * WHV_E_UNKNOWN_CAPABILITY. Both are benign - the hypervisor falls
+      * back to its default behaviour.
+      */
+-    if (whp_dispatch.WHvAdviseGpaRange &&
++    /* Pinning makes guest RAM stay resident, defeating balloon discards.
++     * Keep the performance hint for normal runs, but omit it in the
++     * explicitly opted-in Windows balloon experiment. */
++    if (g_strcmp0(getenv("OMARCHY_QEMU_BALLOON_DECOMMIT"), "1") != 0 &&
++        whp_dispatch.WHvAdviseGpaRange &&
+         memory_region_is_ram(area) && writable &&
+         size >= (256ULL * 1024 * 1024)) {
+         WHV_MEMORY_RANGE_ENTRY range = { .GuestAddress = gva,
+diff --git a/include/qemu/osdep.h b/include/qemu/osdep.h
+index f151578b5c..45f7ab9a17 100644
+--- a/include/qemu/osdep.h
++++ b/include/qemu/osdep.h
+@@ -527,6 +527,9 @@ int qemu_daemon(int nochdir, int noclose);
+ void *qemu_anon_ram_alloc(size_t size, uint64_t *align, bool shared,
+                           bool noreserve);
+ void qemu_anon_ram_free(void *ptr, size_t size);
++#ifdef _WIN32
++int qemu_anon_ram_discard(void *ptr, size_t size);
++#endif
+ int qemu_shm_alloc(size_t size, Error **errp);
+ 
+ #ifdef _WIN32
+diff --git a/system/physmem.c b/system/physmem.c
+index 4e26f1a1d4..d851779136 100644
+--- a/system/physmem.c
++++ b/system/physmem.c
+@@ -4103,13 +4103,28 @@ int ram_block_discard_range(RAMBlock *rb, uint64_t offset, size_t length)
+         goto err;
+     }
+ 
+-    if ((offset + length) <= rb->max_length) {
++    if (offset <= rb->max_length && length <= rb->max_length - offset) {
+         bool need_madvise, need_fallocate;
+         if (!QEMU_IS_ALIGNED(length, rb->page_size)) {
+             error_report("%s: Unaligned length: %zx", __func__, length);
+             goto err;
+         }
+ 
++#ifdef _WIN32
++        /* Only RAM allocated by qemu_anon_ram_alloc() is a private
++         * VirtualAlloc reservation.  File-backed and caller-owned blocks
++         * cannot safely use VirtualFree(MEM_DECOMMIT).  Keep this path
++         * disabled unless a dedicated test run explicitly opts into it. */
++        if (rb->fd == -1 &&
++            !(rb->flags & (RAM_PREALLOC | RAM_SHARED | RAM_GUEST_MEMFD)) &&
++            g_strcmp0(getenv("OMARCHY_QEMU_BALLOON_DECOMMIT"), "1") == 0) {
++            ret = qemu_anon_ram_discard(host_startaddr, length);
++            trace_ram_block_discard_range(rb->idstr, host_startaddr, length,
++                                          false, false, ret);
++            return ret;
++        }
++#endif
++
+         errno = ENOTSUP; /* If we are missing MADVISE etc */
+ 
+         /* The logic here is messy;
+diff --git a/util/oslib-win32.c b/util/oslib-win32.c
+index 5f3e8f4d98..93b5f7221f 100644
+--- a/util/oslib-win32.c
++++ b/util/oslib-win32.c
+@@ -75,6 +75,42 @@ void qemu_anon_ram_free(void *ptr, size_t size)
+     }
+ }
+ 
++/*
++ * Discard private anonymous guest RAM without changing its virtual address.
++ * MEM_RESET cannot be used here: the balloon promises that discarded pages
++ * read back as zero, and MEM_RESET does not make that guarantee.  Decommit
++ * releases the physical backing; recommit restores the same reserved range
++ * with demand-zero pages (which consume physical RAM only when touched).
++ */
++int qemu_anon_ram_discard(void *ptr, size_t size)
++{
++    SYSTEM_INFO info;
++
++    GetSystemInfo(&info);
++    if (!ptr || !size || (uintptr_t)ptr % info.dwPageSize ||
++        size % info.dwPageSize) {
++        error_report("%s: guest RAM range is not page-aligned", __func__);
++        return -EINVAL;
++    }
++
++    if (!VirtualFree(ptr, size, MEM_DECOMMIT)) {
++        error_report("%s: MEM_DECOMMIT failed (Windows error %lu)",
++                     __func__, (unsigned long)GetLastError());
++        return -EIO;
++    }
++
++    if (VirtualAlloc(ptr, size, MEM_COMMIT, PAGE_READWRITE) != ptr) {
++        /* Continuing would leave guest RAM inaccessible at its registered
++         * address.  This path is experimental and explicitly opted into. */
++        error_report("%s: MEM_COMMIT failed after decommit "
++                     "(Windows error %lu); stopping QEMU",
++                     __func__, (unsigned long)GetLastError());
++        abort();
++    }
++
++    return 0;
++}
++
+ #ifndef _POSIX_THREAD_SAFE_FUNCTIONS
+ /* FIXME: add proper locking */
+ struct tm *gmtime_r(const time_t *timep, struct tm *result)

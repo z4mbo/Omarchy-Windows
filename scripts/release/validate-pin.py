@@ -22,6 +22,9 @@ REQUIRED = {
     "vmlinuz-linux",
     "winq-emu-alpha10-portable.zip",
 }
+INHERITED_UPDATE_KEY = "f1edc8c2fc8fc8a7a108832eb93a9d9f2f8c07c5547fc4e4cb805c3b1615c9cd"
+UPSTREAM_BOOTSTRAP_URL = "https://github.com/omacom/try-omarchy-windows/releases/download/v0.0.20-preview"
+UPSTREAM_BOOTSTRAP_DIGEST = "bbdf1d478dc0a15fd105cde47057ab85190510b59742ffabf8da1a94117d2d49"
 
 
 def source_value(source: str, name: str) -> str:
@@ -35,7 +38,17 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("tag")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
-    parser.add_argument("--repository", default="omacom/try-omarchy-windows")
+    parser.add_argument("--repository", default="z4mbo/Omarchy-Windows")
+    parser.add_argument(
+        "--allow-upstream-bootstrap",
+        action="store_true",
+        help="accept only the existing v0.0.20 upstream pin before the first fork release",
+    )
+    parser.add_argument(
+        "--require-independent-key",
+        action="store_true",
+        help="reject the inherited upstream signing key when preparing a fork release",
+    )
     parser.add_argument(
         "--require-public",
         action="store_true",
@@ -50,6 +63,16 @@ def main() -> None:
         raise SystemExit(f"invalid release tag: {args.tag}")
 
     source = (args.root / "app/manifest.go").read_text(encoding="utf-8")
+    release_url = source_value(source, "defaultReleaseURL")
+    expected_digest = source_value(source, "defaultSumsSHA256")
+    is_upstream_bootstrap = (
+        args.allow_upstream_bootstrap
+        and args.tag == "v0.0.20-preview"
+        and release_url == UPSTREAM_BOOTSTRAP_URL
+        and expected_digest == UPSTREAM_BOOTSTRAP_DIGEST
+    )
+    if is_upstream_bootstrap:
+        args.repository = "omacom/try-omarchy-windows"
 
     update_source = (args.root / "app/update.go").read_text(encoding="utf-8")
     current_version = source_value(update_source, "currentVersion")
@@ -60,12 +83,22 @@ def main() -> None:
     signer_key = source_value(signer_source, "expectedPublicKeyHex")
     if update_key != signer_key or not SHA_RE.fullmatch(update_key):
         raise SystemExit("update signer key does not match the launcher trust root")
-    release_url = source_value(source, "defaultReleaseURL")
+    require_independent_key = args.require_independent_key and not is_upstream_bootstrap
+    if require_independent_key and update_key == INHERITED_UPDATE_KEY:
+        raise SystemExit("fork release requires its own Ed25519 update signing key")
+    if require_independent_key:
+        update_url = source_value(update_source, "defaultUpdateURL")
+        expected_update_url = f"https://github.com/{args.repository}/releases/latest/download/update-v2.json"
+        if update_url != expected_update_url:
+            raise SystemExit(f"defaultUpdateURL is {update_url}, expected {expected_update_url}")
+        release_base = source_value(update_source, "forkReleaseBase")
+        expected_base = f"https://github.com/{args.repository}/releases/download/"
+        if release_base != expected_base:
+            raise SystemExit(f"forkReleaseBase is {release_base}, expected {expected_base}")
     expected_url = f"https://github.com/{args.repository}/releases/download/{args.tag}"
     if release_url != expected_url:
         raise SystemExit(f"defaultReleaseURL is {release_url}, expected {expected_url}")
 
-    expected_digest = source_value(source, "defaultSumsSHA256")
     if not SHA_RE.fullmatch(expected_digest):
         raise SystemExit("defaultSumsSHA256 is invalid")
 

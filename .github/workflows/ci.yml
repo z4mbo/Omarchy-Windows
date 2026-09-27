@@ -7,6 +7,10 @@ on:
         description: Build and boot the complete guest candidate
         type: boolean
         default: false
+      refresh_guest_lock:
+        description: Refresh guest package lock into a reviewable patch artifact
+        type: boolean
+        default: false
   pull_request:
   push:
     branches: [master]
@@ -32,6 +36,11 @@ jobs:
         run: |
           python3 -m py_compile scripts/release/*.py runtime-build/*.py
           python3 -m unittest discover -s scripts/release -p 'test_*.py'
+          python3 -m unittest discover -s scripts/gpu -p 'test_*.py'
+          python3 -m unittest discover -s scripts/perf -p 'test_*.py'
+          bash -n scripts/release/package-write-recovery/*.sh
+          python3 -m py_compile scripts/gpu/blender/smoke.py
+          bash -n scripts/gpu/blender/build-arch.sh
           python3 runtime-build/validate-lock.py
           bash -n runtime-build/*.sh
 
@@ -51,7 +60,22 @@ jobs:
         run: GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-H windowsgui -s -w" -o ../TryOmarchy.exe .
 
       - name: Validate current release pin
-        run: scripts/release/validate-pin.py --require-public "$(sed -n 's/.*releases\/download\/\([^\"]*\).*/\1/p' app/manifest.go)"
+        run: scripts/release/validate-pin.py --require-public --allow-upstream-bootstrap --require-independent-key "$(sed -n 's/.*releases\/download\/\([^\"]*\).*/\1/p' app/manifest.go)"
+
+      - name: Retain unsigned launcher for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        run: sha256sum TryOmarchy.exe > TryOmarchy.exe.sha256
+
+      - name: Upload unsigned launcher test candidate
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-windows-launcher-test-only
+          path: |
+            TryOmarchy.exe
+            TryOmarchy.exe.sha256
+          retention-days: 3
+          if-no-files-found: error
 
   windows-launcher:
     name: Windows launcher
@@ -77,18 +101,84 @@ jobs:
   guest-contract:
     name: Guest contract
     runs-on: ubuntu-latest
+    outputs:
+      image-required: ${{ steps.image-change.outputs.required }}
     steps:
       - name: Check out source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect changes requiring a fresh image
+        id: image-change
+        shell: python
+        run: |
+          import json, os, re, subprocess
+          from pathlib import Path
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          name = os.environ['GITHUB_EVENT_NAME']
+          required = False
+          if name in ('pull_request', 'push'):
+              base = event['pull_request']['base']['sha'] if name == 'pull_request' else event['before']
+              head = event['pull_request']['head']['sha'] if name == 'pull_request' else event['after']
+              if not all(re.fullmatch(r'[0-9a-f]{40}', sha) for sha in (base, head)):
+                  raise RuntimeError('Invalid event commit identity')
+              if base == '0' * 40:
+                  required = True
+              else:
+                  paths = ('guest-build', 'scripts/windows-apps', 'scripts/release/build-guest.sh',
+                           'scripts/release/smoke-guest.py', 'scripts/release/guest-upgrade',
+                           'scripts/release/smoke-guest-upgrade.py',
+                           'scripts/release/smoke-package-write-recovery.py',
+                           'scripts/release/package-write-recovery',
+                           'scripts/release/prepare-guest-upgrade.py',
+                           'scripts/release/split-candidate-image.py',
+                           'scripts/release/verify-guest-integration.py',
+                           '.github/workflows/ci.yml')
+                  result = subprocess.run(['git', 'diff', '--quiet', base, head, '--', *paths])
+                  if result.returncode not in (0, 1):
+                      raise RuntimeError('Could not compare image inputs')
+                  required = result.returncode == 1
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'required={str(required).lower()}\n')
 
       - name: Apply guest patches and run contract tests
         run: scripts/release/build-guest.sh --contract-only
 
+  guest-lock-refresh:
+    name: Guest package lock refresh
+    if: github.event_name == 'workflow_dispatch' && inputs.refresh_guest_lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Refresh guest package lock
+        run: scripts/release/refresh-guest-lock.sh
+
+      - name: Stage only the new patch
+        run: |
+          mkdir lock-refresh
+          git ls-files --others --exclude-standard -z -- guest-build | xargs -0 -r cp -t lock-refresh --
+          test -n "$(find lock-refresh -maxdepth 1 -type f -name '*.patch' -print -quit)"
+
+      - name: Retain package lock patch
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-lock-refresh
+          path: lock-refresh/*.patch
+          retention-days: 7
+          if-no-files-found: error
+
   guest-candidate:
     name: Guest image candidate
-    if: github.event_name == 'workflow_dispatch' && inputs.build_guest
+    needs: guest-contract
+    if: (github.event_name == 'workflow_dispatch' && inputs.build_guest) || needs.guest-contract.outputs.image-required == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    outputs:
+      manifest-sha256: ${{ steps.upgrade-input.outputs.manifest-sha256 }}
     env:
       ARTIFACT_DIR: ${{ github.workspace }}/guest-candidate
     steps:
@@ -106,11 +196,28 @@ jobs:
       - name: Build locked guest image
         run: scripts/release/build-guest.sh --output "$ARTIFACT_DIR"
 
-      - name: Boot the complete guest candidate
-        run: scripts/release/smoke-guest.py "$ARTIFACT_DIR"
+      - name: Boot the complete guest candidate desktop
+        run: scripts/release/smoke-guest.py "$ARTIFACT_DIR" --displays 1
 
       - name: Remove unpacked test input
         run: rm -- "$ARTIFACT_DIR/rootfs.ext4"
+
+      - name: Record candidate upgrade input identity
+        id: upgrade-input
+        run: echo "manifest-sha256=$(sha256sum "$ARTIFACT_DIR/SHA256SUMS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Retain lightweight upgrade inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-upgrade-input
+          path: |
+            guest-candidate/build-spec.json
+            guest-candidate/vmlinuz-linux
+            guest-candidate/initramfs-linux.img
+            guest-candidate/SHA256SUMS
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Retain guest candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -120,3 +227,170 @@ jobs:
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
+
+      - name: Prepare bounded rootfs downloads for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        run: |
+          python3 scripts/release/split-candidate-image.py \
+            "$ARTIFACT_DIR/rootfs.ext4.zst" "$ARTIFACT_DIR/SHA256SUMS" guest-candidate-parts
+          cp -- "$ARTIFACT_DIR/SHA256SUMS" guest-candidate-parts/SHA256SUMS
+
+      - name: Upload rootfs parts index for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-parts-index-test-only
+          path: |
+            guest-candidate-parts/parts-manifest.json
+            guest-candidate-parts/SHA256SUMS
+            guest-candidate/guest-manifest.json
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Upload rootfs part 00 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-00-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-00
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 01 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-01-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-01
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 02 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-02-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-02
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 03 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-03-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-03
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 04 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-04-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-04
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 05 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-05-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-05
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 06 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-06-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-06
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload rootfs part 07 for isolated tests
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-rootfs-part-07-test-only
+          path: guest-candidate-parts/rootfs.ext4.zst.part-07
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: ignore
+
+  guest-upgrade:
+    name: Existing guest upgrade
+    needs: guest-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 190
+    env:
+      CANDIDATE_MANIFEST_SHA256: ${{ needs.guest-candidate.outputs.manifest-sha256 }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Download candidate inputs from this run
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: guest-upgrade-input
+          path: guest-upgrade-input
+
+      - name: Prepare upgrade runner
+        run: |
+          # This isolated Linux job uses system Python and QEMU only. Reclaim
+          # the hosted language tool cache before staging the baseline image.
+          test "$(readlink -f "$RUNNER_TOOL_CACHE")" = /opt/hostedtoolcache
+          sudo rm -rf -- /opt/hostedtoolcache
+          test "$(df --output=avail -B1G "$RUNNER_TEMP" | tail -1)" -ge 35
+          test -e /dev/kvm
+          sudo chmod 666 /dev/kvm
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends qemu-system-x86 qemu-utils zstd gcc libc6-dev
+
+      - name: Authenticate baseline and candidate
+        run: |
+          python3 scripts/release/prepare-guest-upgrade.py \
+            guest-upgrade-input "$RUNNER_TEMP/guest-upgrade-baseline" \
+            --candidate-manifest-sha256 "$CANDIDATE_MANIFEST_SHA256"
+
+      - name: Upgrade older disk and verify preservation across boots
+        run: |
+          python3 scripts/release/smoke-guest-upgrade.py \
+            "$RUNNER_TEMP/guest-upgrade-baseline" guest-upgrade-input \
+            "$RUNNER_TEMP/guest-upgrade-evidence" --disk-mode qcow2
+
+      - name: Retain upgrade logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guest-upgrade-evidence
+          path: ${{ runner.temp }}/guest-upgrade-evidence/*.log
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Recover from interrupted package writes
+        run: |
+          python3 scripts/release/smoke-package-write-recovery.py \
+            guest-upgrade-input "$RUNNER_TEMP/guest-upgrade-evidence/persistent.qcow2" \
+            "$RUNNER_TEMP/package-write-evidence" --source-format qcow2
+
+      - name: Retain package-write recovery evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-write-recovery-evidence
+          path: |
+            ${{ runner.temp }}/package-write-evidence/*.log
+            ${{ runner.temp }}/package-write-evidence/*.json
+          retention-days: 14
+          if-no-files-found: warn

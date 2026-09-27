@@ -9,8 +9,19 @@ import (
 
 func TestLoadSettingsMissingFileIsDefaults(t *testing.T) {
 	s, err := loadSettings(filepath.Join(t.TempDir(), settingsFileName))
-	if err != nil || s.SchemaVersion != 0 || s.Fullscreen || s.MemoryMiB != 0 || s.Share != "" || len(s.Forwards) != 0 || s.SSHKey != "" {
+	if err != nil || s.SchemaVersion != 0 || !s.Fullscreen || s.MemoryMiB != 0 || s.Share != "" || len(s.Forwards) != 0 || s.SSHKey != "" {
 		t.Fatalf("missing file: %+v %v", s, err)
+	}
+}
+
+func TestExistingWindowedSettingSurvivesImmersiveDefault(t *testing.T) {
+	path := settingsPath(t.TempDir())
+	if err := saveSettings(path, settings{Fullscreen: false}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := loadSettings(path)
+	if err != nil || s.Fullscreen {
+		t.Fatalf("existing windowed choice changed: %+v %v", s, err)
 	}
 }
 
@@ -82,6 +93,30 @@ func TestApplySettingsLetsExplicitFlagsWin(t *testing.T) {
 	}
 	if cfg.fullscreen || cfg.memOverrideMiB != 0 || cfg.share != "" || keyPath != "" || forwards.String() != "tcp:2299:22" {
 		t.Fatalf("explicit flags overridden: %+v forwards=%s key=%s", cfg, forwards.String(), keyPath)
+	}
+}
+
+func TestNativeForegroundGateUsesEffectiveSettingsDisplayCount(t *testing.T) {
+	cfg := &config{displays: 1, experimentalNativeForeground: true}
+	if !nativeForegroundExperimentSupported(cfg, "native") {
+		t.Fatal("one native display rejected")
+	}
+	var forwards forwardList
+	keyPath := ""
+	if err := applySettings(cfg, settings{Displays: 2}, map[string]bool{}, &forwards, &keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.displays != 2 || nativeForegroundExperimentSupported(cfg, "native") ||
+		nativeForegroundExperimentSupported(cfg, "capture") {
+		t.Fatal("saved multi-display setting bypassed the experimental gate")
+	}
+	cfg.displays = 1
+	if nativeForegroundExperimentSupported(cfg, "capture") {
+		t.Fatal("capture presentation bypassed the experimental gate")
+	}
+	cfg.experimentalNativeForeground = false
+	if !nativeForegroundExperimentSupported(cfg, "capture") {
+		t.Fatal("normal launch was gated")
 	}
 }
 

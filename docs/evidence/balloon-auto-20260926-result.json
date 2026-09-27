@@ -1,0 +1,21 @@
+{
+  "automatic_grow_actual_bytes": 4294967296,
+  "automatic_shrink_actual_bytes": 3758096384,
+  "clean_shutdown": true,
+  "host_after_automatic_grow_mib": 47897,
+  "host_after_automatic_shrink_mib": 46869,
+  "host_after_pressure_release_mib": 47660,
+  "host_before_mib": 47475,
+  "host_under_pressure_mib": 46699,
+  "integrity_rounds": 120,
+  "pressure_mib": 768,
+  "production_headroom_mib": 8164,
+  "qemu_pid": 29412,
+  "qemu_working_after_grow_mib": 2274.51953125,
+  "qemu_working_after_shrink_mib": 2247.05859375,
+  "qemu_working_before_mib": 2259.83203125,
+  "test_floor_mib": 3584,
+  "test_growth_headroom_mib": 43552,
+  "test_shrink_headroom_mib": 47087,
+  "verified_qemu_sha256": "43160f86cbf28a67df6f529b104dd03f63a37ca5d3d2a9148f11358fbc559b0a"
+}

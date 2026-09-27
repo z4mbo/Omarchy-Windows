@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -45,6 +46,9 @@ const (
 	trayCommandClipboardFiles = 3009
 	trayCommandDevices        = 3010
 	trayCommandTransfers      = 3011
+	trayCommandWindowsDesktop = 3012
+	trayShareWindowBase       = 4000
+	trayStopWindowBase        = 4100
 
 	nimAdd                = 0
 	nimDelete             = 2
@@ -55,6 +59,7 @@ const (
 	nifShowTip            = 0x80
 	notifyVersion         = 4
 	mfString              = 0
+	mfPopup               = 0x10
 	mfGray                = 0x1
 	mfSeparator           = 0x800
 	tpmRightButton        = 0x2
@@ -169,7 +174,7 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 	var hwnd uintptr
 	var nid notifyIconData
 	var aboutOpen atomic.Bool
-	var settingsOpen, diagnosticsOpen, devicesOpen atomic.Bool
+	var settingsOpen, diagnosticsOpen, devicesOpen, windowsDesktopOpen atomic.Bool
 
 	addIcon := func() bool {
 		if hwnd == 0 {
@@ -192,7 +197,7 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		self, err := os.Executable()
 		if err != nil {
 			running.Store(false)
-			errorBox("Try Omarchy could not open " + flag + ".\n\n" + err.Error())
+			errorBox("Omarchy could not open " + flag + ".\n\n" + err.Error())
 			return
 		}
 		args := []string{}
@@ -206,7 +211,7 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 		if err := cmd.Start(); err != nil {
 			running.Store(false)
-			errorBox("Try Omarchy could not open " + flag + ".\n\n" + err.Error())
+			errorBox("Omarchy could not open " + flag + ".\n\n" + err.Error())
 			return
 		}
 		// The tray action is user initiated, but the child has a different PID.
@@ -240,10 +245,11 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 			return
 		}
 		defer procDestroyMenu.Call(menu)
-		appendItem := func(flags, id uintptr, label string) {
+		appendTo := func(target, flags, id uintptr, label string) {
 			text, _ := syscall.UTF16PtrFromString(label)
-			procAppendMenuW.Call(menu, flags, id, uintptr(unsafe.Pointer(text)))
+			procAppendMenuW.Call(target, flags, id, uintptr(unsafe.Pointer(text)))
 		}
+		appendItem := func(flags, id uintptr, label string) { appendTo(menu, flags, id, label) }
 		appendItem(mfString, trayCommandShow, "Open Omarchy")
 		shareFlags := uintptr(mfString)
 		if cfg.share == "" {
@@ -254,6 +260,44 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		appendItem(mfString, trayCommandSettings, "Settings...")
 		appendItem(mfString, trayCommandCameraStatus, "Camera status...")
 		appendItem(mfString, trayCommandDevices, "USB devices...")
+		appendItem(mfString, trayCommandWindowsDesktop, "Windows desktop in Omarchy...")
+		var shareChoices, stopChoices []seamlessWindow
+		bridge := activeSeamlessBridge.Load()
+		if bridge != nil {
+			windows := bridge.backend.windows()
+			shared := bridge.sharedWindows(windows, time.Now())
+			shareChoices, stopChoices = traySeamlessWindowChoices(windows, shared)
+			shareMenu, _, _ := procCreatePopupMenu.Call()
+			stopMenu, _, _ := procCreatePopupMenu.Call()
+			if shareMenu != 0 && stopMenu != 0 {
+				appendChoices := func(target, base uintptr, choices []seamlessWindow) {
+					for index, window := range choices {
+						label := fmt.Sprintf("%s — %s (PID %d)", window.Title, window.Process, window.PID)
+						if len([]rune(label)) > 90 {
+							label = string([]rune(label)[:87]) + "..."
+						}
+						appendTo(target, mfString, base+uintptr(index), label)
+					}
+				}
+				appendChoices(shareMenu, trayShareWindowBase, shareChoices)
+				appendChoices(stopMenu, trayStopWindowBase, stopChoices)
+				if len(shareChoices) == 0 {
+					appendTo(shareMenu, mfString|mfGray, 0, "No windows available")
+				}
+				if len(stopChoices) == 0 {
+					appendTo(stopMenu, mfString|mfGray, 0, "No shared windows")
+				}
+				appendItem(mfPopup, shareMenu, "Show Windows app in Omarchy...")
+				appendItem(mfPopup, stopMenu, "Stop showing Windows app")
+			} else {
+				if shareMenu != 0 {
+					procDestroyMenu.Call(shareMenu)
+				}
+				if stopMenu != 0 {
+					procDestroyMenu.Call(stopMenu)
+				}
+			}
+		}
 		appendItem(mfString, trayCommandTransfers, "File transfers…")
 		appendItem(mfString, trayCommandDiagnose, "Create diagnostics...")
 		reclaimFlags := uintptr(mfString)
@@ -274,6 +318,20 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		command, _, _ := procTrackPopupMenu.Call(menu, tpmRightButton|tpmReturnCmd,
 			uintptr(point.x), uintptr(point.y), 0, hwnd, 0)
 		procPostMessageW.Call(hwnd, wmNull, 0, 0)
+		if command >= trayShareWindowBase && command < trayShareWindowBase+uintptr(len(shareChoices)) {
+			if bridge != nil {
+				if err := bridge.grantWindowChecked(shareChoices[command-trayShareWindowBase]); err != nil {
+					infoBox("Cannot show that Windows window in Omarchy: " + err.Error())
+				}
+			}
+			return
+		}
+		if command >= trayStopWindowBase && command < trayStopWindowBase+uintptr(len(stopChoices)) {
+			if bridge != nil {
+				bridge.revokeWindow(stopChoices[command-trayStopWindowBase])
+			}
+			return
+		}
 		switch command {
 		case trayCommandShow:
 			if qemuWindow := qemuHwnd.Load(); qemuWindow != 0 {
@@ -286,6 +344,8 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 			go showFileDropWindow(nil)
 		case trayCommandDevices:
 			launchControl("-devices", &devicesOpen)
+		case trayCommandWindowsDesktop:
+			launchControl("-sunshine-setup", &windowsDesktopOpen)
 		case trayCommandSettings:
 			launchControl("-settings", &settingsOpen)
 		case trayCommandDiagnose:
@@ -334,6 +394,9 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 			return 0
 		}
 		switch message {
+		case traySelectorMessage:
+			showWindowSelector(window)
+			return 0
 		case trayNoticeMessage:
 			if text := pendingTrayNotice.Swap(nil); text != nil {
 				notice := nid
@@ -431,4 +494,33 @@ func runTray(cfg trayLaunchConfig, ready chan<- uintptr, done chan<- struct{}) {
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&message)))
 	}
 	logf("tray: stopped")
+}
+
+// Hidden projected windows remain in shared after leaving their Omarchy
+// workspace. They must stay revocable from the tray, but cannot be offered as
+// new grants because they are absent from the current visible enumeration.
+func traySeamlessWindowChoices(visible, shared []seamlessWindow) (share, stop []seamlessWindow) {
+	sharedKeys := make(map[seamlessWindowKey]bool, len(shared))
+	for _, window := range shared {
+		key := seamlessKey(window)
+		if sharedKeys[key] {
+			continue
+		}
+		sharedKeys[key] = true
+		if len(stop) < 64 {
+			stop = append(stop, window)
+		}
+	}
+	seen := make(map[seamlessWindowKey]bool, len(visible))
+	for _, window := range visible {
+		key := seamlessKey(window)
+		if sharedKeys[key] || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if len(share) < 64 {
+			share = append(share, window)
+		}
+	}
+	return share, stop
 }

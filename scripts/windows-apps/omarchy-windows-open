@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Pick a host app, then opt into presenting its window inside Omarchy."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+from omarchy_windows_protocol import Bridge, BridgeError, load_token
+
+
+def message(text: str) -> None:
+    print(text, file=sys.stderr)
+    if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
+        executable = "/usr/bin/zenity"
+        if Path(executable).exists():
+            try:
+                subprocess.run(
+                    [executable, "--error", "--title=Windows Apps in Omarchy (Preview)", f"--text={text}", "--width=460"],
+                    timeout=30,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+
+def choose_window(windows: list[dict]) -> dict | None:
+    if len(windows) == 1:
+        return windows[0]
+    if not windows:
+        return None
+    rows: list[str] = []
+    for window in windows:
+        rows.extend((window["title"] or window["process"] or "Windows app", window["process"], window["id"]))
+    try:
+        result = subprocess.run(
+            ["zenity", "--list", "--title=Select Windows window to show in Omarchy (Preview)",
+             "--width=700", "--height=480", "--column=Window", "--column=Process", "--column=ID",
+             "--hide-column=3", "--print-column=3", *rows],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    selected = result.stdout.strip()
+    return next((window for window in windows if window["id"] == selected), None)
+
+
+def launch_target(argv: list[str]) -> str:
+    if not argv:
+        return "pick"
+    if len(argv) == 1 and argv[0] in {"explorer", "league"}:
+        return argv[0]
+    raise ValueError("expected no argument, explorer, or league")
+
+
+def matches_named_target(window: dict, target: str) -> bool:
+    group = str(window.get("appGroup", "")).lower()
+    process = (str(window.get("process", "")).replace("\\", "/").rsplit("/", 1)[-1]
+               .lower().removesuffix(".exe"))
+    if target == "explorer":
+        return group == "explorer" or process == "explorer"
+    if target == "league":
+        return group == "league" or process in {"leagueclient", "leagueclientux", "league of legends"}
+    return False
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        target = launch_target(sys.argv[1:] if argv is None else argv)
+    except ValueError:
+        print("Usage: omarchy-windows-open [explorer|league]", file=sys.stderr)
+        return 2
+    scripts = Path(__file__).resolve().parent
+    picker = scripts / "omarchy-windows-app"
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        message("Open this from the Omarchy desktop.")
+        return 1
+    if not picker.is_file():
+        message("The Windows app integration is incomplete. Update Omarchy.")
+        return 1
+    try:
+        bridge = Bridge(load_token())
+        mode = bridge.presentation_mode()
+        presenter = scripts / ("omarchy-windows-native" if mode == "native" else "omarchy-windows-present")
+        before = bridge.windows()
+    except BridgeError as exc:
+        message(str(exc))
+        return 1
+    if not presenter.is_file():
+        message("The selected Windows app integration is missing. Update the Omarchy guest integration.")
+        return 1
+    if subprocess.run([str(presenter), "--probe"], check=False).returncode != 0:
+        message("The per-window presenter is unavailable. Check GTK4 and the Omarchy Windows launcher.")
+        return 1
+
+    environment = dict(os.environ, OMARCHY_WINDOW_PREVIEW="1")
+    result = subprocess.run([str(picker), target], env=environment, check=False)
+    if result.returncode == 3:
+        return 0  # The user canceled the picker.
+    if result.returncode != 0:
+        message("Windows could not open that app on the host.")
+        return 1
+
+    old_ids = {window["id"] for window in before}
+    new_windows: list[dict] = []
+    matching_new: list[dict] = []
+    all_windows = before
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        try:
+            all_windows = bridge.windows()
+        except BridgeError:
+            time.sleep(0.3)
+            continue
+        new_windows = [window for window in all_windows if window["id"] not in old_ids]
+        matching_new = (new_windows if target == "pick" else
+                        [window for window in new_windows if matches_named_target(window, target)])
+        if matching_new:
+            break
+        time.sleep(0.3)
+
+    if target == "pick":
+        candidates = new_windows or all_windows
+    else:
+        candidates = matching_new or [window for window in all_windows if matches_named_target(window, target)]
+    # Native mode uses one controller for the complete granted layout. Starting
+    # separate controllers per app would make them restore each other's windows.
+    selected = (next(iter(candidates), None) if mode == "native" else choose_window(candidates))
+    if selected is None:
+        if target == "pick":
+            message("The app opened on Windows, but no window was selected for the Omarchy preview. Use the host display or try again.")
+        else:
+            message(f"Windows accepted the {target.title()} launch, but no matching window is shared with Omarchy. "
+                    "Choose it with 'Show Windows app in Omarchy' from the Windows Omarchy tray, then retry.")
+        return 1
+    try:
+        arguments = ([str(presenter)] if mode == "native" else
+                     [str(presenter), "--id", selected["id"], "--group", selected["appGroup"]])
+        subprocess.Popen(
+            arguments,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        message(f"Could not start the Omarchy window preview: {exc}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,28 @@
+{
+  "cpu": "host",
+  "display": "none",
+  "connect": "after-ssh",
+  "first_qmp_after_s": 30.0,
+  "qemu_sha256": "43160f86cbf28a67df6f529b104dd03f63a37ca5d3d2a9148f11358fbc559b0a",
+  "snapshot": true,
+  "pid": 30552,
+  "ssh_ready_s": 6.23,
+  "ssh_before_qmp": true,
+  "qmp_tcp_connected_s": 30.16,
+  "qmp_greeting_s": 30.17,
+  "qmp_capabilities_s": 30.17,
+  "qmp_status": {
+    "status": "running",
+    "running": true
+  },
+  "second_while_first_open_error": "TimeoutError: timed out",
+  "second_greeting_after_first_close": true,
+  "second_capabilities_after_first_close": true,
+  "qemu_running_after_probe": true,
+  "acpi_powerdown_requested": true,
+  "clean_shutdown": true,
+  "qemu_exit_code": 0,
+  "duration_s": 33.72,
+  "serial_bytes": 23658,
+  "qemu_stderr_bytes": 188
+}

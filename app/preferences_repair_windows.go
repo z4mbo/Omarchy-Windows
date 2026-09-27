@@ -5,7 +5,7 @@ package main
 import "path/filepath"
 
 func offerPreferencesRepair(path string, cause error) error {
-	if msgBox("Try Omarchy cannot read "+filepath.Base(path)+".\n\n"+cause.Error()+"\n\nRestore these preferences to their defaults? The original file will be backed up first. Guest files and the VM disk will not be changed.", mbYesNo|mbIconQuestion|mbDefbutton2) != idYes {
+	if msgBox("Omarchy cannot read "+filepath.Base(path)+".\n\n"+cause.Error()+"\n\nRestore these preferences to their defaults? The original file will be backed up first. Guest files and the VM disk will not be changed.", mbYesNo|mbIconQuestion|mbDefbutton2) != idYes {
 		return errSetupCancelled
 	}
 	saved, err := repairPreferences(path)

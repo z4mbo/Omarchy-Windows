@@ -70,6 +70,9 @@ func loadSettings(path string) (settings, error) {
 	var s settings
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
+		// A new installation uses the physical monitor's full display mode.
+		// Existing settings files keep their explicit fullscreen choice.
+		s.Fullscreen = true
 		return s, nil
 	}
 	if err != nil {

@@ -102,7 +102,7 @@ func validateStandardDataDrive(path string) error {
 func chooseFirstRunDataDirectory(defaultDir string) (string, bool, error) {
 	for {
 		answer := msgBox(
-			"Choose where Try Omarchy stores its virtual machine, graphics runtime, and downloads.\n\n"+
+			"Choose where Omarchy stores its virtual machine, graphics runtime, and downloads.\n\n"+
 				"Default location:\n"+defaultDir+"\n\n"+
 				"Choose Yes to select another local drive or folder. Choose No to use the default location.",
 			mbYesNoCancel|mbIconQuestion,
@@ -112,43 +112,43 @@ func chooseFirstRunDataDirectory(defaultDir string) (string, bool, error) {
 			return "", false, nil
 		case idNo:
 			if err := validateStandardDataDrive(defaultDir); err != nil {
-				errorBox("Try Omarchy cannot use the default location.\n\n" + err.Error() + "\n\nChoose another local drive or folder.")
+				errorBox("Omarchy cannot use the default location.\n\n" + err.Error() + "\n\nChoose another local drive or folder.")
 				continue
 			}
 			return defaultDir, true, nil
 		case idYes:
-			parent, ok := browseForFolder(0, "Choose a local drive or parent folder. Try Omarchy will create a TryOmarchy folder inside it.")
+			parent, ok := browseForFolder(0, "Choose a local drive or parent folder. Omarchy will create a TryOmarchy folder inside it.")
 			if !ok {
 				continue
 			}
 			selected, err := dataDirectoryForSelection(parent)
 			if err != nil {
-				errorBox("Try Omarchy cannot use that location.\n\n" + err.Error())
+				errorBox("Omarchy cannot use that location.\n\n" + err.Error())
 				continue
 			}
 			if err := validateStandardDataDrive(selected); err != nil {
-				errorBox("Try Omarchy cannot use that location.\n\n" + err.Error())
+				errorBox("Omarchy cannot use that location.\n\n" + err.Error())
 				continue
 			}
 			selectable, err := standardDataDirectorySelectable(selected)
 			if err != nil {
-				errorBox("Try Omarchy cannot inspect that location.\n\n" + err.Error())
+				errorBox("Omarchy cannot inspect that location.\n\n" + err.Error())
 				continue
 			}
 			if !selectable {
-				errorBox("That TryOmarchy folder is not empty and is not a complete Try Omarchy installation. Choose another parent folder or an empty TryOmarchy folder.")
+				errorBox("That TryOmarchy folder is not empty and is not a complete Omarchy installation. Choose another parent folder or an empty TryOmarchy folder.")
 				continue
 			}
 			if err := ensureDataDirectoryWritable(selected); err != nil {
-				errorBox("Try Omarchy cannot write to that location.\n\n" + err.Error())
+				errorBox("Omarchy cannot write to that location.\n\n" + err.Error())
 				continue
 			}
 			available, err := diskFreeBytes(selected)
 			if err != nil {
-				errorBox("Try Omarchy cannot check the free space at that location.\n\n" + err.Error())
+				errorBox("Omarchy cannot check the free space at that location.\n\n" + err.Error())
 				continue
 			}
-			if msgBox(fmt.Sprintf("Store Try Omarchy here?\n\n%s\n\nAvailable space: %s", selected, formatGiB(available)), mbYesNo|mbIconQuestion) != idYes {
+			if msgBox(fmt.Sprintf("Store Omarchy here?\n\n%s\n\nAvailable space: %s", selected, formatGiB(available)), mbYesNo|mbIconQuestion) != idYes {
 				continue
 			}
 			return selected, true, nil

@@ -1,0 +1,328 @@
+From 11e18e70fe76a83495981f7878e5180f1f0072fd Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sat, 26 Sep 2026 20:29:10 +0200
+Subject: [PATCH] Negotiate optional native tile occlusion support
+
+---
+ .../usr/local/bin/omarchy-windows-native      | 16 ++--
+ .../bin/omarchy_windows_native_layout.py      | 81 ++++++++++++++++++-
+ guest/scripts/finalize-rootfs.sh              |  3 +-
+ guest/tests/test_windows_native_layout.py     | 68 +++++++++++++++-
+ guest/tests/verify.py                         |  2 +-
+ 5 files changed, 158 insertions(+), 12 deletions(-)
+
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-native b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+index b76dac0..05e3bce 100755
+--- a/guest/factory-overlay/usr/local/bin/omarchy-windows-native
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+@@ -18,7 +18,7 @@ import threading
+ import time
+ import urllib.error
+ 
+-from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, output_state, parse_layout_ack, parse_locked, parse_presentation
++from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked
+ from omarchy_windows_protocol import Bridge, BridgeError, load_token
+ 
+ POLL_SECONDS = 0.4
+@@ -41,9 +41,9 @@ def hyprctl_json(command: str) -> object:
+         raise LayoutError(f"Hyprland {command} state is unavailable.") from exc
+ 
+ 
+-def presentation_probe(bridge: Bridge) -> None:
++def presentation_probe(bridge: Bridge) -> int:
+     try:
+-        parse_presentation(json.loads(bridge.request("/v1/presentation", timeout=1)))
++        return occlusion_limit(json.loads(bridge.request("/v1/presentation", timeout=1)))
+     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+         raise LayoutError("The host returned an invalid native presentation response.") from exc
+ 
+@@ -79,7 +79,7 @@ def hidden_layout(output: dict, catalog: list[dict]) -> dict:
+         for item in catalog]}
+ 
+ 
+-def start_gtk(bridge: Bridge, lock_fd: int) -> int:
++def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+     try:
+         import gi
+         gi.require_version("Gtk", "4.0")
+@@ -126,6 +126,7 @@ def start_gtk(bridge: Bridge, lock_fd: int) -> int:
+         def __init__(self):
+             super().__init__(application_id="dev.omarchy.WindowsNative", flags=Gio.ApplicationFlags.NON_UNIQUE)
+             self.bridge = bridge
++            self.max_occlusions = max_occlusions
+             self.stop = threading.Event()
+             self.state_lock = threading.Lock()
+             self.dismissed: set[str] = set()
+@@ -265,7 +266,8 @@ def start_gtk(bridge: Bridge, lock_fd: int) -> int:
+                         try:
+                             clients = hyprctl_json("clients")
+                             locked = parse_locked(hyprctl_json("locked"))
+-                            layout = compute_layout(catalog, clients, monitors, locked, os.getpid())
++                            layout = compute_layout(catalog, clients, monitors, locked, os.getpid(),
++                                                    max_occlusions=self.max_occlusions)
+                         except LayoutError as exc:
+                             layout_error = True
+                             layout = hidden_layout(output, catalog)
+@@ -317,7 +319,7 @@ def main() -> int:
+     args = parser.parse_args()
+     try:
+         bridge = Bridge(load_token())
+-        presentation_probe(bridge)
++        max_occlusions = presentation_probe(bridge)
+         catalog = eligible(bridge.windows())
+         if args.id is not None and args.id not in {item["id"] for item in catalog}:
+             raise LayoutError("The selected Windows window is no longer granted by the host.")
+@@ -331,7 +333,7 @@ def main() -> int:
+     except (BridgeError, LayoutError, OSError) as exc:
+         print(str(exc), file=sys.stderr)
+         return 1
+-    return start_gtk(bridge, lock_fd)
++    return start_gtk(bridge, lock_fd, max_occlusions)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py b/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
+index ef51781..e093013 100644
+--- a/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
++++ b/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
+@@ -35,6 +35,24 @@ def parse_presentation(document: object) -> None:
+         raise LayoutError("The host returned an unknown window presentation mode.")
+ 
+ 
++def occlusion_limit(document: object) -> int:
++    """Use clipping only when the host explicitly advertises tile coordinates."""
++    parse_presentation(document)
++    capabilities = document.get("capabilities", {})
++    if not isinstance(capabilities, dict):
++        raise LayoutError("The host returned invalid native window capabilities.")
++    occlusions = capabilities.get("occlusions")
++    if occlusions is None:
++        return 0
++    if not isinstance(occlusions, dict):
++        raise LayoutError("The host returned invalid native window occlusion support.")
++    maximum = occlusions.get("maxRectsPerWindow")
++    coordinates = occlusions.get("coordinates")
++    if not _integer(maximum) or maximum < 1 or not isinstance(coordinates, str):
++        raise LayoutError("The host returned invalid native window occlusion limits.")
++    return min(maximum, 16) if coordinates == "tile" else 0
++
++
+ def parse_layout_ack(document: object) -> str:
+     """Return the host suspension reason from an acknowledged full layout."""
+     if not isinstance(document, dict) or document.get("accepted") is not True:
+@@ -78,7 +96,8 @@ def output_state(monitors: object) -> tuple[dict, dict]:
+     return {"width": width, "height": height}, monitor
+ 
+ 
+-def compute_layout(windows: object, clients: object, monitors: object, locked: bool, pid: int) -> dict:
++def compute_layout(windows: object, clients: object, monitors: object, locked: bool, pid: int,
++                   *, max_occlusions: int = 0) -> dict:
+     output, monitor = output_state(monitors)
+     if not isinstance(locked, bool):
+         raise LayoutError("The Omarchy lock state is unknown.")
+@@ -88,10 +107,14 @@ def compute_layout(windows: object, clients: object, monitors: object, locked: b
+         raise LayoutError("Hyprland returned an invalid client list.")
+     if not _integer(pid) or pid <= 0:
+         raise LayoutError("The native proxy process is unknown.")
++    if not _integer(max_occlusions) or not 0 <= max_occlusions <= 16:
++        raise LayoutError("The native window occlusion limit is unsupported.")
+     ids = [item.get("id") if isinstance(item, dict) else None for item in windows]
+     if len(ids) != len(set(ids)):
+         raise LayoutError("The host returned duplicate native window IDs.")
+     result = []
++    proxies: set[int] = set()
++    floating_proxies: dict[str, bool] = {}
+     for ident in ids:
+         marker = marker_for(ident)
+         matches = [client for client in clients if isinstance(client, dict)
+@@ -104,6 +127,11 @@ def compute_layout(windows: object, clients: object, monitors: object, locked: b
+             result.append(hidden)
+             continue
+         client = matches[0]
++        proxies.add(id(client))
++        if max_occlusions:
++            if not isinstance(client.get("floating"), bool):
++                raise LayoutError("The native proxy stacking state is unknown.")
++            floating_proxies[ident] = client["floating"]
+         workspace = client.get("workspace")
+         if not isinstance(workspace, dict) or not _integer(workspace.get("id")):
+             raise LayoutError("The native proxy workspace is unknown.")
+@@ -133,4 +161,55 @@ def compute_layout(windows: object, clients: object, monitors: object, locked: b
+             continue
+         result.append({"id": ident, "x": x, "y": y, "width": width,
+                        "height": height, "visible": True})
++    if max_occlusions:
++        # Hyprland layers and child popups are omitted: their bounding boxes
++        # do not prove opaque pixels and would hide native content incorrectly.
++        for tile in result:
++            if not tile["visible"]:
++                continue
++            rects = []
++            left, top = tile["x"], tile["y"]
++            right, bottom = left + tile["width"], top + tile["height"]
++            for client in clients:
++                if not isinstance(client, dict) or id(client) in proxies:
++                    continue
++                if (client.get("mapped") is False or client.get("visible") is False
++                        or client.get("hidden") is True):
++                    continue
++                if not _integer(client.get("monitor")):
++                    raise LayoutError("Hyprland returned an unknown client output.")
++                if client.get("monitor") != monitor["id"]:
++                    continue
++                workspace = client.get("workspace")
++                if not isinstance(workspace, dict) or not _integer(workspace.get("id")):
++                    raise LayoutError("Hyprland returned an unknown floating window workspace.")
++                if not isinstance(client.get("pinned"), bool):
++                    raise LayoutError("Hyprland returned an unknown floating window pin state.")
++                if workspace["id"] != monitor["activeWorkspace"]["id"] and client.get("pinned") is not True:
++                    continue
++                if (client.get("mapped") is not True or client.get("visible") is not True
++                        or client.get("hidden") is not False or not isinstance(client.get("floating"), bool)):
++                    raise LayoutError("Hyprland returned uncertain floating window visibility.")
++                if client["floating"] is False:
++                    continue
++                at, size = client.get("at"), client.get("size")
++                if not (isinstance(at, list) and isinstance(size, list) and len(at) == len(size) == 2
++                        and all(_integer(value) for value in at + size)
++                        and size[0] > 0 and size[1] > 0):
++                    raise LayoutError("Hyprland returned malformed floating window coordinates.")
++                float_left, float_top = at[0] - monitor["x"], at[1] - monitor["y"]
++                x0, y0 = max(left, float_left), max(top, float_top)
++                x1, y1 = min(right, float_left + size[0]), min(bottom, float_top + size[1])
++                if x0 >= x1 or y0 >= y1:
++                    continue
++                if floating_proxies[tile["id"]]:
++                    # hyprctl clients gives no trustworthy ordering between
++                    # floating clients. A clipped rear window would punch a
++                    # false hole into a front native proxy.
++                    raise LayoutError("Floating native and Omarchy windows overlap; stacking order is unknown.")
++                rects.append({"x": x0 - left, "y": y0 - top, "width": x1 - x0, "height": y1 - y0})
++                if len(rects) > max_occlusions:
++                    raise LayoutError("Too many floating windows overlap a native tile.")
++            if rects:
++                tile["occlusions"] = rects
+     return {"output": output, "windows": result}
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index d6a377a..1a511ec 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -170,7 +170,8 @@ kernel_release=$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d -printf '
+ # the transfer fallback when a direct paste cannot be confirmed.
+ # Revision 28 receives file drops in the background directly into folders.
+ # Revision 30 adds Windows Apps and first-run Moonlight launchers.
+-compat_revision=34
++# Revision 35 adds capability-negotiated native window clipping.
++compat_revision=35
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Fail the build if DKMS or networking modules were not packaged for this kernel.
+diff --git a/guest/tests/test_windows_native_layout.py b/guest/tests/test_windows_native_layout.py
+index 7ed0db3..3833701 100755
+--- a/guest/tests/test_windows_native_layout.py
++++ b/guest/tests/test_windows_native_layout.py
+@@ -9,7 +9,7 @@ script_dir = Path(__file__).resolve().parent
+ helper_dir = script_dir if (script_dir / "omarchy_windows_native_layout.py").exists() else script_dir.parent / "factory-overlay/usr/local/bin"
+ sys.path.insert(0, str(helper_dir))
+ 
+-from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, parse_layout_ack, parse_locked, parse_presentation
++from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation
+ 
+ WINDOW_ID = "a" * 32
+ PID = 4607
+@@ -28,7 +28,8 @@ def state():
+         "address": "0x563190857090", "mapped": True, "hidden": False,
+         "visible": True, "at": [490, 260], "size": [300, 226],
+         "workspace": {"id": 1, "name": "1"}, "monitor": 0,
+-        "pid": PID, "pinned": False, "title": "Character Map" + marker_for(WINDOW_ID),
++        "pid": PID, "pinned": False, "floating": False,
++        "title": "Character Map" + marker_for(WINDOW_ID),
+     }]
+     return windows, clients, monitors
+ 
+@@ -95,6 +96,69 @@ class NativeLayoutTest(unittest.TestCase):
+             with self.assertRaises(LayoutError):
+                 parse_locked(document)
+ 
++    def test_occlusion_capability_is_optional_and_tile_relative_only(self):
++        self.assertEqual(occlusion_limit({"mode": "native", "protocol": 1}), 0)
++        self.assertEqual(occlusion_limit({"mode": "native", "protocol": 1, "capabilities": {
++            "occlusions": {"maxRectsPerWindow": 16, "coordinates": "tile"}}}), 16)
++        self.assertEqual(occlusion_limit({"mode": "native", "protocol": 1, "capabilities": {
++            "occlusions": {"maxRectsPerWindow": 32, "coordinates": "tile"}}}), 16)
++        self.assertEqual(occlusion_limit({"mode": "native", "protocol": 1, "capabilities": {
++            "occlusions": {"maxRectsPerWindow": 16, "coordinates": "output"}}}), 0)
++        for capabilities in ([], {"occlusions": []},
++                             {"occlusions": {"maxRectsPerWindow": True, "coordinates": "tile"}},
++                             {"occlusions": {"maxRectsPerWindow": 0, "coordinates": "tile"}}):
++            with self.subTest(capabilities=capabilities), self.assertRaises(LayoutError):
++                occlusion_limit({"mode": "native", "protocol": 1, "capabilities": capabilities})
++
++    def test_floating_overlap_clips_only_with_advertised_capability(self):
++        windows, clients, monitors = state()
++        # The proxy is at 490,260 with size 300x226. A Linux floating window
++        # overlaps its right edge, and the occlusion uses proxy-local pixels.
++        clients.append({"pid": PID + 1, "mapped": True, "visible": True, "hidden": False,
++                        "floating": True, "pinned": False, "monitor": 0,
++                        "workspace": {"id": 1, "name": "1"}, "at": [700, 300], "size": [150, 100]})
++        ordinary = compute_layout(windows, clients, monitors, False, PID)
++        self.assertNotIn("occlusions", ordinary["windows"][0])
++        clipped = compute_layout(windows, clients, monitors, False, PID, max_occlusions=16)
++        self.assertEqual(clipped["windows"][0]["occlusions"], [
++            {"x": 210, "y": 40, "width": 90, "height": 100}])
++
++    def test_hidden_off_workspace_and_proxy_clients_do_not_clip(self):
++        windows, clients, monitors = state()
++        proxy = clients[0]
++        proxy["floating"] = True
++        off_workspace = {"pid": PID + 1, "mapped": True, "visible": True,
++                         "hidden": False, "floating": True, "pinned": False,
++                         "monitor": 0, "workspace": {"id": 2, "name": "2"},
++                         "at": [500, 270], "size": [100, 100]}
++        hidden = {**off_workspace, "workspace": {"id": 1, "name": "1"}, "hidden": True}
++        clients += [off_workspace, hidden]
++        tile = compute_layout(windows, clients, monitors, False, PID, max_occlusions=16)["windows"][0]
++        self.assertNotIn("occlusions", tile)
++
++    def test_many_or_malformed_visible_float_clients_fail_closed(self):
++        windows, clients, monitors = state()
++        floating = {"pid": PID + 1, "mapped": True, "visible": True,
++                    "hidden": False, "floating": True, "pinned": False,
++                    "monitor": 0, "workspace": {"id": 1, "name": "1"},
++                    "at": [500, 270], "size": [100, 100]}
++        clients += [{**floating} for _ in range(17)]
++        with self.assertRaises(LayoutError):
++            compute_layout(windows, clients, monitors, False, PID, max_occlusions=16)
++        clients = state()[1] + [{**floating, "size": [100, False]}]
++        with self.assertRaises(LayoutError):
++            compute_layout(windows, clients, monitors, False, PID, max_occlusions=16)
++
++    def test_overlapping_floating_proxy_rejects_unknown_stacking_order(self):
++        windows, clients, monitors = state()
++        clients[0]["floating"] = True
++        clients.append({"pid": PID + 1, "mapped": True, "visible": True,
++                        "hidden": False, "floating": True, "pinned": False,
++                        "monitor": 0, "workspace": {"id": 1, "name": "1"},
++                        "at": [500, 270], "size": [100, 100]})
++        with self.assertRaisesRegex(LayoutError, "stacking order"):
++            compute_layout(windows, clients, monitors, False, PID, max_occlusions=16)
++
+     def test_layout_ack_distinguishes_focus_suspension_from_display_failure(self):
+         self.assertEqual(parse_layout_ack({"accepted": True}), "")
+         self.assertEqual(parse_layout_ack({"accepted": True, "suspended": "host_inactive"}), "host_inactive")
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index cb29222..0cb6fef 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -266,7 +266,7 @@ def main() -> None:
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     compat_paths = finalize_rootfs.split("compat_paths=(", 1)[1].split(")", 1)[0]
+     check(
+-        "compat_revision=34" in finalize_rootfs
++        "compat_revision=35" in finalize_rootfs
+         and "usr/local/lib/try-omarchy/catch-up" in compat_paths
+         and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
+         and "etc/skel/.config/nvim/lua/plugins/theme.lua" in compat_paths
+-- 
+2.53.0.windows.3
+

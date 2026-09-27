@@ -11,7 +11,7 @@ import (
 )
 
 func runAbout() {
-	message := fmt.Sprintf("Try Omarchy %s\n\nRun Omarchy on Windows. Your files persist between sessions.\n\nLauncher updates and Linux updates are separate. For Linux packages and Omarchy, use Update > Omarchy inside the desktop.\n\nCheck for launcher updates now?", currentVersion)
+	message := fmt.Sprintf("Omarchy %s\n\nRun Omarchy on Windows. Your files persist between sessions.\n\nUpdate > Omarchy in the desktop shows the guarded package update status. Guest package installation waits for a validated update plan and stopped-disk recovery. This window checks signed launcher releases.\n\nCheck for launcher updates now?", currentVersion)
 	if msgBox(message, mbYesNo|mbIconQuestion|mbDefbutton2) != idYes {
 		return
 	}
@@ -33,7 +33,7 @@ func runAbout() {
 	if msgBox("Update available: "+manifest.Version+"\nInstalled: "+currentVersion+"\n\nOpen the release notes and download page? Close Omarchy before opening the new launcher.", mbYesNo|mbIconQuestion) != idYes {
 		return
 	}
-	openWindowsURL("https://github.com/omacom/try-omarchy-windows/releases/tag/" + manifest.Version)
+	openWindowsURL("https://github.com/z4mbo/Omarchy-Windows/releases/tag/" + manifest.Version)
 }
 func openWindowsURL(url string) {
 	cmd := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", url)

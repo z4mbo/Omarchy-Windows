@@ -51,6 +51,12 @@ func buildQemuArgs(cfg *config, cmdline string) []string {
 	if cfg.irqchipOff {
 		machine += ",kernel-irqchip=off"
 	}
+	// The Windows fallback QEMU lacks WINQ-EMU's refresh-rate option. Keep its
+	// original display arguments rather than making CPU fallback fail to boot.
+	refreshMilliHz := cfg.displayRefreshMilliHz
+	if cfg.runtimeID == "" {
+		refreshMilliHz = 0
+	}
 	if cfg.useGpu {
 		args = append(args,
 			"-machine", machine, "-cpu", "host", "-smp", smp, "-m", mem,
@@ -61,7 +67,7 @@ func buildQemuArgs(cfg *config, cmdline string) []string {
 			// window-close=off: the X must not hard-kill a running OS; the
 			// close guard intercepts the click and confirms + shuts down
 			// gracefully instead (closeguard.go).
-			"-display", sdlDisplay(true, cfg.hostCursor),
+			"-display", sdlDisplayWithRefresh(true, cfg.hostCursor, refreshMilliHz),
 			"-serial", "file:"+filepath.Join(vm, "serial-gpu.log"),
 		)
 	} else {
@@ -69,7 +75,7 @@ func buildQemuArgs(cfg *config, cmdline string) []string {
 			"-machine", machine, "-cpu", "qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt,+aes",
 			"-smp", smp, "-m", mem,
 			"-vga", "none", "-device", displayDevice(cfg, hostmem),
-			"-display", sdlDisplay(false, cfg.hostCursor),
+			"-display", sdlDisplayWithRefresh(false, cfg.hostCursor, refreshMilliHz),
 			"-serial", "file:"+filepath.Join(vm, "serial.log"),
 		)
 	}
@@ -125,12 +131,23 @@ func buildQemuArgs(cfg *config, cmdline string) []string {
 		"-no-reboot",
 		"-name", appTitle,
 	)
+	if cfg.experimentalNativeForeground {
+		// This SDL-only runtime registers its HWND only with one QemuConsole.
+		// Q35's default parallel VC would otherwise create a second text console.
+		args = append(args, "-parallel", "none",
+			"-qmp", "unix:"+qemuOptionValue(filepath.Join(cfg.qmpDir, qmpControlName(qmpNativePort)))+",server=on,wait=off")
+	}
 	if cfg.share != "" {
 		if cfg.supportsSharing {
 			args = append(args, "-virtfs", "local,path="+qemuOptionValue(cfg.share)+",mount_tag=hostshare,security_model=none")
 		}
 		// Stock QEMU for Windows ships no virtio-9p. main() selects the bundled
 		// runtime when possible and otherwise tells the user before continuing.
+	}
+	if cfg.windowTokenPath != "" {
+		// QEMU exposes this per-launch bearer token only to the guest through
+		// fw_cfg. Keep the secret out of argv and the kernel command line.
+		args = append(args, "-fw_cfg", "name=opt/omarchy/seamless-token,file="+qemuOptionValue(cfg.windowTokenPath))
 	}
 	if cfg.fullscreen {
 		args = append(args, "-full-screen")
@@ -185,6 +202,18 @@ func sdlDisplay(gpu, hostCursor bool) string {
 		cursor = "on"
 	}
 	return "sdl,gl=" + gl + ",show-cursor=" + cursor + ",window-close=off"
+}
+
+// WINQ-EMU's DisplayOptions.refresh-rate is millihertz and controls the
+// virtio-gpu EDID mode advertised to Hyprland. It is global to the display
+// backend, so secondary virtual displays cannot have distinct rates yet.
+// If Windows cannot report a plausible current rate, let SDL detect it.
+func sdlDisplayWithRefresh(gpu, hostCursor bool, rateMilliHz int) string {
+	options := sdlDisplay(gpu, hostCursor)
+	if rateMilliHz >= 24000 && rateMilliHz <= 1000000 {
+		options += ",refresh-rate=" + fmt.Sprint(rateMilliHz)
+	}
+	return options
 }
 
 // prepareDisk gives the guest its writable disk: a sparse copy of the factory

@@ -1,0 +1,555 @@
+From 1b550c94b4d3864ebbec6a06df0acbc9e15b360b Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 15:15:51 +0200
+Subject: [PATCH] Package named Windows routes and mapped fullscreen proxy
+
+---
+ .../usr/local/bin/omarchy-windows-native      |  19 +-
+ .../usr/local/bin/omarchy-windows-open        |  46 ++++-
+ .../omarchy-windows-explorer.desktop          |   6 +-
+ .../omarchy-windows-league.desktop            |   6 +-
+ guest/scripts/finalize-rootfs.sh              |   6 +-
+ guest/spec.json                               |   2 +-
+ guest/tests/test_runtime_package.py           |   8 +-
+ guest/tests/test_windows_native_layout.py     |  27 ++-
+ guest/tests/test_windows_open.py              | 169 ++++++++++++++++++
+ guest/tests/verify.py                         |  14 +-
+ 10 files changed, 274 insertions(+), 29 deletions(-)
+ create mode 100644 guest/tests/test_windows_open.py
+
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-native b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+index fdbe814..8b7b9ad 100755
+--- a/guest/factory-overlay/usr/local/bin/omarchy-windows-native
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+@@ -124,6 +124,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+             self.window.set_child(label)
+             self.close_handler = self.window.connect("close-request", self.close)
+             self.fullscreen = False
++            self.mapped = False
+             self.retiring = False
+             self.workspace_target = workspace
+             self.retry_on_fullscreen = False
+@@ -138,9 +139,16 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+             if self.move.target is not None:
+                 self.move.source_id = GLib.timeout_add(150, self.move_to_inherited_workspace)
+ 
+-        def update(self, metadata: dict) -> None:
++        def update(self, metadata: dict, mapped: bool | None = None) -> None:
+             self.metadata = metadata
+             self.window.set_title((metadata["title"] or metadata["process"] or "Windows app") + marker_for(self.ident))
++            if mapped is not None:
++                # GTK fullscreen is an asynchronous compositor request. A
++                # request before Hyprland maps the proxy can be lost; allow a
++                # fresh request after the mapped client is observed.
++                if self.mapped and not mapped:
++                    self.fullscreen = None  # Reconcile after a real unmap/remap.
++                self.mapped = mapped
+             wanted = metadata["fullscreen"] is True
+             if not wanted and (self.move.target is not None or self.move.failed):
+                 self.move.cancel(GLib.source_remove)
+@@ -151,8 +159,8 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+                 self.move = WorkspaceMove(self.workspace_target)
+                 self.retry_on_fullscreen = False
+                 self.move.source_id = GLib.timeout_add(150, self.move_to_inherited_workspace)
+-            if wanted and not self.move.can_fullscreen():
+-                return  # Only fullscreen after Hyprland confirms the move.
++            if not self.mapped or (wanted and not self.move.can_fullscreen()):
++                return  # Change fullscreen only after mapping and any verified move.
+             if wanted != self.fullscreen:
+                 self.fullscreen = wanted
+                 if wanted:
+@@ -170,7 +178,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+                 location = None
+             if location is not None and location[0] == target:
+                 self.move.complete()
+-                self.update(self.metadata)
++                self.update(self.metadata, mapped=True)
+                 return False
+             if location is not None:
+                 self.controller.move_syntax = dispatch_workspace_move(
+@@ -274,7 +282,8 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+                 if ident in dismissed:
+                     continue
+                 if ident in self.views:
+-                    self.views[ident].update(metadata)
++                    self.views[ident].update(
++                        metadata, mapped=proxy_location(ident, clients, os.getpid()) is not None)
+                 else:
+                     workspace = (inherited_workspace(metadata["appGroup"], known, clients,
+                                                      os.getpid(), self.workspace_history)
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-open b/guest/factory-overlay/usr/local/bin/omarchy-windows-open
+index c18b2ad..5cf1d24 100755
+--- a/guest/factory-overlay/usr/local/bin/omarchy-windows-open
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-open
+@@ -51,7 +51,31 @@ def choose_window(windows: list[dict]) -> dict | None:
+     return next((window for window in windows if window["id"] == selected), None)
+ 
+ 
+-def main() -> int:
++def launch_target(argv: list[str]) -> str:
++    if not argv:
++        return "pick"
++    if len(argv) == 1 and argv[0] in {"explorer", "league"}:
++        return argv[0]
++    raise ValueError("expected no argument, explorer, or league")
++
++
++def matches_named_target(window: dict, target: str) -> bool:
++    group = str(window.get("appGroup", "")).lower()
++    process = (str(window.get("process", "")).replace("\\", "/").rsplit("/", 1)[-1]
++               .lower().removesuffix(".exe"))
++    if target == "explorer":
++        return group == "explorer" or process == "explorer"
++    if target == "league":
++        return group == "league" or process in {"leagueclient", "leagueclientux", "league of legends"}
++    return False
++
++
++def main(argv: list[str] | None = None) -> int:
++    try:
++        target = launch_target(sys.argv[1:] if argv is None else argv)
++    except ValueError:
++        print("Usage: omarchy-windows-open [explorer|league]", file=sys.stderr)
++        return 2
+     scripts = Path(__file__).resolve().parent
+     picker = scripts / "omarchy-windows-app"
+     if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+@@ -76,7 +100,7 @@ def main() -> int:
+         return 1
+ 
+     environment = dict(os.environ, OMARCHY_WINDOW_PREVIEW="1")
+-    result = subprocess.run([str(picker), "pick"], env=environment, check=False)
++    result = subprocess.run([str(picker), target], env=environment, check=False)
+     if result.returncode == 3:
+         return 0  # The user canceled the picker.
+     if result.returncode != 0:
+@@ -85,6 +109,7 @@ def main() -> int:
+ 
+     old_ids = {window["id"] for window in before}
+     new_windows: list[dict] = []
++    matching_new: list[dict] = []
+     all_windows = before
+     deadline = time.monotonic() + 12
+     while time.monotonic() < deadline:
+@@ -94,16 +119,25 @@ def main() -> int:
+             time.sleep(0.3)
+             continue
+         new_windows = [window for window in all_windows if window["id"] not in old_ids]
+-        if new_windows:
++        matching_new = (new_windows if target == "pick" else
++                        [window for window in new_windows if matches_named_target(window, target)])
++        if matching_new:
+             break
+         time.sleep(0.3)
+ 
++    if target == "pick":
++        candidates = new_windows or all_windows
++    else:
++        candidates = matching_new or [window for window in all_windows if matches_named_target(window, target)]
+     # Native mode uses one controller for the complete granted layout. Starting
+     # separate controllers per app would make them restore each other's windows.
+-    selected = (next(iter(new_windows or all_windows), None) if mode == "native"
+-                else choose_window(new_windows or all_windows))
++    selected = (next(iter(candidates), None) if mode == "native" else choose_window(candidates))
+     if selected is None:
+-        message("The app opened on Windows, but no window was selected for the Omarchy preview. Use the host display or try again.")
++        if target == "pick":
++            message("The app opened on Windows, but no window was selected for the Omarchy preview. Use the host display or try again.")
++        else:
++            message(f"Windows accepted the {target.title()} launch, but no matching window is shared with Omarchy. "
++                    "Choose it with 'Show Windows app in Omarchy' from the Windows Omarchy tray, then retry.")
+         return 1
+     try:
+         arguments = ([str(presenter)] if mode == "native" else
+diff --git a/guest/factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop b/guest/factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop
+index f42d568..a583248 100644
+--- a/guest/factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop
++++ b/guest/factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop
+@@ -1,8 +1,8 @@
+ [Desktop Entry]
+ Type=Application
+-Name=File Explorer on Windows host
+-Comment=Open File Explorer on the Windows host
+-Exec=/usr/local/bin/omarchy-windows-app explorer
++Name=File Explorer in Omarchy (Preview)
++Comment=Open Windows File Explorer in the Omarchy desktop
++Exec=/usr/local/bin/omarchy-windows-open explorer
+ Icon=system-file-manager
+ Terminal=false
+ Categories=System;FileManager;
+diff --git a/guest/factory-overlay/usr/share/applications/omarchy-windows-league.desktop b/guest/factory-overlay/usr/share/applications/omarchy-windows-league.desktop
+index c5e1666..5b8b03c 100644
+--- a/guest/factory-overlay/usr/share/applications/omarchy-windows-league.desktop
++++ b/guest/factory-overlay/usr/share/applications/omarchy-windows-league.desktop
+@@ -1,8 +1,8 @@
+ [Desktop Entry]
+ Type=Application
+-Name=League on Windows host
+-Comment=Launch the native Windows game on the host
+-Exec=/usr/local/bin/omarchy-windows-app league
++Name=League in Omarchy (Preview)
++Comment=Open League of Legends in the Omarchy desktop
++Exec=/usr/local/bin/omarchy-windows-open league
+ Icon=applications-games
+ Terminal=false
+ Categories=Game;
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index 2d70f66..271c3ff 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -58,7 +58,7 @@ update-desktop-database /usr/share/applications || true
+ # export, lifecycle, and readiness behavior without touching user data or
+ # attempting a full package upgrade.
+ # Deliver the local packages with the authenticated image integration. This
+-# stages an offer only; normal Omarchy Update remains the package transaction.
++# stages package bytes only; the guarded Omarchy Update makes no transaction.
+ update_repo=/usr/share/try-omarchy/update-repository
+ install -d -m 0755 "$update_repo"
+ cp /usr/share/try-omarchy/repo/*.pkg.tar.zst "$update_repo/"
+@@ -199,7 +199,9 @@ tar -C / -cf /usr/share/try-omarchy/compat-overlay.tar "${compat_paths[@]}"
+ # Revision 40 routes normal update and channel commands through the Windows
+ # gate on fresh and existing disks. The pinned upstream commands are retained
+ # for source provenance and disposable compatibility tests, not menu use.
+-compat_revision=40
++# Revision 41 carries mapped-proxy fullscreen requests and named Windows app
++# routes into the existing-disk compatibility overlay.
++compat_revision=41
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Fail the build if DKMS or networking modules were not packaged for this kernel.
+diff --git a/guest/spec.json b/guest/spec.json
+index 1e94bc0..181a554 100644
+--- a/guest/spec.json
++++ b/guest/spec.json
+@@ -30,7 +30,7 @@
+     "versionFile": "4.0.0.alpha",
+     "channel": "quattro",
+     "license": "MIT",
+-    "packageRelease": 6
++    "packageRelease": 7
+   },
+   "supplyChain": {
+     "omarchyPackagesRepository": "https://github.com/omacom-io/omarchy-pkgs",
+diff --git a/guest/tests/test_runtime_package.py b/guest/tests/test_runtime_package.py
+index 128f68f..798d38d 100644
+--- a/guest/tests/test_runtime_package.py
++++ b/guest/tests/test_runtime_package.py
+@@ -38,7 +38,7 @@ class RuntimePackageTests(unittest.TestCase):
+                      'omarchy-update-available', 'omarchy-channel-set'):
+             (self.root / 'usr/share/omarchy/bin' / name).symlink_to('/usr/bin/' + name)
+         self.spec = self.base / 'spec.json'
+-        self.spec.write_text(json.dumps({'upstream': {'version': '4.0.3', 'packageRelease': 6,
++        self.spec.write_text(json.dumps({'upstream': {'version': '4.0.3', 'packageRelease': 7,
+             'repository': 'https://example.invalid/omarchy', 'commit': 'a' * 40},
+             'image': {'sourceDateEpoch': 1789344000}}))
+         self.config = self.base / 'pacman.conf'
+@@ -50,7 +50,7 @@ class RuntimePackageTests(unittest.TestCase):
+         self.fake('zstd', 'cat > "${@: -1}"')
+         self.fake('pacman', '''for arg in "$@"; do
+   if [[ $arg == -U ]]; then cp "${@: -1}" "$CAPTURE"; fi
+-  if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-6'; fi
++    if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-7'; fi
+ done
+ exit 0''')
+         self.capture = self.base / 'package.tar'
+@@ -73,7 +73,7 @@ exit 0''')
+             names = set(archive.getnames())
+             metadata = archive.extractfile('.PKGINFO').read().decode()
+             self.assertIn('.INSTALL', names)
+-            self.assertIn('pkgver = 4.0.3-6', metadata)
++            self.assertIn('pkgver = 4.0.3-7', metadata)
+             self.assertIn('depend = zenity', metadata)
+             self.assertIn('usr/bin/omarchy', names)
+             self.assertIn('usr/bin/omarchy-version', names)
+@@ -105,7 +105,7 @@ exit 0''')
+     def test_database_failure_rejects_package(self):
+         self.fake('pacman', '''for arg in "$@"; do
+   if [[ $arg == -Dk ]]; then exit 1; fi
+-  if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-6'; fi
++    if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-7'; fi
+ done
+ exit 0''')
+         result = self.run_builder()
+diff --git a/guest/tests/test_windows_native_layout.py b/guest/tests/test_windows_native_layout.py
+index a360bb3..b65e972 100755
+--- a/guest/tests/test_windows_native_layout.py
++++ b/guest/tests/test_windows_native_layout.py
+@@ -55,6 +55,7 @@ class NativeLayoutTest(unittest.TestCase):
+         class FakeWindow:
+             def __init__(self, **_kwargs):
+                 self.fullscreen_calls = 0
++                self.unfullscreen_calls = 0
+                 self.present_calls = 0
+                 self.visible = False
+ 
+@@ -83,7 +84,7 @@ class NativeLayoutTest(unittest.TestCase):
+                 self.fullscreen_calls += 1
+ 
+             def unfullscreen(self):
+-                pass
++                self.unfullscreen_calls += 1
+ 
+             def close(self):
+                 pass
+@@ -160,6 +161,30 @@ class NativeLayoutTest(unittest.TestCase):
+             controller.views[retiring_id].retire()
+             self.assertIn(73, removed_sources)
+ 
++            # An already-fullscreen host app can appear in the first catalog
++            # before its GTK proxy is mapped. Defer the one request until
++            # Hyprland reports that exact proxy as a mapped client.
++            standalone_id = "e" * 32
++            standalone = {**game, "id": standalone_id, "title": "Blender",
++                          "appGroup": "blender"}
++            controller.apply_catalog([standalone], [])
++            standalone_view = controller.views[standalone_id]
++            self.assertEqual(standalone_view.window.fullscreen_calls, 0)
++            mapped = {"pid": os.getpid(), "title": "Blender" + marker_for(standalone_id),
++                      "address": "0x5678", "mapped": True,
++                      "workspace": {"id": 2, "name": "2"}}
++            controller.apply_catalog([standalone], [mapped])
++            self.assertEqual(standalone_view.window.fullscreen_calls, 1)
++            controller.apply_catalog([standalone], [mapped])
++            self.assertEqual(standalone_view.window.fullscreen_calls, 1)
++            controller.apply_catalog([standalone], [])
++            controller.apply_catalog([standalone], [mapped])
++            self.assertEqual(standalone_view.window.fullscreen_calls, 2)
++            controller.apply_catalog([{**standalone, "fullscreen": False}], [mapped])
++            self.assertEqual(standalone_view.window.unfullscreen_calls, 1)
++            controller.apply_catalog([standalone], [mapped])
++            self.assertEqual(standalone_view.window.fullscreen_calls, 3)
++
+     def test_new_fullscreen_game_inherits_client_workspace(self):
+         _, clients, _ = state()
+         clients[0]["address"] = "0x563190857090"
+diff --git a/guest/tests/test_windows_open.py b/guest/tests/test_windows_open.py
+new file mode 100644
+index 0000000..69cb9cc
+--- /dev/null
++++ b/guest/tests/test_windows_open.py
+@@ -0,0 +1,169 @@
++"""The Omarchy menu routes named Windows apps through the window presenter."""
++
++from __future__ import annotations
++
++import importlib.machinery
++import importlib.util
++import os
++from pathlib import Path
++import sys
++from types import SimpleNamespace
++import unittest
++from unittest import mock
++
++
++SCRIPT = Path(__file__).resolve().parents[1] / "factory-overlay/usr/local/bin/omarchy-windows-open"
++loader = importlib.machinery.SourceFileLoader("omarchy_windows_open_test_target", str(SCRIPT))
++spec = importlib.util.spec_from_loader(loader.name, loader)
++assert spec is not None
++module = importlib.util.module_from_spec(spec)
++sys.path.insert(0, str(SCRIPT.parent))
++try:
++    loader.exec_module(module)
++finally:
++    sys.path.pop(0)
++
++
++class OpenTargetTests(unittest.TestCase):
++    def test_named_target_matches_only_its_host_app_group_or_process(self) -> None:
++        charmap = {"appGroup": "charmap", "process": "charmap.exe"}
++        explorer = {"appGroup": "explorer", "process": "explorer.exe"}
++        league = {"appGroup": "unknown", "process": r"C:\Games\LeagueClientUx.exe"}
++        self.assertFalse(module.matches_named_target(charmap, "explorer"))
++        self.assertFalse(module.matches_named_target(charmap, "league"))
++        self.assertTrue(module.matches_named_target(explorer, "explorer"))
++        self.assertFalse(module.matches_named_target(explorer, "league"))
++        self.assertTrue(module.matches_named_target(league, "league"))
++
++    def test_only_named_app_targets_or_picker_are_accepted(self) -> None:
++        self.assertEqual(module.launch_target([]), "pick")
++        for target in ("explorer", "league"):
++            self.assertEqual(module.launch_target([target]), target)
++        for arguments in (["arbitrary"], ["explorer", "league"], ["open", "shortcut-abc"]):
++            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
++                module.launch_target(arguments)
++
++    def test_invalid_argument_exits_before_any_bridge_or_launch(self) -> None:
++        with mock.patch.object(module, "Bridge") as bridge, mock.patch.object(module.subprocess, "run") as run:
++            self.assertEqual(module.main(["unknown"]), 2)
++            bridge.assert_not_called()
++            run.assert_not_called()
++
++    def test_named_app_launch_failure_never_starts_presenter(self) -> None:
++        class Bridge:
++            def __init__(self, _token: str) -> None:
++                pass
++
++            def presentation_mode(self) -> str:
++                return "native"
++
++            def windows(self) -> list[dict]:
++                return []
++
++        for target in ("explorer", "league", "pick"):
++            with self.subTest(target=target):
++                calls: list[tuple[list[str], dict]] = []
++                messages: list[str] = []
++
++                def run(arguments: list[str], **kwargs: object) -> SimpleNamespace:
++                    calls.append((arguments, kwargs))
++                    return SimpleNamespace(returncode=0 if arguments[-1] == "--probe" else 1)
++
++                with (mock.patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-test"}),
++                      mock.patch.object(module, "Bridge", Bridge),
++                      mock.patch.object(module, "load_token", return_value="test-token"),
++                      mock.patch.object(module, "message", side_effect=messages.append),
++                      mock.patch.object(module.subprocess, "run", side_effect=run),
++                      mock.patch.object(module.subprocess, "Popen") as popen):
++                    self.assertEqual(module.main([] if target == "pick" else [target]), 1)
++                    popen.assert_not_called()
++                self.assertEqual(len(calls), 2)
++                self.assertEqual(calls[0][0][-1], "--probe")
++                self.assertEqual(calls[1][0][-1], target)
++                self.assertEqual(calls[1][1]["env"]["OMARCHY_WINDOW_PREVIEW"], "1")
++                self.assertTrue(any("could not open" in item.lower() for item in messages))
++
++    def test_named_explorer_ignores_unrelated_grants_while_waiting_for_selector(self) -> None:
++        unrelated = {"id": "character-map", "appGroup": "charmap", "process": "charmap.exe"}
++        new_unrelated = {"id": "calculator", "appGroup": "calc", "process": "Calculator.exe"}
++
++        class Bridge:
++            calls = 0
++
++            def __init__(self, _token: str) -> None:
++                pass
++
++            def presentation_mode(self) -> str:
++                return "native"
++
++            def windows(self) -> list[dict]:
++                self.calls += 1
++                return [unrelated] if self.calls == 1 else [unrelated, new_unrelated]
++
++        messages: list[str] = []
++        with (mock.patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-test"}),
++              mock.patch.object(module, "Bridge", Bridge),
++              mock.patch.object(module, "load_token", return_value="test-token"),
++              mock.patch.object(module, "message", side_effect=messages.append),
++              mock.patch.object(module.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
++              mock.patch.object(module.subprocess, "Popen") as popen,
++              mock.patch.object(module.time, "monotonic", side_effect=[0, 0, 1, 12]),
++              mock.patch.object(module.time, "sleep")):
++            self.assertEqual(module.main(["explorer"]), 1)
++            popen.assert_not_called()
++        self.assertTrue(any("no matching window" in text and "tray" in text for text in messages))
++
++    def test_named_explorer_uses_new_matching_grant_after_unrelated_one(self) -> None:
++        unrelated = {"id": "character-map", "appGroup": "charmap", "process": "charmap.exe"}
++        explorer = {"id": "explorer-new", "appGroup": "explorer", "process": "explorer.exe"}
++
++        class Bridge:
++            calls = 0
++
++            def __init__(self, _token: str) -> None:
++                pass
++
++            def presentation_mode(self) -> str:
++                return "native"
++
++            def windows(self) -> list[dict]:
++                self.calls += 1
++                return [unrelated] if self.calls <= 2 else [unrelated, explorer]
++
++        with (mock.patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-test"}),
++              mock.patch.object(module, "Bridge", Bridge),
++              mock.patch.object(module, "load_token", return_value="test-token"),
++              mock.patch.object(module.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
++              mock.patch.object(module.subprocess, "Popen") as popen,
++              mock.patch.object(module.time, "monotonic", side_effect=[0, 0, 1]),
++              mock.patch.object(module.time, "sleep")):
++            self.assertEqual(module.main(["explorer"]), 0)
++            popen.assert_called_once()
++
++    def test_named_explorer_can_reuse_only_an_existing_explorer_grant(self) -> None:
++        unrelated = {"id": "character-map", "appGroup": "charmap", "process": "charmap.exe"}
++        explorer = {"id": "explorer-existing", "appGroup": "explorer", "process": "explorer.exe"}
++
++        class Bridge:
++            def __init__(self, _token: str) -> None:
++                pass
++
++            def presentation_mode(self) -> str:
++                return "native"
++
++            def windows(self) -> list[dict]:
++                return [unrelated, explorer]
++
++        with (mock.patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-test"}),
++              mock.patch.object(module, "Bridge", Bridge),
++              mock.patch.object(module, "load_token", return_value="test-token"),
++              mock.patch.object(module.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
++              mock.patch.object(module.subprocess, "Popen") as popen,
++              mock.patch.object(module.time, "monotonic", side_effect=[0, 0, 12]),
++              mock.patch.object(module.time, "sleep")):
++            self.assertEqual(module.main(["explorer"]), 0)
++            popen.assert_called_once()
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index ad455e0..8cde5e3 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -47,7 +47,7 @@ def main() -> None:
+     check(spec["runtime"]["virtualMachineMonitor"] == "qemu-system-x86_64", "runtime uses native x86 QEMU")
+     check(spec["runtime"]["hypervisor"] == "whpx", "runtime uses Windows Hypervisor Platform")
+     check(spec["runtime"]["storage"]["expandedSizeMiB"] == 24576, "working disk expands to 24 GiB")
+-    check(spec["upstream"].get("packageRelease") == 6
++    check(spec["upstream"].get("packageRelease") == 7
+           and "depend = zenity" in read(GUEST / "scripts/register-omarchy-runtime.sh"),
+           "the updated Omarchy runtime requires Zenity on existing guest disks")
+     check(set(spec["inputs"]) == {"packages", "packageLock", "pacmanConfig"}, "spec has a minimal input set")
+@@ -273,7 +273,7 @@ def main() -> None:
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     compat_paths = finalize_rootfs.split("compat_paths=(", 1)[1].split(")", 1)[0]
+     check(
+-        "compat_revision=40" in finalize_rootfs
++        "compat_revision=41" in finalize_rootfs
+         and "usr/local/lib/try-omarchy/catch-up" in compat_paths
+         and "usr/share/try-omarchy/vdso-overlay.sha256" in compat_paths
+         and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
+@@ -368,6 +368,8 @@ def main() -> None:
+         and windows_open.stat().st_mode & stat.S_IXUSR != 0
+         and windows_present.stat().st_mode & stat.S_IXUSR != 0
+         and windows_native.stat().st_mode & stat.S_IXUSR != 0
++        and "self.mapped = False" in windows_native.read_text()
++        and "mapped=proxy_location(ident, clients, os.getpid()) is not None" in windows_native.read_text()
+         and windows_native_layout.exists()
+         and "presentation_mode" in windows_open.read_text()
+         and windows_protocol.exists()
+@@ -385,6 +387,8 @@ def main() -> None:
+         and "Before=display-manager.service" in token_service.read_text()
+         and (GUEST / "factory-overlay/etc/systemd/system/multi-user.target.wants/try-omarchy-seamless-token.service").is_symlink()
+         and "--probe" in windows_open.read_text()
++        and 'target = launch_target(sys.argv[1:] if argv is None else argv)' in windows_open.read_text()
++        and "matching_new" in windows_open.read_text()
+         and "movetoworkspacesilent" in windows_present.read_text()
+         and "10.0.2.2/4456" in windows_app.read_text()
+         and "launch_verb=preview" in windows_app.read_text()
+@@ -395,8 +399,10 @@ def main() -> None:
+         and "Name=Windows Desktop (Preview)" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-desktop.desktop")
+         and "Exec=/usr/local/bin/omarchy-windows-desktop" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-desktop.desktop")
+         and "Name=Open on Windows host (Preview)" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-apps.desktop")
+-        and "Name=File Explorer on Windows host" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop")
+-        and "Name=League on Windows host" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-league.desktop")
++        and "Name=File Explorer in Omarchy (Preview)" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop")
++        and "Exec=/usr/local/bin/omarchy-windows-open explorer" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-explorer.desktop")
++        and "Name=League in Omarchy (Preview)" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-league.desktop")
++        and "Exec=/usr/local/bin/omarchy-windows-open league" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-league.desktop")
+         and "Exec=/usr/local/bin/omarchy-windows-app pick" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-apps.desktop")
+         and "Name=Windows Apps in Omarchy (Preview)" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-open.desktop")
+         and "Exec=/usr/local/bin/omarchy-windows-open" in read(GUEST / "factory-overlay/usr/share/applications/omarchy-windows-open.desktop"),
+-- 
+2.53.0.windows.3
+

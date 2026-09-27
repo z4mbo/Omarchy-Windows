@@ -39,6 +39,23 @@ func TestMultipleDisplayDeviceIncludesEnabledOutputs(t *testing.T) {
 	}
 }
 
+func TestMultipleDisplayDeviceUsesPerMonitorSizes(t *testing.T) {
+	cfg := &config{displays: 2, displayWidth: 1920, displayHeight: 1080,
+		displaySizes: []guestDisplaySize{{Width: 2560, Height: 1440}, {Width: 3440, Height: 1440}}}
+	var device struct {
+		Outputs []struct {
+			Width  int `json:"xres"`
+			Height int `json:"yres"`
+		} `json:"outputs"`
+	}
+	if err := json.Unmarshal([]byte(displayDevice(cfg, 512<<20)), &device); err != nil {
+		t.Fatal(err)
+	}
+	if len(device.Outputs) != 2 || device.Outputs[0].Width != 2560 || device.Outputs[0].Height != 1440 || device.Outputs[1].Width != 3440 || device.Outputs[1].Height != 1440 {
+		t.Fatalf("initial guest output sizes: %+v", device.Outputs)
+	}
+}
+
 func TestDisplayIdentityAndIndependentPlacements(t *testing.T) {
 	index, ok := displayIndexFromTitle("QEMU (" + appTitle + "-2) [Stopped]")
 	if !ok || index != 2 {

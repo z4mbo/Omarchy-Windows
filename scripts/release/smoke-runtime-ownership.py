@@ -45,7 +45,7 @@ def main():
     spec.loader.exec_module(harness)
     harness.FIXTURES = fixtures
     for index, phase in enumerate(('upgrade', 'reboot'), 1):
-        harness.boot(artifacts, disk, phase, work / f'{index:02}-{phase}.log', {}, args.timeout)
+        harness.boot(artifacts, disk, 'raw', phase, work / f'{index:02}-{phase}.log', {}, args.timeout)
     print(f'Runtime ownership passed; retained disk and logs: {work}')
 
 

@@ -1,0 +1,26 @@
+From f2038c1715cee193605f2d19df41195a982dee67 Mon Sep 17 00:00:00 2001
+From: Try Omarchy Release <actions@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 15:58:55 +0200
+Subject: [PATCH] Refresh the guest package lock
+
+imagemagick 7.1.2.31-2 -> 7.1.2.32-1
+---
+ guest/packages.lock.json | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/guest/packages.lock.json b/guest/packages.lock.json
+index 6ee7b48..560b855 100644
+--- a/guest/packages.lock.json
++++ b/guest/packages.lock.json
+@@ -173,7 +173,7 @@
+     "hyprwire": "0.3.1-3",
+     "iana-etc": "20260617-1",
+     "icu": "78.3-1",
+-    "imagemagick": "7.1.2.31-2",
++    "imagemagick": "7.1.2.32-1",
+     "imath": "3.2.3-1",
+     "imv": "5.0.1-2",
+     "iniparser": "4.3.0-1",
+-- 
+2.53.0.windows.3
+

@@ -21,6 +21,8 @@ func qmpControlName(role int) string {
 		return "forward.sock"
 	case qmpSupPort:
 		return "supervisor.sock"
+	case qmpNativePort:
+		return "native.sock"
 	default:
 		return ""
 	}
@@ -65,7 +67,7 @@ func prepareQMPControl() (string, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
-	for _, role := range []int{qmpToolsPort, qmpFwdPort, qmpSupPort} {
+	for _, role := range []int{qmpToolsPort, qmpFwdPort, qmpSupPort, qmpNativePort} {
 		path, err := qmpControlPath(role)
 		if err != nil {
 			return "", err

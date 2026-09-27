@@ -6,6 +6,7 @@ const (
 	qmpToolsPort  = 4445
 	qmpFwdPort    = 4446
 	qmpSupPort    = 4447
+	qmpNativePort = 4454 // private AF_UNIX monitor for native foreground permission
 	clipPushPort  = 4448
 	clipPullPort  = 4449
 	lifecyclePort = 4450

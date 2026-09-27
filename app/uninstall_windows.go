@@ -109,6 +109,15 @@ func removeLauncherShortcuts(target string) error {
 	if err != nil {
 		return err
 	}
+	legacy, err := legacyLauncherShortcutPaths()
+	if err != nil {
+		return err
+	}
+	// Older personal builds also wrote a Desktop Settings shortcut. Remove it
+	// only when it points at this installation, like every other owned link.
+	paths = append(paths, filepath.Join(filepath.Dir(paths[2]), "Omarchy Settings.lnk"))
+	legacy = append(legacy, filepath.Join(filepath.Dir(legacy[2]), "Try Omarchy Settings.lnk"))
+	paths = append(paths, legacy...)
 	return changeOwnedShortcuts(paths, []string{target}, func(path, _ string) error { return os.Remove(path) })
 }
 
@@ -123,11 +132,11 @@ func runUninstall(dir string) error {
 	if disk := filepath.Join(dir, "vm", "disk.raw"); fileExists(disk) {
 		f, err := openBackupDisk(disk)
 		if err != nil {
-			return fmt.Errorf("close Try Omarchy before removing it: %w", err)
+			return fmt.Errorf("close Omarchy before removing it: %w", err)
 		}
 		f.Close()
 	}
-	choice := msgBox("Remove Try Omarchy from this PC?\n\nThis deletes the Omarchy virtual disk and everything inside it, the downloaded image and runtime, settings, and the launcher in:\n\n"+dir+"\n\nShortcuts and the Apps & features entry are removed. Windows shared folders and the original download are kept.\n\nCreate a full backup first?\nYes: choose a backup. No: skip the backup. Cancel: keep everything.", mbYesNoCancel|mbIconQuestion|mbDefbutton2)
+	choice := msgBox("Remove Omarchy from this PC?\n\nThis deletes the Omarchy virtual disk and everything inside it, the downloaded image and runtime, settings, and the launcher in:\n\n"+dir+"\n\nShortcuts and the Apps & features entry are removed. Windows shared folders and the original download are kept.\n\nCreate a full backup first?\nYes: choose a backup. No: skip the backup. Cancel: keep everything.", mbYesNoCancel|mbIconQuestion|mbDefbutton2)
 	if choice != idYes && choice != idNo {
 		return nil
 	}
@@ -143,7 +152,7 @@ func runUninstall(dir string) error {
 			return err
 		}
 	}
-	if msgBox("Remove Try Omarchy and delete "+dir+" now?", mbYesNo|mbIconQuestion|mbDefbutton2) != idYes {
+	if msgBox("Remove Omarchy and delete "+dir+" now?", mbYesNo|mbIconQuestion|mbDefbutton2) != idYes {
 		return nil
 	}
 	if err := ensureLANFirewall(&config{dir: dir}); err != nil {
@@ -184,7 +193,7 @@ func runUninstall(dir string) error {
 	if err := removeAllWithRetry(dir); err != nil {
 		return err
 	}
-	infoBox("Try Omarchy was removed.")
+	infoBox("Omarchy was removed.")
 	return nil
 }
 
@@ -200,10 +209,10 @@ func finishUninstall(dir string, waitPID int) int {
 	}
 	code := 0
 	if err != nil {
-		errorBox("Try Omarchy could not delete its folder:\n\n" + dir + "\n\n" + err.Error() + "\n\nDelete it by hand to finish removing Try Omarchy.")
+		errorBox("Omarchy could not delete its folder:\n\n" + dir + "\n\n" + err.Error() + "\n\nDelete it by hand to finish removing Omarchy.")
 		code = 1
 	} else {
-		infoBox("Try Omarchy was removed.")
+		infoBox("Omarchy was removed.")
 	}
 	// Started after the message box closes, so the helper file is no longer
 	// in use by the time cmd deletes it.

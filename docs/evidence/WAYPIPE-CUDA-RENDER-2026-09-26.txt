@@ -1,0 +1,12 @@
+00:00.090  translation      | WARNING Falling back to standard locale ("C")
+00:00.448  cycles           | WARNING OptiX initialization failed with error code 7805
+00:00.449  cycles           | WARNING HIPEW initialization failed: Error opening HIP dynamic library
+GPU_DEVICES=[["NVIDIA GeForce RTX 5080", "CUDA"], ["Intel Core i9-14900KF", "CPU"]]
+ENABLED_DEVICES=[["NVIDIA GeForce RTX 5080", "CUDA", true], ["Intel Core i9-14900KF", "CPU", false]]
+00:00.980  render           | Saved: '/home/waypipeprobe/waypipe-render/render.png'
+RENDER_SIZE=5054
+RENDER_SHA256=5a13dfceeb08977c95dcc1a1c817981f92d0ddccc58618706e793a8b42645c95
+GPU_RENDER_PASSED=CUDA
+Blender 5.2.2 LTS (hash d13f752e3b9c built 2026-09-22 17:10:25)
+
+Blender quit

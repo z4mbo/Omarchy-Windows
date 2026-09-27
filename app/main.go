@@ -14,20 +14,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
 )
 
-// Try Omarchy for Windows - the native app shell. One exe replacing
+// Omarchy for Windows - the native app shell. One exe replacing
 // launch-omarchy.ps1 + winkey-forwarder.ps1 + clipboard-bridge.ps1:
 // launches QEMU (WINQ-EMU GPU stack when installed, stock CPU fallback),
 // supervises it through WHPX's rough edges, scopes the Windows key to the VM
 // window, keeps the window branded, and bridges the clipboard. The SDL window
 // IS the app - the shell itself shows nothing but error dialogs.
 
-const appTitle = "Try Omarchy"
+const appTitle = "Omarchy"
+
+// The bridge survives guest reboots, while -no-reboot starts a fresh QEMU
+// process. Advance only after Process.Start succeeds.
+var qemuProcessGeneration atomic.Uint64
 
 type config struct {
 	desktop                     desktopPreferences
@@ -39,6 +42,7 @@ type config struct {
 	instant, portable           bool
 	guestDir, vmDir, disk       string
 	qmpDir                      string
+	windowTokenPath             string
 	diskFormat                  string
 	qemu                        string
 	useGpu                      bool
@@ -47,6 +51,8 @@ type config struct {
 	memMiB                      int
 	displays                    int
 	displayWidth, displayHeight int
+	displaySizes                []guestDisplaySize
+	displayRefreshMilliHz       int
 	// kernel-irqchip=off keeps WHPX from requesting nested virtualization,
 	// which some hosts advertise and then refuse (issue #19). Set by the
 	// startup retry, never by a flag.
@@ -57,19 +63,15 @@ type config struct {
 	diskGiB        int
 	irqchipOff     bool
 	// Guest vCPUs chosen by the user (settings.json or -cpus); 0 = automatic.
-	cpuOverride  int
-	cpus         int
-	hostTotalMiB int
+	cpuOverride                  int
+	cpus                         int
+	hostTotalMiB                 int
+	adaptiveCPU                  bool
+	experimentalNativeForeground bool
 	// Rendering decision inputs, see render_probe.go.
 	renderMode    string
 	runtimeID     string
 	displayDriver string
-}
-
-// pickGuestMem sizes the guest RAM to this machine; see resources.go.
-func pickGuestMem(gpu bool) int {
-	total, avail := availMemMiB()
-	return pickGuestMemMiB(gpu, total, avail)
 }
 
 // memoryStarved reports whether the current attempt's QEMU died because the
@@ -111,6 +113,20 @@ func fatal(format string, a ...any) {
 	os.Exit(1)
 }
 
+// A failed relaunch can happen while the previous guest's native HWNDs are
+// still being restored. fatal calls os.Exit, so normal deferred bridge cleanup
+// would not run. Keep the projection watcher alive during the error dialog,
+// then make final bounded attempts on only its tracked HWNDs before exit.
+func fatalSupervisedStart(format string, a ...any) {
+	msg := fmt.Sprintf(format, a...)
+	logf("FATAL %s", msg)
+	errorBox(msg)
+	if !nativeProjectionRestoreBeforeFatal() {
+		logf("native Windows placement did not finish restoring before startup failure")
+	}
+	os.Exit(1)
+}
+
 func finishSetupCancellation(cfg *config, err error) bool {
 	if !setupCancelled() && !errors.Is(err, errSetupCancelled) {
 		return false
@@ -123,7 +139,7 @@ func finishSetupCancellation(cfg *config, err error) bool {
 	}
 	executable, _ := os.Executable()
 	if cleanupErr := cleanupCancelledSetup(cfg.dir, executable, cancelRemovesAll.Load()); cleanupErr != nil {
-		errorBox(fmt.Sprintf("Setup was cancelled, but some temporary files could not be removed:\n\n%v\n\nOmarchy data folder: %s\n\nKeep this folder. Close Try Omarchy and try again.", cleanupErr, cfg.dir))
+		errorBox(fmt.Sprintf("Setup was cancelled, but some temporary files could not be removed:\n\n%v\n\nOmarchy data folder: %s\n\nKeep this folder. Close Omarchy and try again.", cleanupErr, cfg.dir))
 	}
 	uiDone()
 	return true
@@ -133,7 +149,7 @@ func main() {
 	cfg := &config{}
 	removeDataOnCancel := false
 	defaultDir := filepath.Join(os.Getenv("LOCALAPPDATA"), defaultDataDirectoryName)
-	flag.StringVar(&cfg.dir, "dir", defaultDir, "Try Omarchy data directory (virtual machine, runtime, and settings)")
+	flag.StringVar(&cfg.dir, "dir", defaultDir, "Omarchy data directory (virtual machine, runtime, and settings)")
 	flag.StringVar(&cfg.winqEmu, "winq", `C:\WINQ-EMU`, "WINQ-EMU install path (GPU mode)")
 	flag.StringVar(&cfg.share, "share", "", "Windows folder shared into Omarchy at /mnt/host and as ~/<folder name>")
 	flag.BoolVar(&cfg.fresh, "fresh", false, "start over and retain the previous writable disk for recovery")
@@ -141,6 +157,7 @@ func main() {
 	flag.BoolVar(&cfg.fullscreen, "fullscreen", false, "start fullscreen (Immersive)")
 	flag.IntVar(&cfg.memOverrideMiB, "memory", 0, "guest RAM in MiB (default: sized to this PC)")
 	flag.IntVar(&cfg.cpuOverride, "cpus", 0, "guest CPUs (default: sized to this PC)")
+	resourceProfileFlag := flag.String("resource-profile", "", "resource preset: balanced, maximum-performance, or manual; -cpus and -memory override individual resources")
 	flag.IntVar(&cfg.diskGiB, "disk-size", 0, "guest disk capacity in GiB (0: default; grows existing disks, never shrinks)")
 	flag.BoolVar(&cfg.noGpu, "nogpu", false, "force CPU rendering even if WINQ-EMU is installed (same as -render cpu)")
 	renderFlag := flag.String("render", "", "rendering path: auto (default), gpu, or cpu")
@@ -150,6 +167,7 @@ func main() {
 	flag.BoolVar(&cfg.hostCursor, "host-cursor", false, "force the legacy Windows cursor over the guest")
 	flag.BoolVar(&cfg.instant, "instant", false, "skip first-boot questions and use the trial account")
 	flag.BoolVar(&cfg.portable, "portable", false, "run entirely from data and payload folders beside the executable")
+	flag.BoolVar(&cfg.experimentalNativeForeground, "experimental-native-foreground", false, "developer experiment: private native-window foreground handoff with a verified patched runtime")
 	var forwards forwardList
 	flag.Var(&forwards, "forward", "forward a Windows port into Omarchy: tcp:2222:22 (local), tcp:192.168.1.5:8080:80 (LAN); repeatable")
 	firewallPlan := flag.String("firewall-plan", "", "internal: apply owned LAN firewall rules")
@@ -158,12 +176,13 @@ func main() {
 	openAbout := flag.Bool("about", false, "show version information and check for updates")
 	openDevices := flag.Bool("devices", false, "manage USB devices in the running VM")
 	recoveryAction := flag.String("recovery", "", "open backup, restore, snapshots, portable-create, reset, move, or uninstall controls")
-	uninstall := flag.Bool("uninstall", false, "remove this Try Omarchy installation: shortcuts, the Apps & features entry, and the data folder")
+	uninstall := flag.Bool("uninstall", false, "remove this Omarchy installation: shortcuts, the Apps & features entry, and the data folder")
 	uninstallFinish := flag.Bool("uninstall-finish", false, "internal: delete the data folder after the launcher inside it exits")
 	reclaim := flag.Bool("reclaim", false, "ask the running Omarchy to zero its free space so the disk file shrinks after shutdown, then exit")
 	backupPath := flag.String("backup", "", "back up a stopped standard VM to a new ZIP file, then exit")
 	restorePath := flag.String("restore", "", "restore a trusted backup into a new folder selected with -dir, then exit")
 	openSettings := flag.Bool("settings", false, "open the settings window, then exit")
+	sunshineSetup := flag.Bool("sunshine-setup", false, "set up the optional Windows desktop stream for Omarchy")
 	diagnostics := flag.Bool("diagnostics", false, "write a zip of logs, settings, and machine facts for a bug report, then exit")
 	sshKeyPath := flag.String("ssh-key", "", "public key to authorize for the Omarchy account (default: your ~/.ssh/id_*.pub when -ssh is used)")
 	noUpdate := flag.Bool("no-update", false, "do not check for launcher or guest updates")
@@ -177,11 +196,22 @@ func main() {
 	runtimeSumsSHA256 := flag.String("runtime-sums-sha256", defaultRuntimeSumsSHA256,
 		"trusted SHA256 digest of the runtime release's SHA256SUMS file")
 	enableWhp := flag.Bool("enable-whp", false, "internal: elevated helper that enables the Windows Hypervisor Platform")
+	sunshineInstall := flag.Bool("sunshine-install", false, "internal: install and locally configure Sunshine")
 	applyLauncherUpdateFlag := flag.Bool("apply-launcher-update", false, "internal: apply a staged launcher update")
 	applyLauncherRollbackFlag := flag.Bool("apply-launcher-rollback", false, "internal: restore the previous launcher")
 	updateWaitPID := flag.Int("update-wait-pid", 0, "internal: process to wait for before replacing the launcher")
 	updateRestartArgs := flag.String("update-restart-args", "", "internal: encoded launcher restart arguments")
 	flag.Parse()
+	if *sunshineInstall {
+		os.Exit(runSunshineInstallElevated())
+	}
+	if *sunshineSetup {
+		if err := runSunshineSetup(); err != nil {
+			errorBox("Could not set up the Windows desktop stream:\n\n" + err.Error())
+			os.Exit(1)
+		}
+		return
+	}
 	if *openAbout {
 		runAbout()
 		return
@@ -257,7 +287,7 @@ func main() {
 	if !cfg.portable {
 		resolved, moveErr := prepareMovedLocation(cfg.dir, !*openSettings && !*diagnostics && !*applyLauncherUpdateFlag && !*applyLauncherRollbackFlag)
 		if moveErr != nil {
-			fatal("Try Omarchy cannot finish resolving an installation move:\n\n%v", moveErr)
+			fatal("Omarchy cannot finish resolving an installation move:\n\n%v", moveErr)
 		}
 		if !pathsEqual(resolved, cfg.dir) {
 			cfg.dir = resolved
@@ -274,7 +304,7 @@ func main() {
 		cfg.payloadDir = filepath.Join(root, "payload")
 		removeDataOnCancel, err = dataDirectoryEmpty(cfg.dir)
 		if err != nil {
-			fatal("Try Omarchy cannot inspect its portable data location: %v", err)
+			fatal("Omarchy cannot inspect its portable data location: %v", err)
 		}
 		// WHP is a property of this Windows host, so its restart marker must
 		// not travel to another PC with the USB.
@@ -285,25 +315,25 @@ func main() {
 			defaultDir, cfg.dir, explicitFlags["dir"], promptForLocation, chooseFirstRunDataDirectory,
 		)
 		if err != nil {
-			fatal("Try Omarchy cannot resolve its data location: %v\n\nIf a saved location is damaged, fix or delete %s, then open Try Omarchy again.", err, dataLocationPointerPath(defaultDir))
+			fatal("Omarchy cannot resolve its data location: %v\n\nIf a saved location is damaged, fix or delete %s, then open Omarchy again.", err, dataLocationPointerPath(defaultDir))
 		}
 		if !proceed {
 			return
 		}
 		if !explicitFlags["dir"] && !pathsEqual(selected, defaultDir) {
 			if err := validateStandardDataDrive(selected); err != nil {
-				fatal("The saved Try Omarchy data location is unavailable or incompatible:\n\n%s\n\n%v\n\nReconnect the drive or delete %s to choose another location.", selected, err, dataLocationPointerPath(defaultDir))
+				fatal("The saved Omarchy data location is unavailable or incompatible:\n\n%s\n\n%v\n\nReconnect the drive or delete %s to choose another location.", selected, err, dataLocationPointerPath(defaultDir))
 			}
 		}
 		cfg.dir = selected
 		cfg.hostDir = cfg.dir
 		removeDataOnCancel, err = dataDirectoryEmpty(cfg.dir)
 		if err != nil {
-			fatal("Try Omarchy cannot inspect its data location: %v", err)
+			fatal("Omarchy cannot inspect its data location: %v", err)
 		}
 		if *applyLauncherUpdateFlag || *applyLauncherRollbackFlag {
 			if err := applyLauncherUpdate(cfg.dir, *updateWaitPID, *updateRestartArgs, *applyLauncherRollbackFlag); err != nil {
-				errorBox("Try Omarchy could not finish applying its update.\n\n" + err.Error())
+				errorBox("Omarchy could not finish applying its update.\n\n" + err.Error())
 				os.Exit(1)
 			}
 			return
@@ -349,13 +379,13 @@ func main() {
 			return
 		}
 		if err != nil {
-			errorBox("Try Omarchy could not finish the backup or restore.\n\n" + err.Error())
+			errorBox("Omarchy could not finish the backup or restore.\n\n" + err.Error())
 			os.Exit(1)
 		}
 		if *backupPath != "" {
 			infoBox("Backup saved to:\n\n" + *backupPath + "\n\nIt contains your guest files and settings. Keep it private. Shared Windows folders are not included.")
 		} else {
-			infoBox("Backup restored to:\n\n" + cfg.dir + "\n\nStart Try Omarchy with -dir pointing to this folder. Your original installation was not changed.")
+			infoBox("Backup restored to:\n\n" + cfg.dir + "\n\nStart Omarchy with -dir pointing to this folder. Your original installation was not changed.")
 		}
 		return
 	}
@@ -365,7 +395,7 @@ func main() {
 	if *diagnostics {
 		bundle, err := writeDiagnostics(cfg.dir, launcherFacts(cfg))
 		if err != nil {
-			errorBox("Try Omarchy could not write the diagnostics bundle.\n\n" + err.Error())
+			errorBox("Omarchy could not write the diagnostics bundle.\n\n" + err.Error())
 			os.Exit(1)
 		}
 		infoBox("Diagnostics written to:\n\n" + bundle + "\n\nIt contains redacted settings, recent logs, and machine facts, but no disk images or home-folder files. Review it before attaching it to an issue because logs can still contain local details.")
@@ -394,10 +424,24 @@ func main() {
 			uiDone()
 			return
 		}
-		fatal("Try Omarchy cannot read its settings: %v\n\nFix or delete the file and open Try Omarchy again.", err)
+		fatal("Omarchy cannot read its settings: %v\n\nFix or delete the file and open Omarchy again.", err)
 	}
 	if err := applySettings(cfg, userSettings, explicitFlags, &forwards, sshKeyPath); err != nil {
-		fatal("Try Omarchy cannot use its settings: %v", err)
+		fatal("Omarchy cannot use its settings: %v", err)
+	}
+	// Settings may override the default display count after flag parsing.
+	if !nativeForegroundExperimentSupported(cfg, os.Getenv("OMARCHY_WINDOWS_PRESENTATION")) {
+		fatal("The native foreground experiment requires native presentation mode and exactly one Omarchy display.")
+	}
+	resourcePrefs, err := loadResourcePreferences(cfg.dir)
+	if err != nil {
+		fatal("Cannot read resource preferences: %v", err)
+	}
+	if explicitFlags["resource-profile"] {
+		resourcePrefs.Profile = *resourceProfileFlag
+	}
+	if err := validateResourceProfile(resourcePrefs.Profile); err != nil {
+		fatal("%v", err)
 	}
 	if explicitFlags["render"] {
 		mode, err := parseRenderMode(*renderFlag)
@@ -505,7 +549,7 @@ func main() {
 	// The splash IS the launch experience: it appears here and stays on screen
 	// through every phase until the Omarchy window itself is visible (the
 	// title enforcer closes it). Setup must never look like nothing happened.
-	getUI().setStatus("Starting Try Omarchy...")
+	getUI().setStatus("Starting Omarchy...")
 	if err := configureRecommendedSharedFolder(cfg, &userSettings, settingsFile, home, explicitFlags["share"]); err != nil {
 		if finishSetupCancellation(cfg, err) {
 			return
@@ -587,7 +631,7 @@ func main() {
 			root := filepath.Join(cfg.dir, "runtime")
 			info, err := os.Stat(filepath.Join(root, "bin", qemuExe))
 			if err != nil || !info.Mode().IsRegular() {
-				fatal("The restored graphics engine is incomplete. Reinstall Try Omarchy or use a working stock QEMU installation.")
+				fatal("The restored graphics engine is incomplete. Reinstall Omarchy or use a working stock QEMU installation.")
 			}
 			gpuRoot = root
 		} else {
@@ -631,7 +675,7 @@ func main() {
 	if payloadsRolledBack {
 		ready, err := installReceiptMatches(cfg.guestDir, *release, *sumsSHA256, installedGuestArtifacts)
 		if err != nil || !ready {
-			fatal("The restored Omarchy image is incomplete. Reinstall Try Omarchy to recover it.")
+			fatal("The restored Omarchy image is incomplete. Reinstall Omarchy to recover it.")
 		}
 	} else {
 		if err := ensureGuest(cfg, *release, *sumsSHA256); err != nil {
@@ -695,18 +739,18 @@ func main() {
 	if finishSetupCancellation(cfg, checkSetupCancelled()) {
 		return
 	}
-	cfg.memMiB = pickGuestMem(cfg.useGpu)
-	if cfg.memOverrideMiB != 0 {
-		// The user's choice stands; the startup memory ladder still halves it
-		// if Windows cannot actually provide that much.
-		cfg.memMiB = cfg.memOverrideMiB
+	profile := effectiveResourceProfile(resourcePrefs.Profile, cfg.cpuOverride, cfg.memOverrideMiB)
+	getUI().setStatus("Measuring available resources...")
+	host := measureHostResources(profile == resourceMaximum)
+	allocation, err := planGuestResources(profile, host, cfg.useGpu, cfg.cpuOverride, cfg.memOverrideMiB,
+		explicitFlags["cpus"], explicitFlags["memory"])
+	if err != nil {
+		fatal("Cannot allocate resources: %v", err)
 	}
-	cfg.hostTotalMiB, _ = availMemMiB()
-	cfg.cpus = pickGuestCPUs(runtime.NumCPU())
-	if cfg.cpuOverride != 0 {
-		cfg.cpus = cfg.cpuOverride
-	}
-	logf("resources: %d of %d logical processors, %d MiB guest RAM", cfg.cpus, runtime.NumCPU(), cfg.memMiB)
+	cfg.cpus, cfg.memMiB, cfg.hostTotalMiB = allocation.CPUs, allocation.MemoryMiB, host.TotalMiB
+	cfg.adaptiveCPU = profile != resourceManual
+	logf("resources: profile=%s, %d of %d logical processors, %d MiB guest RAM; Windows available=%d MiB, CPU sample known=%t busy=%.1f%%",
+		profile, cfg.cpus, host.LogicalCPUs, cfg.memMiB, host.AvailableMiB, host.CPUKnown, host.CPUBusy*100)
 	getUI().setStatus("Starting Omarchy...")
 	stopTray := startTray(cfg)
 	defer stopTray()
@@ -717,13 +761,17 @@ func main() {
 	// Launch-UX contract (NOTES.md): guest console sized to the window it will
 	// actually get, so the picture fills it from the first frame.
 	conW, conH := screenSize(cfg.fullscreen)
-	if !cfg.fullscreen {
-		if p := rememberedWindow(cfg.dir); p != nil && !p.Maximized {
-			conW, conH = p.consoleSize()
+	if modes := launchDisplayModes(cfg.dir, cfg.fullscreen, cfg.displays); len(modes) > 0 {
+		conW, conH = modes[0].Width, modes[0].Height
+		cfg.displayRefreshMilliHz = modes[0].RefreshMilliHz
+		cfg.displaySizes = make([]guestDisplaySize, len(modes))
+		for i, mode := range modes {
+			cfg.displaySizes[i] = guestDisplaySize{Width: mode.Width, Height: mode.Height}
 		}
 	}
 	cfg.displayWidth, cfg.displayHeight = conW, conH
 	cmdline += fmt.Sprintf(" video=%dx%d", conW, conH)
+	logf("display: guest %dx%d; Windows monitor refresh %d mHz; fullscreen=%t", conW, conH, cfg.displayRefreshMilliHz, cfg.fullscreen)
 
 	reclaimDir.Store(&cfg.dir)
 	reclaimSupported.Store(cfg.diskFormat == "raw")
@@ -735,6 +783,16 @@ func main() {
 	go runCloseGuard()
 	runClipboardBridge()
 	runCameraBridge(cfg.desktop)
+	runHostAppBridge()
+	if path, stop, err := runSeamlessWindowBridge(cfg.experimentalNativeForeground); err != nil {
+		if cfg.experimentalNativeForeground {
+			fatal("Cannot start the experimental native Windows bridge: %v", err)
+		}
+		logf("seamless Windows bridge unavailable: %v", err)
+	} else {
+		cfg.windowTokenPath = path
+		defer stop()
+	}
 
 	if err := checkForwardBindings(cfg.forwards); err != nil {
 		fatal("Could not prepare port forwarding:\n\n%v", err)
@@ -779,11 +837,17 @@ func supervise(cfg *config, cmdline string) bool {
 		logf("booting - %s (attempt %d)", mode, attempt)
 		pendingReboot.Store(false)
 		guestReady.Store(false)
+		nativeHandoffGuestReady.Store(false)
 		controlDir, err := prepareQMPControl()
 		if err != nil {
-			fatal("Cannot prepare private VM controls: %v", err)
+			fatalSupervisedStart("Cannot prepare private VM controls: %v", err)
 		}
 		cfg.qmpDir = controlDir
+		if cfg.experimentalNativeForeground {
+			if err := ensureQMPControlDirectoryACL(controlDir); err != nil {
+				fatalSupervisedStart("Cannot protect the experimental native QMP control: %v", err)
+			}
+		}
 		proc = exec.Command(cfg.qemu, buildQemuArgs(cfg, cmdline)...)
 		// The w-binary's startup errors (bad args, SDL init) only ever reach
 		// stderr; without this they vanish and a dead QEMU is undebuggable.
@@ -793,18 +857,32 @@ func supervise(cfg *config, cmdline string) bool {
 			proc.Stderr = ef
 			defer ef.Close()
 		}
+		// The previous QEMU child has been reaped before another attempt. Bar
+		// old layouts, then write the new protected fw_cfg bearer before QEMU
+		// opens the file. The generation commits only after Start succeeds.
+		nextGeneration := qemuProcessGeneration.Load() + 1
+		nativeProjectionQemuGenerationPreparing(nextGeneration)
+		if err := prepareSeamlessSessionToken(cfg.windowTokenPath, nextGeneration); err != nil {
+			fatalSupervisedStart("Cannot prepare the seamless guest session: %v", err)
+		}
 		if err := proc.Start(); err != nil {
-			fatal("QEMU failed to start: %v", err)
+			fatalSupervisedStart("QEMU failed to start: %v", err)
 		}
 		qemuPid.Store(uint32(proc.Process.Pid))
+		nativeProjectionQemuGenerationStarted(qemuProcessGeneration.Add(1))
+		stopCPUScheduling := func() {}
+		if cfg.adaptiveCPU {
+			stopCPUScheduling = startAdaptiveCPUScheduling(uint32(proc.Process.Pid))
+		}
 		exited := make(chan error, 1)
-		go func() {
-			err := proc.Wait()
+		go func(child *exec.Cmd, stopCPU func()) {
+			err := child.Wait()
+			stopCPU()
 			if err != nil {
 				logf("QEMU process exited with error: %v", err)
 			}
 			exited <- err
-		}()
+		}(proc, stopCPUScheduling)
 
 		// Do NOT touch QMP during early guest boot: a monitor connection in
 		// the first seconds reliably wedges QEMU's main loop under WHPX (the
@@ -862,7 +940,7 @@ func supervise(cfg *config, cmdline string) bool {
 						logf("QEMU exited at startup - low memory, retrying with %d MiB", cfg.memMiB)
 						break probe
 					}
-					fatal("There isn't enough free memory to start Omarchy right now.\n\nClose some apps and open Try Omarchy again.")
+					fatal("There isn't enough free memory to start Omarchy right now.\n\nClose some apps and open Omarchy again.")
 				}
 				// Broken host GL (remote sessions, ancient drivers) kills the
 				// gl=on display the same way; same binary, CPU args, still up.
@@ -904,6 +982,7 @@ func supervise(cfg *config, cmdline string) bool {
 			return watch(cfg, qmp, exited)
 		}
 		qemuPid.Store(0)
+		nativeHandoffGuestReady.Store(false)
 		if !startupDead {
 			logf("QEMU is not answering (known WHPX launch wedge) - killing and retrying")
 			proc.Process.Kill()
@@ -932,6 +1011,9 @@ func watch(cfg *config, qmp *qmpConn, exited <-chan error) bool {
 	movedBootPending := false
 	for reason == "" && !procDown {
 		if guestReady.Swap(false) {
+			// QMP is already connected here; the lifecycle listener alone must
+			// never permit an experimental monitor call during early WHPX boot.
+			nativeHandoffGuestReady.Store(true)
 			commitLauncherUpdate(cfg.dir)
 			commitPayloadUpdates(cfg.dir)
 			commitCheckpointBoot(cfg.dir)
@@ -999,6 +1081,7 @@ drained:
 	}
 	guestUp.Store(false)
 	qemuPid.Store(0)
+	nativeHandoffGuestReady.Store(false)
 	// A QEMU wedged during the guest's reset can die without ever delivering
 	// its SHUTDOWN event, making reboot and poweroff indistinguishable over
 	// QMP (and the wedge also loses the serial file's final flush, so the
@@ -1021,8 +1104,9 @@ drained:
 }
 
 var (
-	pendingReboot atomic.Bool
-	guestReady    atomic.Bool
+	pendingReboot           atomic.Bool
+	guestReady              atomic.Bool
+	nativeHandoffGuestReady atomic.Bool
 )
 
 // runLifecycleListener receives the guest's shutdown intent: the image's
@@ -1032,7 +1116,7 @@ var (
 func runLifecycleListener() {
 	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", lifecyclePort))
 	if err != nil {
-		fatal("Try Omarchy looks like it's already running (port %d is in use).", lifecyclePort)
+		fatal("Omarchy looks like it's already running (port %d is in use).", lifecyclePort)
 	}
 	go func() {
 		for {
@@ -1188,7 +1272,7 @@ func compactAfterShutdown(cfg *config) {
 func sendLifecycleCommand(command string) int {
 	c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", lifecyclePort), 3*time.Second)
 	if err != nil {
-		errorBox("Try Omarchy is not running.")
+		errorBox("Omarchy is not running.")
 		return 1
 	}
 	defer c.Close()

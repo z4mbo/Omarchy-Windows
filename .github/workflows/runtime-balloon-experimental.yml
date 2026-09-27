@@ -1,0 +1,76 @@
+name: Experimental Windows balloon runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/**
+    paths:
+      - .github/workflows/runtime-balloon-experimental.yml
+      - runtime-build/experimental/balloon-decommit/**
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compile isolated WINQ-EMU balloon candidate
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Check native decommit and recommit contract
+        shell: pwsh
+        run: python runtime-build/experimental/balloon-decommit/test_win32_ram_discard.py
+
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            bison
+            diffutils
+            flex
+            git
+            mingw-w64-ucrt-x86_64-SDL2
+            mingw-w64-ucrt-x86_64-dtc
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-libepoxy
+            mingw-w64-ucrt-x86_64-libslirp
+            mingw-w64-ucrt-x86_64-libusb
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pixman
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-yaml
+            mingw-w64-ucrt-x86_64-vulkan-headers
+            mingw-w64-ucrt-x86_64-vulkan-loader
+            mingw-w64-ucrt-x86_64-zstd
+
+      - name: Build and verify separate experimental archives
+        id: build_runtime
+        shell: msys2 {0}
+        run: bash runtime-build/experimental/balloon-decommit/build.sh runtime-output-balloon-experimental
+
+      - name: Smoke test compiled QEMU
+        shell: msys2 {0}
+        run: |
+          runtime-output-balloon-experimental/smoke/qemu-system-x86_64.exe --version
+          runtime-output-balloon-experimental/smoke/qemu-system-x86_64.exe -accel help | tr -d '\r' | grep -Fx whpx
+          python runtime-build/smoke-memory.py runtime-output-balloon-experimental/smoke/qemu-system-x86_64.exe
+
+      - name: Upload isolated source and runtime
+        if: ${{ !cancelled() && steps.build_runtime.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: winq-emu-balloon-experimental
+          path: |
+            runtime-output-balloon-experimental/*.zip
+            runtime-output-balloon-experimental/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

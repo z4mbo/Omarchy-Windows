@@ -1,4 +1,4 @@
-# Releasing Try Omarchy
+# Releasing Omarchy for Windows
 
 Releases use a two-phase GitHub Actions workflow so the signed launcher can pin
 the guest manifest produced for that same release without rewriting source code
@@ -6,9 +6,10 @@ inside CI.
 
 ## One-time setup
 
-The `release` GitHub environment is restricted to the `master` branch. Its
-Azure application uses a repository-specific GitHub OIDC federated credential,
-so no client secret is stored in GitHub.
+The `release` GitHub environment must be restricted to the `master` branch of
+`z4mbo/Omarchy-Windows`. Its Azure application needs a GitHub OIDC federated
+credential for **this repository**. Credentials and environment settings from
+the upstream repository do not transfer to a fork.
 
 The environment defines these variables:
 
@@ -19,10 +20,15 @@ The environment defines these variables:
 - `AZURE_SIGNING_ACCOUNT`
 - `AZURE_SIGNING_PROFILE`
 
-It also contains the `UPDATE_SIGNING_KEY` secret. This is the base64-encoded
-PKCS#8 Ed25519 private key paired with `updatePublicKeyHex` in `app/update.go`.
-The release job uses it only after Authenticode signing to authenticate the
-small update manifest. Never store the private key in the repository.
+The owner must generate a **new** Ed25519 update key pair for this fork. Put its
+public key in `updatePublicKeyHex` in `app/update.go` and
+`expectedPublicKeyHex` in `app/cmd/sign-update/main.go`, and set the protected
+`UPDATE_SIGNING_KEY` secret to the base64-encoded PKCS#8 private key. The
+release validation rejects the inherited upstream public key. The signing
+command rejects a private key that does not match the public key in source.
+Never store the private key in the repository. Until the new key, Azure OIDC
+credential, and Artifact Signing variables are configured, there is no signed
+one-click fork release.
 
 The Azure application needs the `Artifact Signing Certificate Profile Signer`
 role on the signing account. The workflow itself requests only `id-token: write`
@@ -38,14 +44,18 @@ artifact for verification. Use it after changing the OIDC or signing configurati
 1. Add the new version section to `CHANGELOG.md` and push it to `master`.
 2. Run the `Release` workflow with phase `prepare` and the new preview tag.
 3. The workflow applies the locked guest patches, runs the guest contract tests,
-   rebuilds the image, boots the instant account headlessly, authenticates every
+   rebuilds the image, boots the instant account and one-display desktop,
+   checks the Windows Apps integration and per-boot token, authenticates every
    artifact, and creates a draft release.
 4. Download the draft `SHA256SUMS`, add it under `app/testdata`, and update
    `defaultReleaseURL`, `defaultSumsSHA256`, and the embedded fixture name in
    `app/manifest.go`. Update `currentVersion` in `app/update.go` and the numeric and text versions
    in `app/versioninfo.rc` to the same tag. Regenerate
    `app/rsrc_windows_amd64.syso` using the commands in `versioninfo.rc`.
-5. Run `scripts/release/validate-pin.py TAG`, commit, and push the pin.
+5. Run `scripts/release/validate-pin.py TAG --require-independent-key`, commit,
+   and push the pin. The launcher must point at the new release in
+   `z4mbo/Omarchy-Windows`; the inherited v0.0.20 upstream pin is accepted only
+   as a temporary CI bootstrap before the first fork release.
 
 The pinned tag must be on `master` before `publish` runs: the workflow's guard
 requires `refs/heads/master`, and the publish phase verifies that the source pin
@@ -111,10 +121,10 @@ Run the `Release` workflow again with phase `publish` and the same tag. It:
 - signs current update metadata with the protected Ed25519 update key;
 - verifies Authenticode before upload;
 - publishes without changing `Latest`;
-- verifies the public tagged launcher, checksum, manifest, and guest URL through
-  both the current repository and the original repository redirect;
-- marks the release `Latest`, then verifies both repositories' `latest/download`
-  paths, including the legacy and current signed update feeds.
+- verifies the public tagged launcher, checksum, manifest, and guest URL in
+  `z4mbo/Omarchy-Windows`;
+- marks the release `Latest`, then verifies the fork's `latest/download` paths
+  for the launcher and both signed update feed names.
 
 If public verification fails, the release stays published but does not replace
 the previous `Latest` release.
@@ -131,33 +141,14 @@ user data.
 
 ## Moving from preview to stable
 
-Ship and test a bridge preview containing the stable-version updater before
-publishing v1. Set the release environment variable `LEGACY_UPDATE_BRIDGE_TAG`
-to that published preview tag. Keep its launcher, payload, and signed metadata
-available permanently. Stable publication refuses to proceed without verified
-bridge metadata.
+The fork's first release has its own signing key, update feed, and release URL.
+It cannot update installations signed by upstream or make upstream's old
+`update.json` feed point to this fork. Both `update.json` and `update-v2.json`
+in fork releases contain the current fork metadata; fork launchers use the v2
+feed. Keep both names available for tools that inspect release assets.
 
-Each release carries two signed feeds:
-
-- `update-v2.json` describes the current release and is used by the bridge and
-  all newer launchers.
-- `update.json` is for older launchers, which only accept preview tags. Preview
-  releases use their own metadata; stable releases carry the original signed
-  bridge metadata unchanged.
-
-An old installation that misses the bridge still finds it through the stable
-release's legacy feed. After installing the bridge, its next scheduled update
-check uses the current feed and can install stable. The normal Latest launcher
-link always serves the current executable. Signature verification, pinned
-payload hashes, and rollback remain required at both steps.
-
-Before v1, test an old preview against a candidate stable release with both
-feeds, then verify bridge installation, stable installation, and forced
-rollback on physical Windows with a copied guest disk. Also test a direct
-stable download and a subsequent stable update. Automated tests cover feed
-routing and recovery-state parsing, but do not replace these Windows checks.
-
+Before v1, test direct stable installation, updates from a published fork
+preview, and forced rollback on physical Windows with a copied guest disk.
 Stable installations never automatically switch to a preview. The workflow
-also prevents a later preview or older version from replacing a newer stable
-Latest release. Retain the bridge feed on every future stable release so
-infrequently used installations can still update.
+prevents a later preview or older version from replacing a newer stable
+Latest release.

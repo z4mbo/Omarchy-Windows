@@ -1,0 +1,26 @@
+From 8ab3d9f8d672a8241613d2b4d8469c21052c1a8e Mon Sep 17 00:00:00 2001
+From: Try Omarchy Release <actions@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 17:23:28 +0200
+Subject: [PATCH] Refresh the guest package lock
+
+fastfetch 2.68.1-1 -> 2.69.0-1 from the CI35 synchronized Arch transaction.
+---
+ guest/packages.lock.json | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/guest/packages.lock.json b/guest/packages.lock.json
+index 560b855..99bcd94 100644
+--- a/guest/packages.lock.json
++++ b/guest/packages.lock.json
+@@ -71,7 +71,7 @@
+     "expat": "2.8.5-1",
+     "eza": "0.23.5-2",
+     "fakeroot": "1:1.37.2-3",
+-    "fastfetch": "2.68.1-1",
++    "fastfetch": "2.69.0-1",
+     "fcft": "3.3.3-1",
+     "fcitx5": "5.1.23-1",
+     "fcitx5-gtk": "5.1.7-1",
+-- 
+2.53.0.windows.3
+

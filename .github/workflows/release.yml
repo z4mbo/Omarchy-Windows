@@ -33,6 +33,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           test "$GITHUB_REF" = refs/heads/master
+          test "$GITHUB_REPOSITORY" = z4mbo/Omarchy-Windows
           [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview)?$ ]]
 
   prepare:
@@ -78,8 +79,8 @@ jobs:
       - name: Add and verify the locked runtime
         run: scripts/release/prepare-assets.sh "$ARTIFACT_DIR"
 
-      - name: Smoke-test instant first boot
-        run: scripts/release/smoke-guest.py "$ARTIFACT_DIR"
+      - name: Smoke-test instant first desktop boot
+        run: scripts/release/smoke-guest.py "$ARTIFACT_DIR" --displays 1
 
       - name: Remove unpacked release input
         run: rm -- "$ARTIFACT_DIR/rootfs.ext4"
@@ -134,9 +135,7 @@ jobs:
       id-token: write
     env:
       RELEASE_TAG: ${{ inputs.release_tag }}
-      # Keep the redirected legacy URL for the first release after transfer so
-      # v0.0.7 can authenticate and install its bridge update.
-      UPDATE_RELEASE_REPOSITORY: tsouth89/try-omarchy-windows
+      UPDATE_RELEASE_REPOSITORY: ${{ github.repository }}
       TRYOMARCHY_UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
     steps:
       - name: Check out source
@@ -149,7 +148,7 @@ jobs:
           cache-dependency-path: app/go.sum
 
       - name: Validate test release pin
-        run: python scripts/release/validate-pin.py $env:RELEASE_TAG
+        run: python scripts/release/validate-pin.py $env:RELEASE_TAG --repository $env:GITHUB_REPOSITORY --require-independent-key
 
       - name: Build optimized launcher
         working-directory: app
@@ -211,10 +210,90 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+  guest-upgrade:
+    name: Verify existing guest before publishing
+    if: inputs.phase == 'publish'
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 190
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate pinned release and obtain upgrade inputs
+        run: |
+          python3 scripts/release/validate-pin.py --require-independent-key "$RELEASE_TAG"
+          prepared=$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish)
+          [[ "$prepared" =~ ^[0-9a-f]{40}$ ]]
+          # Committing the manifest pin after preparation is expected. Changes
+          # to image or runtime inputs require a newly prepared candidate.
+          git diff --exit-code "$prepared" "$GITHUB_SHA" -- \
+            guest-build scripts/windows-apps runtime-build \
+            scripts/release/build-guest.sh scripts/release/prepare-assets.sh \
+            .github/workflows/release.yml
+          gh release download "$RELEASE_TAG" --dir guest-upgrade-input \
+            --pattern SHA256SUMS --pattern build-spec.json \
+            --pattern vmlinuz-linux --pattern initramfs-linux.img
+
+      - name: Prepare upgrade runner
+        run: |
+          test "$(readlink -f "$RUNNER_TOOL_CACHE")" = /opt/hostedtoolcache
+          sudo rm -rf -- /opt/hostedtoolcache
+          test "$(df --output=avail -B1G "$RUNNER_TEMP" | tail -1)" -ge 35
+          test -e /dev/kvm
+          sudo chmod 666 /dev/kvm
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends qemu-system-x86 qemu-utils zstd gcc libc6-dev
+
+      - name: Authenticate baseline and pinned candidate
+        run: |
+          digest=$(sha256sum "app/testdata/SHA256SUMS.$RELEASE_TAG" | cut -d' ' -f1)
+          python3 scripts/release/prepare-guest-upgrade.py \
+            guest-upgrade-input "$RUNNER_TEMP/guest-upgrade-baseline" \
+            --candidate-manifest-sha256 "$digest"
+
+      - name: Upgrade older disk and verify preservation across boots
+        run: |
+          python3 scripts/release/smoke-guest-upgrade.py \
+            "$RUNNER_TEMP/guest-upgrade-baseline" guest-upgrade-input \
+            "$RUNNER_TEMP/guest-upgrade-evidence" --disk-mode qcow2
+
+      - name: Retain upgrade logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-guest-upgrade-evidence
+          path: ${{ runner.temp }}/guest-upgrade-evidence/*.log
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Recover from interrupted package writes
+        run: |
+          python3 scripts/release/smoke-package-write-recovery.py \
+            guest-upgrade-input "$RUNNER_TEMP/guest-upgrade-evidence/persistent.qcow2" \
+            "$RUNNER_TEMP/package-write-evidence" --source-format qcow2
+
+      - name: Retain package-write recovery evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-package-write-recovery-evidence
+          path: |
+            ${{ runner.temp }}/package-write-evidence/*.log
+            ${{ runner.temp }}/package-write-evidence/*.json
+          retention-days: 14
+          if-no-files-found: warn
+
   publish:
     name: Sign and publish
     if: inputs.phase == 'publish'
-    needs: guard
+    needs: [guard, guest-upgrade]
     runs-on: windows-2025
     timeout-minutes: 45
     environment: release
@@ -224,12 +303,10 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.release_tag }}
-      LEGACY_UPDATE_BRIDGE_TAG: ${{ vars.LEGACY_UPDATE_BRIDGE_TAG }}
       AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      # Change this to omacom/omarchy-win after the bridge release is public.
-      UPDATE_RELEASE_REPOSITORY: tsouth89/try-omarchy-windows
+      UPDATE_RELEASE_REPOSITORY: ${{ github.repository }}
       TRYOMARCHY_UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
     steps:
       - name: Check out source
@@ -244,7 +321,7 @@ jobs:
       - name: Validate source pin and draft payloads
         shell: pwsh
         run: |
-          python scripts/release/validate-pin.py $env:RELEASE_TAG
+          python scripts/release/validate-pin.py $env:RELEASE_TAG --repository $env:GITHUB_REPOSITORY --require-independent-key
           New-Item -ItemType Directory -Force release-manifest | Out-Null
           gh release download $env:RELEASE_TAG -p SHA256SUMS -D release-manifest --clobber
           $fixture = "app/testdata/SHA256SUMS.$env:RELEASE_TAG"
@@ -326,27 +403,11 @@ jobs:
             -launcher ../release/TryOmarchy.exe `
             -output ../release/update.json
 
-      - name: Prepare current and legacy update feeds
+      - name: Prepare update feeds
         shell: pwsh
         run: |
           Copy-Item release/update.json release/update-v2.json
           Copy-Item release/update.json.sig release/update-v2.json.sig
-          if ($env:RELEASE_TAG -notlike '*-preview') {
-            if ($env:LEGACY_UPDATE_BRIDGE_TAG -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-preview$') {
-              throw 'Set LEGACY_UPDATE_BRIDGE_TAG to a tested, published bridge preview before releasing stable builds'
-            }
-            $bridgeDraft = gh release view $env:LEGACY_UPDATE_BRIDGE_TAG --json isDraft --jq .isDraft
-            if ($LASTEXITCODE -ne 0 -or $bridgeDraft -ne 'false') { throw 'The bridge must be public' }
-            $newerThanBridge = python scripts/release/release-order.py $env:RELEASE_TAG $env:LEGACY_UPDATE_BRIDGE_TAG
-            if ($LASTEXITCODE -ne 0 -or $newerThanBridge -ne 'true') { throw 'Stable must be newer than the bridge' }
-            New-Item -ItemType Directory -Force bridge-metadata | Out-Null
-            gh release download $env:LEGACY_UPDATE_BRIDGE_TAG -p update-v2.json -p update-v2.json.sig -D bridge-metadata
-            if ($LASTEXITCODE -ne 0) { throw 'Could not download bridge metadata' }
-            go -C app run ./cmd/sign-update -verify-bridge ../bridge-metadata/update-v2.json -version $env:LEGACY_UPDATE_BRIDGE_TAG
-            if ($LASTEXITCODE -ne 0) { throw 'Bridge metadata verification failed' }
-            Copy-Item bridge-metadata/update-v2.json release/update.json
-            Copy-Item bridge-metadata/update-v2.json.sig release/update.json.sig
-          }
 
       - name: Upload launcher and release notes
         shell: pwsh
@@ -370,7 +431,6 @@ jobs:
         shell: pwsh
         run: |
           scripts/release/verify-public.ps1 -Tag $env:RELEASE_TAG
-          scripts/release/verify-public.ps1 -Tag $env:RELEASE_TAG -Repository tsouth89/try-omarchy-windows
 
       - name: Promote newer releases without replacing stable with preview
         id: promote
@@ -394,4 +454,3 @@ jobs:
         shell: pwsh
         run: |
           scripts/release/verify-public.ps1 -Tag $env:RELEASE_TAG -Latest
-          scripts/release/verify-public.ps1 -Tag $env:RELEASE_TAG -Latest -Repository tsouth89/try-omarchy-windows

@@ -1,0 +1,213 @@
+From 62b8e16e8cf86b2cf43227a27cc562e3b4a56d4f Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 14:12:46 +0200
+Subject: [PATCH] Support Lua workspace dispatch for native Windows tiles
+
+---
+ .../usr/local/bin/omarchy-windows-native      | 34 +++++++++++++----
+ .../bin/omarchy_windows_native_layout.py      | 22 +++++++++++
+ guest/scripts/finalize-rootfs.sh              |  4 +-
+ guest/tests/test_windows_native_layout.py     | 38 ++++++++++++++++++-
+ guest/tests/verify.py                         |  2 +-
+ 5 files changed, 88 insertions(+), 12 deletions(-)
+
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-native b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+index bdfe00beb61c0ae9ce8737d0d027021435f7201b..fdbe814ad642f9ea696d45965e7bdd447921a642 100755
+--- a/guest/factory-overlay/usr/local/bin/omarchy-windows-native
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+@@ -18,7 +18,7 @@ import threading
+ import time
+ import urllib.error
+ 
+-from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked, proxy_location
++from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, legacy_dispatch_needs_lua, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked, proxy_location, workspace_move_command
+ from omarchy_windows_protocol import Bridge, BridgeError, load_token
+ 
+ POLL_SECONDS = 0.4
+@@ -41,6 +41,28 @@ def hyprctl_json(command: str) -> object:
+         raise LayoutError(f"Hyprland {command} state is unavailable.") from exc
+ 
+ 
++def dispatch_workspace_move(workspace: int, address: str, syntax: str | None) -> str | None:
++    """Cache the working syntax; only a Lua parser hint triggers fallback."""
++    primary = syntax or "legacy"
++    try:
++        result = subprocess.run(workspace_move_command(workspace, address, primary),
++                                capture_output=True, text=True,
++                                timeout=HYPRCTL_TIMEOUT, check=False)
++    except (OSError, subprocess.SubprocessError):
++        return syntax
++    if result.returncode == 0:
++        return primary
++    if primary != "legacy" or not legacy_dispatch_needs_lua(result.stdout + result.stderr):
++        return syntax
++    try:
++        result = subprocess.run(workspace_move_command(workspace, address, "lua"),
++                                capture_output=True, text=True,
++                                timeout=HYPRCTL_TIMEOUT, check=False)
++    except (OSError, subprocess.SubprocessError):
++        return syntax
++    return "lua" if result.returncode == 0 else syntax
++
++
+ def presentation_probe(bridge: Bridge) -> int:
+     try:
+         return occlusion_limit(json.loads(bridge.request("/v1/presentation", timeout=1)))
+@@ -151,13 +173,8 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+                 self.update(self.metadata)
+                 return False
+             if location is not None:
+-                try:
+-                    subprocess.run(
+-                        ["hyprctl", "dispatch", "movetoworkspacesilent",
+-                         f"{target},address:{location[1]}"],
+-                        capture_output=True, timeout=HYPRCTL_TIMEOUT, check=True)
+-                except (OSError, subprocess.SubprocessError):
+-                    pass  # Retry only while the bounded move is pending.
++                self.controller.move_syntax = dispatch_workspace_move(
++                    target, location[1], self.controller.move_syntax)
+             if self.move.retry():
+                 return True
+             self.move.fail()
+@@ -196,6 +213,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+             self.status_label = None
+             self.error = ""
+             self.workspace_warning = ""
++            self.move_syntax: str | None = None
+ 
+         def do_activate(self):
+             if self.worker is not None:
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py b/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
+index 21e390122aae8b81d6bd42831f239d8f05c1485c..5e0a70b465c0af9ba7f59fccd91fbbd698ab89ed 100644
+--- a/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
++++ b/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
+@@ -45,6 +45,28 @@ def proxy_location(ident: str, clients: object, pid: int) -> tuple[int, str] | N
+     return workspace["id"], address
+ 
+ 
++def workspace_move_command(workspace: int, address: str, syntax: str) -> list[str]:
++    """Build one validated legacy or Lua Hyprland move command."""
++    if (not _integer(workspace) or not 0 < workspace < 2**31
++            or not isinstance(address, str)
++            or not re.fullmatch(r"0x[0-9a-fA-F]+", address)):
++        raise LayoutError("The native proxy has an invalid workspace or address.")
++    if syntax == "legacy":
++        return ["hyprctl", "dispatch", "movetoworkspacesilent",
++                f"{workspace},address:{address}"]
++    if syntax == "lua":
++        expression = ("hl.dsp.window.move({ workspace = " + str(workspace)
++                      + ', follow = false, window = "address:' + address + '" })')
++        return ["hyprctl", "dispatch", expression]
++    raise LayoutError("The Hyprland dispatch syntax is unknown.")
++
++
++def legacy_dispatch_needs_lua(output: str) -> bool:
++    """Retry with Lua only when Hyprland explicitly identifies Lua dispatch."""
++    return (isinstance(output, str)
++            and "dispatch in lua is a shorthand for hl.dispatch" in output)
++
++
+ def inherited_workspace(group: str, known: dict[str, str], clients: object,
+                         pid: int, history: dict[str, int]) -> int | None:
+     """Prefer the one current group workspace, then its last verified workspace."""
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index 5519d4400dadce65737cdd719a75791f0c606161..2d3abed3c17a8c3d4a9abeddc84275b058f1aa41 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -188,7 +188,9 @@ tar -C / -cf /usr/share/try-omarchy/compat-overlay.tar "${compat_paths[@]}"
+ # excludes package-owned VDSOs from the module overlay and repairs old copies.
+ # Revision 37 keeps fullscreen Windows windows within their assigned Omarchy
+ # workspace when the native projection follows a game transition.
+-compat_revision=37
++# Revision 38 accepts Hyprland's Lua workspace dispatcher while retaining the
++# older dispatcher syntax for guests that still use hyprlang configuration.
++compat_revision=38
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Fail the build if DKMS or networking modules were not packaged for this kernel.
+diff --git a/guest/tests/test_windows_native_layout.py b/guest/tests/test_windows_native_layout.py
+index 32ed882db639661851594493262c78bf2e11fc09..a360bb36b7f92765fb4ced210a0cb04bba6a6870 100755
+--- a/guest/tests/test_windows_native_layout.py
++++ b/guest/tests/test_windows_native_layout.py
+@@ -4,6 +4,7 @@ import copy
+ import os
+ from pathlib import Path
+ import runpy
++import subprocess
+ import sys
+ import types
+ import unittest
+@@ -13,7 +14,7 @@ script_dir = Path(__file__).resolve().parent
+ helper_dir = script_dir if (script_dir / "omarchy_windows_native_layout.py").exists() else script_dir.parent / "factory-overlay/usr/local/bin"
+ sys.path.insert(0, str(helper_dir))
+ 
+-from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation, proxy_location
++from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, legacy_dispatch_needs_lua, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation, proxy_location, workspace_move_command
+ 
+ WINDOW_ID = "a" * 32
+ PID = 4607
+@@ -124,7 +125,8 @@ class NativeLayoutTest(unittest.TestCase):
+             location = {"pid": os.getpid(), "title": "League game" + marker_for(game_id),
+                         "address": "0x1234", "mapped": True, "workspace": {"id": 1, "name": "1"}}
+             view.move_to_inherited_workspace.__func__.__globals__["hyprctl_json"] = lambda _command: [location]
+-            with mock.patch.object(script["subprocess"], "run") as dispatch:
++            with mock.patch.object(script["subprocess"], "run",
++                                   return_value=subprocess.CompletedProcess([], 0, "ok", "")) as dispatch:
+                 self.assertTrue(view.move_to_inherited_workspace())
+                 self.assertEqual(dispatch.call_args.args[0], [
+                     "hyprctl", "dispatch", "movetoworkspacesilent", "3,address:0x1234"])
+@@ -167,6 +169,38 @@ class NativeLayoutTest(unittest.TestCase):
+         self.assertEqual(inherited_workspace("league", known, clients, PID, {}), 4)
+         self.assertIsNone(inherited_workspace("explorer", known, clients, PID, {}))
+ 
++    def test_hyprland_move_selects_lua_only_on_specific_parser_hint(self):
++        self.assertEqual(workspace_move_command(3, "0x1234", "lua"), [
++            "hyprctl", "dispatch",
++            'hl.dsp.window.move({ workspace = 3, follow = false, window = "address:0x1234" })'])
++        self.assertEqual(workspace_move_command(3, "0x1234", "legacy"), [
++            "hyprctl", "dispatch", "movetoworkspacesilent", "3,address:0x1234"])
++        for workspace, address in ((True, "0x1234"), (0, "0x1234"),
++                                   (3, '0x1234" }) ; os.execute("bad")')):
++            with self.assertRaises(LayoutError):
++                workspace_move_command(workspace, address, "lua")
++        hint = "Note: dispatch in lua is a shorthand for hl.dispatch(...), your syntax might need to be updated."
++        self.assertTrue(legacy_dispatch_needs_lua(hint))
++        self.assertFalse(legacy_dispatch_needs_lua("invalid window address"))
++        fcntl = types.ModuleType("fcntl")
++        with mock.patch.dict(sys.modules, {"fcntl": fcntl}):
++            script = runpy.run_path(str(helper_dir / "omarchy-windows-native"), run_name="native_test")
++        failed = subprocess.CompletedProcess([], 7, "", hint)
++        ok = subprocess.CompletedProcess([], 0, "ok", "")
++        with mock.patch.object(script["subprocess"], "run", side_effect=[failed, ok, ok]) as dispatch:
++            syntax = script["dispatch_workspace_move"](3, "0x1234", None)
++            self.assertEqual(syntax, "lua")
++            self.assertEqual(dispatch.call_args_list[0].args[0],
++                             workspace_move_command(3, "0x1234", "legacy"))
++            self.assertEqual(dispatch.call_args_list[1].args[0],
++                             workspace_move_command(3, "0x1234", "lua"))
++            self.assertEqual(script["dispatch_workspace_move"](3, "0x1234", syntax), "lua")
++            self.assertEqual(dispatch.call_count, 3)
++        with mock.patch.object(script["subprocess"], "run",
++                               return_value=subprocess.CompletedProcess([], 7, "", "invalid window address")) as dispatch:
++            self.assertIsNone(script["dispatch_workspace_move"](3, "0x1234", None))
++            dispatch.assert_called_once()
++
+     def test_gone_client_uses_history_but_ambiguous_proxy_is_rejected(self):
+         _, clients, _ = state()
+         clients[0]["address"] = "0x563190857090"
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index b01bb0d38846397e9dd0db5448f41ed9305cf08b..36566077d499b8852fdbca848431068dbf9ee395 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -266,7 +266,7 @@ def main() -> None:
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     compat_paths = finalize_rootfs.split("compat_paths=(", 1)[1].split(")", 1)[0]
+     check(
+-        "compat_revision=37" in finalize_rootfs
++        "compat_revision=38" in finalize_rootfs
+         and "usr/local/lib/try-omarchy/catch-up" in compat_paths
+         and "usr/share/try-omarchy/vdso-overlay.sha256" in compat_paths
+         and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
+-- 
+2.53.0.windows.3
+

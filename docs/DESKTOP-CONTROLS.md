@@ -27,8 +27,10 @@ enabled. Both device switches retain the existing enabled behavior unless change
 About and updates is available from Settings and the tray. Manual checks verify
 the signed release metadata and offer the release notes/download page when a
 newer compatible version exists. They do not replace a running launcher. Automatic
-checks can be disabled in Advanced; Linux package updates remain separate inside
-Omarchy under Update > Omarchy.
+checks can be disabled in Advanced. In the development guest, **Update >
+Omarchy** reports the managed update status and makes no package changes while
+the validated package-plan and stopped-disk recovery path is unfinished. See
+[guest updates](GUEST-UPGRADES.md).
 
 Device and update choices live in `desktop-preferences.json`. Older launchers can
 still read `settings.json` after rollback. Older launchers do not implement the

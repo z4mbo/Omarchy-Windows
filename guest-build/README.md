@@ -83,13 +83,63 @@ Windows VM tests unless noted in the release checklist):
   launcher commits a guest-image update. Its explicit integration revision is
   bumped whenever those files must be reapplied without a kernel version change
 
+Patch 0089 bumps the integration revision to 37. New granted fullscreen Windows
+windows inherit their application group's last verified Omarchy workspace.
+The guest confirms placement before fullscreen and reports bounded placement
+failures. The helper and regression tests are included in the image and in
+existing-disk integration updates. Physical game transitions remain unverified.
+
+Patch 0088 bumped the integration revision to 36. It excludes header-owned
+vDSO objects from the module overlay and repairs authenticated, unowned copies
+left on older disks. Its five-boot upgrade test passed; see
+[the upgrade evidence](../docs/evidence/UPGRADE-COMPATIBILITY-2026-09-26.md).
+
+Patch 0087 bumped the integration revision to 35. It adds optional, negotiated
+clipping for floating Linux windows that overlap a native Windows tile. Older
+hosts retain the previous layout format; uncertain stacking hides the native
+windows with an explanation. Launcher layers and child popups still need a
+reliable compositor visibility interface and physical validation.
+
+Patch 0086 bumped the integration revision to 34. It adds native Windows layout
+proxies and host presentation-mode negotiation to fresh images and persistent
+guest upgrades. Native mode is an opt-in prototype: Windows renders the actual
+app while Hyprland controls its proxy tile. See the
+[native presentation plan](../docs/NATIVE-WINDOW-PRESENTATION.md) for acceptance
+requirements and current limits.
+
+Patch 0085 bumped the integration revision to 33. It embeds the bounded input
+worker and frame-validity checks for Windows app previews in fresh images and
+copies the helper onto older guest disks during their normal image update.
+
 Patch 0047 supplies the upstream lock PAM profile in fresh images and repairs
 only missing profiles on older guests. Existing administrator policies remain
 intact, including during runtime package upgrades.
 
-Existing guests can install the image's Omarchy runtime through the normal
-**Update > Omarchy** action. See [guest upgrades](../docs/GUEST-UPGRADES.md) for
-the delivery mechanism, recovery, and validation requirements.
+Patch 0094 (compatibility revision 40) routes installed Update, update badge,
+and channel commands through a visible Windows-managed gate. Normal actions do
+not run live pacman/AUR or upstream channel replacement. The pinned upstream
+commands remain archived only for provenance and disposable Linux compatibility
+tests. Existing guest disks receive the gate through the initramfs compatibility
+overlay. A release-approved package plan and stopped-disk checkpoint/rollback
+transaction are still required before managed guest updates can resume; see
+[guest upgrades](../docs/GUEST-UPGRADES.md).
+
+Patch 0095 (compatibility revision 41) carries the named File Explorer/League
+launcher routes and mapped-proxy fullscreen request guard into fresh images and
+older disks. It does not claim that those apps or fullscreen transitions pass
+physical acceptance tests; the current Blender fullscreen and workspace-return
+failures remain documented in [desktop evidence](../docs/evidence/NATIVE-DESKTOP-2026-09-27.md).
+
+Patch 0096 (compatibility revision 42) carries native layout-conflict guidance
+on fresh and older guest disks. It gives a safe retry/restore action for the
+observed HTTP 409 condition while retaining the underlying diagnostic error;
+it does not repair the host z-order failure or establish a physical retest.
+
+Patch 0097 (compatibility revision 43) sends an acknowledged hidden full-state
+native layout before the first visible tile on fresh and older guest disks.
+This establishes a host lease for the optional foreground handoff without
+dropping any granted windows. The handoff still requires an isolated runtime
+build and physical validation.
 
 If Arch has moved since the lock was written, refresh it first and review the diff.
 `scripts/release/refresh-guest-lock.sh` does the whole dance: it checks out the

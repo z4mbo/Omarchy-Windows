@@ -189,14 +189,14 @@ func ensureWHP(cfg *config) {
 		uptimeMs, _, _ := procGetTickCount64.Call()
 		bootTime := time.Now().Add(-time.Duration(uptimeMs) * time.Millisecond)
 		if st.ModTime().Before(bootTime) {
-			fatal("Windows' virtualization is switched on, but your PC's hardware virtualization looks disabled.\n\nEnable it in your PC's BIOS/UEFI settings (usually called Intel VT-x, AMD-V, or SVM), then start Try Omarchy again.")
+			fatal("Windows' virtualization is switched on, but your PC's hardware virtualization looks disabled.\n\nEnable it in your PC's BIOS/UEFI settings (usually called Intel VT-x, AMD-V, or SVM), then start Omarchy again.")
 		}
 		if msgBox("Windows still needs to restart once to finish setting up. Restart now?", mbYesNo|mbIconQuestion) == idYes {
 			restartWindows()
 		}
 		os.Exit(0)
 	}
-	if msgBox("Try Omarchy uses virtualization that Windows already includes (the same feature WSL2 uses), but it isn't switched on yet.\n\nWindows will ask for permission, and will need to restart once. Ready?", mbOkCancel|mbIconInfo) != idOk {
+	if msgBox("Omarchy uses virtualization that Windows already includes (the same feature WSL2 uses), but it isn't switched on yet.\n\nWindows will ask for permission, and will need to restart once. Ready?", mbOkCancel|mbIconInfo) != idOk {
 		os.Exit(0)
 	}
 	logf("enabling WHP (elevated dism)")
@@ -208,13 +208,13 @@ func ensureWHP(cfg *config) {
 		fatal("Couldn't switch on Windows' virtualization: %v", err)
 	}
 	if code == errorCancelled {
-		fatal("Try Omarchy can't run without Windows' virtualization. Start it again when you're ready to allow it.")
+		fatal("Omarchy can't run without Windows' virtualization. Start it again when you're ready to allow it.")
 	}
 	if code != 0 && code != dismRebootRequired {
 		fatal("Windows couldn't enable its virtualization feature (error %d).\n\nYou can enable it manually: Windows Features > Windows Hypervisor Platform.", code)
 	}
 	if err := os.WriteFile(marker, []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644); err != nil {
-		fatal("Try Omarchy enabled Windows' virtualization but could not record that setup needs a restart: %v", err)
+		fatal("Omarchy enabled Windows' virtualization but could not record that setup needs a restart: %v", err)
 	}
 	logf("WHP enable requested (dism exit %d)", code)
 	if code == 0 && whpPresent() {
@@ -313,7 +313,9 @@ func ensureRuntime(cfg *config, release, sumsSHA256 string) (string, error) {
 			// before failing. Recovery reconciles it on the next launch.
 			return "", err
 		}
-		os.Remove(zipPath)
+		if removeZip {
+			os.Remove(zipPath)
+		}
 		return root, nil
 	}
 	os.RemoveAll(root)

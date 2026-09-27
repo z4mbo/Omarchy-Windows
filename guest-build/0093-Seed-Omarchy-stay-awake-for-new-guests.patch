@@ -1,0 +1,95 @@
+From a72a87af6d96731f4066ebc990e4cf343bb75010 Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 14:43:42 +0200
+Subject: [PATCH] Seed Omarchy stay-awake preference for new guest homes
+
+---
+ guest/scripts/finalize-rootfs.sh     |  3 ++-
+ guest/scripts/materialize-omarchy.sh |  4 ++++
+ guest/tests/test_overlay_scripts.py  | 16 ++++++++++++++++
+ guest/tests/verify.py                |  6 +++++-
+ 4 files changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index 2d3abed3c17a8c3d4a9abeddc84275b058f1aa41..d1434e52e69e8cf2308f82474724d2261d692a4c 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -190,7 +190,8 @@ tar -C / -cf /usr/share/try-omarchy/compat-overlay.tar "${compat_paths[@]}"
+ # workspace when the native projection follows a game transition.
+ # Revision 38 accepts Hyprland's Lua workspace dispatcher while retaining the
+ # older dispatcher syntax for guests that still use hyprlang configuration.
+-compat_revision=38
++# Revision 39 seeds Omarchy's stay-awake preference for new homes only.
++compat_revision=39
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Fail the build if DKMS or networking modules were not packaged for this kernel.
+diff --git a/guest/scripts/materialize-omarchy.sh b/guest/scripts/materialize-omarchy.sh
+index 82df8520738a32409240f019cd63a4496f7fe3bd..036f1635733e962c04ca3c2f6faab59a8da7502f 100755
+--- a/guest/scripts/materialize-omarchy.sh
++++ b/guest/scripts/materialize-omarchy.sh
+@@ -178,6 +178,10 @@ install_file 0644 "$source_dir/default/hypr/toggles/flags.lua" "$root/etc/skel/.
+ # falls through to suspend-to-idle plus the lock screen. Omarchy's own toggle
+ # hides Suspend from the system menu, so switch it on for every new user.
+ touch "$root/etc/skel/.local/state/omarchy/toggles/suspend-off"
++# Omarchy's idle service treats this marker as the user's stay-awake choice.
++# Seed it only for newly created homes; upgrades must preserve later choices.
++mkdir -p "$root/etc/skel/.local/state/omarchy/indicators"
++touch "$root/etc/skel/.local/state/omarchy/indicators/stay-awake"
+ 
+ if [[ -d $source_dir/default/nautilus-python/extensions ]]; then
+   copy_tree "$source_dir/default/nautilus-python/extensions" "$root/etc/skel/.local/share/nautilus-python/extensions"
+diff --git a/guest/tests/test_overlay_scripts.py b/guest/tests/test_overlay_scripts.py
+index 5f9a051e89be64a0478ad7669e89f9a6798ee6ed..94f2780b16ffed326f4da59b68ac85faa476d2dc 100644
+--- a/guest/tests/test_overlay_scripts.py
++++ b/guest/tests/test_overlay_scripts.py
+@@ -699,6 +699,22 @@ exit 3''')
+         self.run_catch_up()
+         self.assertEqual(monitors.read_text(), "user edits\n")
+ 
++    def test_existing_user_stay_awake_choice_survives_revision_updates(self) -> None:
++        indicators = self.user / ".local/state/omarchy/indicators"
++        indicators.mkdir(parents=True)
++        marker = indicators / "stay-awake"
++        marker.touch()
++        result = self.run_catch_up()
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertTrue(marker.exists())
++
++        # The user re-enables automatic idle handling before the next update.
++        marker.unlink()
++        self.version.write_text("13:7.2.3-arch1\n")
++        result = self.run_catch_up()
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertFalse(marker.exists())
++
+     def test_edited_files_and_deliberate_toggles_are_left_alone(self) -> None:
+         monitors = self.user / ".config/hypr/monitors.lua"
+         monitors.write_text("hl.monitor({ output = \"DP-1\", scale = 2 })\n" + self.old_fragment)
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index bdf618942425a163ebab1e58aae09646035e6769..104b2fb12dc771ed962360346d0eb06e7c2f1df3 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -126,6 +126,10 @@ def main() -> None:
+         'touch "$root/etc/skel/.local/state/omarchy/toggles/suspend-off"' in materialize,
+         "new users have Omarchy's suspend-off toggle on, since a VM cannot suspend",
+     )
++    check(
++        'touch "$root/etc/skel/.local/state/omarchy/indicators/stay-awake"' in materialize,
++        "new users start with Omarchy's stay-awake preference enabled",
++    )
+     check(
+         'nvim_skel="$root/etc/skel/.config/nvim"' in materialize
+         and '[[ -d $nvim_skel ]] || fail' in materialize
+@@ -269,7 +273,7 @@ def main() -> None:
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     compat_paths = finalize_rootfs.split("compat_paths=(", 1)[1].split(")", 1)[0]
+     check(
+-        "compat_revision=38" in finalize_rootfs
++        "compat_revision=39" in finalize_rootfs
+         and "usr/local/lib/try-omarchy/catch-up" in compat_paths
+         and "usr/share/try-omarchy/vdso-overlay.sha256" in compat_paths
+         and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
+-- 
+2.53.0.windows.3
+

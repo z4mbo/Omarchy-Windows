@@ -11,6 +11,7 @@ import json
 import os
 import re
 import selectors
+import shlex
 import subprocess
 import sys
 import time
@@ -51,6 +52,7 @@ FACT_CHECKS = {
     "browser-theme-unprivileged": "sudo useradd -r -M -G wheel tryomarchy-policy-check && sudo -u tryomarchy-policy-check sudo -n /usr/bin/omarchy-theme-set-browser-policy 123abc >/dev/null && grep -q 123abc /etc/chromium/policies/managed/color.json && echo yes || echo no; sudo userdel tryomarchy-policy-check >/dev/null 2>&1",
     "browser-repair": "sudo rm /etc/sudoers.d/omarchy-theme-browser && sudo mv /etc/chromium/policies/managed /etc/chromium/policies/managed.before-test && sudo /usr/local/lib/try-omarchy/repair-browser-policy >/dev/null && sudo cmp /etc/sudoers.d/omarchy-theme-browser /usr/share/try-omarchy/omarchy-theme-browser && test -d /etc/chromium/policies/managed && echo yes || echo no",
     "media-tools": "command -v pamixer >/dev/null && command -v playerctl >/dev/null && echo yes || echo no",
+    "windows-app-picker": "command -v zenity >/dev/null && pacman -Qq zenity >/dev/null && echo yes || echo no",
     "clang": "command -v clang >/dev/null 2>&1 && echo present || echo missing",
     "yay": "pacman -Q yay >/dev/null 2>&1 && echo present || echo missing",
     "omarchy-nvim": "pacman -Q omarchy-nvim >/dev/null 2>&1 && echo present || echo missing",
@@ -72,13 +74,14 @@ EXPECTED_FACTS = {
     "icon-cache": "yes",
     "system-ownership": "yes",
     "update-repository": "active",
-    "runtime-package": "4.0.3-4",
+    "runtime-package": "4.0.3-9",
     "package-database": "clean",
     "lock-pam": "yes",
     "pacman-unlocked": "yes",
     "omarchy-version": "4.0.3",
     "browser-policy": "yes",
     "media-tools": "yes",
+    "windows-app-picker": "yes",
     "browser-repair": "yes",
     "browser-theme-unprivileged": "yes",
     "clang": "present",
@@ -100,6 +103,21 @@ EXPECTED_FACTS = {
 }
 
 
+def add_idle_guest_facts(revision: int, facts: dict[str, str], expected: dict[str, str],
+                         service_path: Path = Path("/usr/share/omarchy/shell/plugins/services/idle/Service.qml")) -> None:
+    """Check the first user's Omarchy-owned idle preference on fresh images."""
+    if revision < 39:
+        return
+    facts["idle-stay-awake-default"] = (
+        "test -f ~/.local/state/omarchy/indicators/stay-awake && "
+        f"grep -Fq stay-awake {shlex.quote(str(service_path))} && echo yes || echo no"
+    )
+    expected["idle-stay-awake-default"] = "yes"
+
+# This is a public, disposable smoke-test value, never a production bridge token.
+WINDOWS_APPS_TEST_TOKEN = "a1" * 32
+
+
 def parse_facts(transcript: bytes) -> dict[str, str]:
     """Return the last real value printed for each smoke fact.
 
@@ -115,6 +133,66 @@ def parse_facts(transcript: bytes) -> dict[str, str]:
         if "%" not in value:
             facts[name] = value
     return facts
+
+
+def add_native_guest_facts(revision: int, facts: dict[str, str], expected: dict[str, str],
+                           bin_dir: Path = Path("/usr/local/bin")) -> None:
+    """Probe revision 34's executable and its import chain in the booted image.
+
+    --help stops at argparse, before any bridge connection or GTK window, while
+    still importing the native layout and protocol modules from the image.
+    """
+    if revision < 34:
+        return
+    native = shlex.quote(str(bin_dir / "omarchy-windows-native"))
+    module_dir = shlex.quote(str(bin_dir))
+    facts["windows-apps-native"] = (
+        f"test -x {native} && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={module_dir} "
+        f"python3 {native} --help >/dev/null 2>&1 && echo yes || echo no"
+    )
+    expected["windows-apps-native"] = "yes"
+    if revision >= 37:
+        facts["windows-apps-fullscreen-workspace"] = (
+            f"{native_fullscreen_workspace_probe(bin_dir)} && echo yes || echo no"
+        )
+        expected["windows-apps-fullscreen-workspace"] = "yes"
+    if revision >= 38:
+        facts["windows-apps-lua-dispatch"] = (
+            f"{native_lua_dispatch_probe(bin_dir)} && echo yes || echo no"
+        )
+        expected["windows-apps-lua-dispatch"] = "yes"
+
+
+def native_fullscreen_workspace_probe(bin_dir: Path | str = Path("/usr/local/bin")) -> str:
+    """Exercise revision 37's client-workspace inheritance without a display."""
+    code = (
+        "from omarchy_windows_native_layout import inherited_workspace, marker_for; "
+        "ident='a'*32; pid=4607; "
+        "clients=[{'pid':pid,'title':'Game'+marker_for(ident),'mapped':True,'address':'0x123',"
+        "'workspace':{'id':3}}]; known={ident:'league'}; "
+        "assert inherited_workspace('league',known,clients,pid,{}) == 3; "
+        "assert inherited_workspace('other',known,clients,pid,{}) is None"
+    )
+    return (f"PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={shlex.quote(str(bin_dir))} "
+            f"python3 -c {shlex.quote(code)}")
+
+
+def native_lua_dispatch_probe(bin_dir: Path | str = Path("/usr/local/bin")) -> str:
+    """Exercise revision 38's validated Lua and old-config command selection."""
+    code = (
+        "from omarchy_windows_native_layout import LayoutError, legacy_dispatch_needs_lua, workspace_move_command; "
+        "old=workspace_move_command(3,'0x1234','legacy'); "
+        "new=workspace_move_command(3,'0x1234','lua'); "
+        "assert old == ['hyprctl','dispatch','movetoworkspacesilent','3,address:0x1234']; "
+        "assert new == ['hyprctl','dispatch','hl.dsp.window.move({ workspace = 3, follow = false, window = \"address:0x1234\" })']; "
+        "assert legacy_dispatch_needs_lua('Note: dispatch in lua is a shorthand for hl.dispatch(...)'); "
+        "assert not legacy_dispatch_needs_lua('invalid window address')\n"
+        "try:\n workspace_move_command(3,'0x1234!','lua')\n"
+        "except LayoutError:\n pass\n"
+        "else:\n raise AssertionError('invalid address accepted')"
+    )
+    return (f"PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={shlex.quote(str(bin_dir))} "
+            f"python3 -c {shlex.quote(code)}")
 
 
 def main() -> None:
@@ -164,6 +242,79 @@ def main() -> None:
         EXPECTED_FACTS["nvim-theme-user"] = "yes"
         FACT_CHECKS["omarchy-nvim-files"] = "sudo pacman -Qk omarchy-nvim >/dev/null 2>&1 && echo yes || echo no"
         EXPECTED_FACTS["omarchy-nvim-files"] = "yes"
+    if args.compat_revision >= 32:
+        FACT_CHECKS["windows-apps-menu"] = (
+            "test -x /usr/local/bin/omarchy-windows-app && "
+            "test -x /usr/local/bin/omarchy-windows-open && "
+            "test -x /usr/local/bin/omarchy-windows-present && "
+            "test -x /usr/local/bin/omarchy-windows-desktop && "
+            "for entry in /usr/share/applications/omarchy-windows-*.desktop; do "
+            "desktop-file-validate \"$entry\" >/dev/null 2>&1 || exit 1; "
+            "done && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-apps-menu"] = "yes"
+        FACT_CHECKS["windows-apps-token-service"] = "systemctl is-enabled try-omarchy-seamless-token.service 2>/dev/null || true"
+        EXPECTED_FACTS["windows-apps-token-service"] = "enabled"
+        FACT_CHECKS["windows-apps-token"] = (
+            f"test \"$(cat /run/try-omarchy/seamless-token 2>/dev/null)\" = {WINDOWS_APPS_TEST_TOKEN} && "
+            "test \"$(stat -c %U:%G:%a /run/try-omarchy/seamless-token 2>/dev/null)\" = root:video:640 && "
+            "test -r /run/try-omarchy/seamless-token && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-apps-token"] = "yes"
+    if args.compat_revision >= 33:
+        FACT_CHECKS["windows-apps-input-helper"] = (
+            "test -f /usr/local/bin/omarchy_windows_presenter_input.py && "
+            "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/usr/local/bin "
+            "python3 -c 'import omarchy_windows_presenter_input' >/dev/null 2>&1 && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-apps-input-helper"] = "yes"
+    if args.compat_revision >= 40:
+        FACT_CHECKS["managed-update-gate"] = (
+            "(test -x /usr/bin/omarchy-update && "
+            "test -x /usr/bin/omarchy-channel-set && "
+            "test -x /usr/bin/omarchy-update-available && "
+            "test -x /usr/local/lib/try-omarchy/update-gate && "
+            "test -x /usr/share/try-omarchy/upstream-commands/omarchy-update && "
+            "before=$(pacman -Q); "
+            "if omarchy-update -y >/tmp/tryomarchy-gated-update.log 2>&1; then exit 1; fi; "
+            "grep -q 'No packages were changed' /tmp/tryomarchy-gated-update.log && "
+            "if omarchy update -y >/tmp/tryomarchy-gated-cli.log 2>&1; then exit 1; fi; "
+            "grep -q 'No packages were changed' /tmp/tryomarchy-gated-cli.log && "
+            "if omarchy-channel-set stable >/tmp/tryomarchy-gated-channel.log 2>&1; then exit 1; fi; "
+            "grep -q 'not changed' /tmp/tryomarchy-gated-channel.log && "
+            "if omarchy-update-available >/dev/null 2>&1; then exit 1; fi; "
+            "test \"$before\" = \"$(pacman -Q)\" && "
+            "sudo pacman -Qk try-omarchy-runtime >/dev/null 2>&1) && echo yes || echo no"
+        )
+        EXPECTED_FACTS["managed-update-gate"] = "yes"
+    if args.compat_revision >= 41:
+        FACT_CHECKS["windows-named-native-routes"] = (
+            "grep -Fqx 'Exec=/usr/local/bin/omarchy-windows-open explorer' "
+            "/usr/share/applications/omarchy-windows-explorer.desktop && "
+            "grep -Fqx 'Exec=/usr/local/bin/omarchy-windows-open league' "
+            "/usr/share/applications/omarchy-windows-league.desktop && "
+            "grep -Fq 'matching_new' /usr/local/bin/omarchy-windows-open && "
+            "grep -Fq 'self.mapped = False' /usr/local/bin/omarchy-windows-native && "
+            "sudo pacman -Qk try-omarchy-runtime >/dev/null 2>&1 && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-named-native-routes"] = "yes"
+    if args.compat_revision >= 42:
+        FACT_CHECKS["windows-native-layout-guidance"] = (
+            "grep -Fq 'layout_error_message(exc)' /usr/local/bin/omarchy-windows-native && "
+            "grep -Fq 'Stop showing Windows app' /usr/local/bin/omarchy-windows-native && "
+            "sudo pacman -Qk try-omarchy-runtime >/dev/null 2>&1 && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-native-layout-guidance"] = "yes"
+    if args.compat_revision >= 43:
+        FACT_CHECKS["windows-native-hidden-bootstrap"] = (
+            "grep -Fq 'layout_with_bootstrap(output, catalog, layout, self.bootstrapped)' "
+            "/usr/local/bin/omarchy-windows-native && "
+            "grep -Fq 'self.bootstrapped = True' /usr/local/bin/omarchy-windows-native && "
+            "sudo pacman -Qk try-omarchy-runtime >/dev/null 2>&1 && echo yes || echo no"
+        )
+        EXPECTED_FACTS["windows-native-hidden-bootstrap"] = "yes"
+    add_native_guest_facts(args.compat_revision, FACT_CHECKS, EXPECTED_FACTS)
+    add_idle_guest_facts(args.compat_revision, FACT_CHECKS, EXPECTED_FACTS)
 
     login_delay = args.login_delay if args.login_delay is not None else (60 if args.accel == "tcg" else 0)
     if login_delay < 0:
@@ -298,9 +449,13 @@ print('yes')
     ]
 
     if args.displays:
-        device = {"driver": "virtio-gpu-pci", "max_outputs": args.displays,
-                  "outputs": [{"name": f"Omarchy {index + 1}", "xres": 1280, "yres": 720} for index in range(args.displays)]}
-        command.extend(["-device", json.dumps(device)])
+        # The smoke runner uses distro QEMU, which supports the standard
+        # virtio-gpu properties but not WINQ-EMU's custom outputs list.
+        # Output names and per-head geometry are exercised separately by the
+        # bundled runtime; this test checks that the factory desktop boots.
+        command.extend(["-device", f"virtio-gpu-pci,max_outputs={args.displays},xres=1280,yres=720"])
+    if args.compat_revision >= 32:
+        command.extend(["-fw_cfg", "name=opt/omarchy/seamless-token,string=" + WINDOWS_APPS_TEST_TOKEN])
 
     process = subprocess.Popen(
         command,

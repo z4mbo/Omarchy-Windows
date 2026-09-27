@@ -61,7 +61,7 @@ func comCall(obj uintptr, method int, args ...uintptr) uintptr {
 	return r
 }
 
-// setTaskbarIdentity brands hwnd's taskbar presence as Try Omarchy. Call once
+// setTaskbarIdentity brands hwnd's taskbar presence as Omarchy. Call once
 // per window; failures are logged and harmless (worst case: QEMU's icon).
 func setTaskbarIdentity(hwnd uintptr) {
 	exe, err := os.Executable()

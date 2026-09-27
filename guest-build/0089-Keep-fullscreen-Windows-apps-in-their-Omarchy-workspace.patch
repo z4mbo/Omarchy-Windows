@@ -1,0 +1,514 @@
+From 3bf7fe54aebaea44fad02a211fc5da1809cdfcdd Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sat, 26 Sep 2026 21:33:28 +0200
+Subject: [PATCH] Keep fullscreen Windows apps in their Omarchy workspace
+
+---
+ .../usr/local/bin/omarchy-windows-native      |  89 +++++++++-
+ .../bin/omarchy_windows_native_layout.py      |  79 +++++++++
+ guest/scripts/finalize-rootfs.sh              |   4 +-
+ guest/tests/test_windows_native_layout.py     | 164 +++++++++++++++++-
+ guest/tests/verify.py                         |   2 +-
+ 5 files changed, 328 insertions(+), 10 deletions(-)
+
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy-windows-native b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+index 05e3bce58d28557ca685f1b9cff24faf07d87917..bdfe00beb61c0ae9ce8737d0d027021435f7201b 100755
+--- a/guest/factory-overlay/usr/local/bin/omarchy-windows-native
++++ b/guest/factory-overlay/usr/local/bin/omarchy-windows-native
+@@ -18,7 +18,7 @@ import threading
+ import time
+ import urllib.error
+ 
+-from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked
++from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked, proxy_location
+ from omarchy_windows_protocol import Bridge, BridgeError, load_token
+ 
+ POLL_SECONDS = 0.4
+@@ -90,9 +90,10 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+         return 1
+ 
+     class NativeWindow:
+-        def __init__(self, controller: "Controller", metadata: dict):
++        def __init__(self, controller: "Controller", metadata: dict, workspace: int | None):
+             self.controller = controller
+             self.ident = metadata["id"]
++            self.metadata = metadata
+             self.window = Gtk.ApplicationWindow(application=controller)
+             self.window.set_title((metadata["title"] or metadata["process"] or "Windows app") + marker_for(self.ident))
+             self.window.set_default_size(min(metadata["width"], 1100), min(metadata["height"], 750))
+@@ -101,12 +102,35 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+             self.window.set_child(label)
+             self.close_handler = self.window.connect("close-request", self.close)
+             self.fullscreen = False
+-            self.window.present()
++            self.retiring = False
++            self.workspace_target = workspace
++            self.retry_on_fullscreen = False
++            self.move = WorkspaceMove(workspace)
++            if self.move.target is not None:
++                # Mapping is needed before Hyprland supplies an address. Do not
++                # explicitly activate the new proxy on the current workspace.
++                self.window.set_visible(True)
++            else:
++                self.window.present()
+             self.update(metadata)
++            if self.move.target is not None:
++                self.move.source_id = GLib.timeout_add(150, self.move_to_inherited_workspace)
+ 
+         def update(self, metadata: dict) -> None:
++            self.metadata = metadata
+             self.window.set_title((metadata["title"] or metadata["process"] or "Windows app") + marker_for(self.ident))
+             wanted = metadata["fullscreen"] is True
++            if not wanted and (self.move.target is not None or self.move.failed):
++                self.move.cancel(GLib.source_remove)
++                self.retry_on_fullscreen = self.workspace_target is not None
++            if wanted and self.retry_on_fullscreen:
++                # A later app-driven fullscreen transition gets a fresh,
++                # bounded placement attempt after a canceled or failed move.
++                self.move = WorkspaceMove(self.workspace_target)
++                self.retry_on_fullscreen = False
++                self.move.source_id = GLib.timeout_add(150, self.move_to_inherited_workspace)
++            if wanted and not self.move.can_fullscreen():
++                return  # Only fullscreen after Hyprland confirms the move.
+             if wanted != self.fullscreen:
+                 self.fullscreen = wanted
+                 if wanted:
+@@ -114,11 +138,42 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+                 else:
+                     self.window.unfullscreen()
+ 
++        def move_to_inherited_workspace(self) -> bool:
++            if self.retiring or self.move.target is None:
++                return False
++            target = self.move.target
++            try:
++                location = proxy_location(self.ident, hyprctl_json("clients"), os.getpid())
++            except LayoutError:
++                location = None
++            if location is not None and location[0] == target:
++                self.move.complete()
++                self.update(self.metadata)
++                return False
++            if location is not None:
++                try:
++                    subprocess.run(
++                        ["hyprctl", "dispatch", "movetoworkspacesilent",
++                         f"{target},address:{location[1]}"],
++                        capture_output=True, timeout=HYPRCTL_TIMEOUT, check=True)
++                except (OSError, subprocess.SubprocessError):
++                    pass  # Retry only while the bounded move is pending.
++            if self.move.retry():
++                return True
++            self.move.fail()
++            self.controller.warn_workspace(
++                "Could not move the Windows game to its client workspace. It remains windowed on the current workspace.")
++            return False
++
+         def close(self, *_args: object) -> bool:
++            self.retiring = True
++            self.move.cancel(GLib.source_remove)
+             self.controller.dismiss(self.ident)
+             return False
+ 
+         def retire(self) -> None:
++            self.retiring = True
++            self.move.cancel(GLib.source_remove)
+             self.window.disconnect(self.close_handler)
+             self.window.close()
+ 
+@@ -132,6 +187,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+             self.dismissed: set[str] = set()
+             self.pending_close: dict[str, tuple[int, float]] = {}
+             self.views: dict[str, NativeWindow] = {}
++            self.workspace_history: dict[str, int] = {}
+             self.last_output: dict | None = None
+             self.last_catalog: list[dict] = []
+             self.sequence = 0
+@@ -139,6 +195,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+             self.status = None
+             self.status_label = None
+             self.error = ""
++            self.workspace_warning = ""
+ 
+         def do_activate(self):
+             if self.worker is not None:
+@@ -170,7 +227,7 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+         def update_status(self) -> None:
+             if self.status is None:
+                 return
+-            message = self.error or ("No native Windows app windows are open. Close this controller or open an app on Windows."
++            message = self.error or self.workspace_warning or ("No native Windows app windows are open. Close this controller or open an app on Windows."
+                                      if not self.views else "")
+             if message:
+                 if self.status_label.get_text() != message:
+@@ -181,9 +238,15 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+             elif self.status.get_visible():
+                 self.status.hide()
+ 
+-        def apply_catalog(self, catalog: list[dict]) -> bool:
++        def apply_catalog(self, catalog: list[dict], clients: list[dict]) -> bool:
+             with self.state_lock:
+                 dismissed = set(self.dismissed)
++            known = {ident: view.metadata["appGroup"] for ident, view in self.views.items()
++                     if view.move.can_fullscreen() and not view.retiring}
++            for group in set(known.values()):
++                observed = inherited_workspace(group, known, clients, os.getpid(), {})
++                if observed is not None:
++                    self.workspace_history[group] = observed
+             live = {item["id"] for item in catalog}
+             for ident in list(self.views):
+                 if ident not in live:
+@@ -195,7 +258,10 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+                 if ident in self.views:
+                     self.views[ident].update(metadata)
+                 else:
+-                    self.views[ident] = NativeWindow(self, metadata)
++                    workspace = (inherited_workspace(metadata["appGroup"], known, clients,
++                                                     os.getpid(), self.workspace_history)
++                                 if metadata["fullscreen"] else None)
++                    self.views[ident] = NativeWindow(self, metadata, workspace)
+             self.update_status()
+             return False
+ 
+@@ -204,6 +270,13 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+             self.update_status()
+             return False
+ 
++        def warn_workspace(self, message: str) -> None:
++            self.workspace_warning = message
++            if self.status is not None:
++                self.status_label.set_text(message)
++                # Report the failed placement without an explicit focus request.
++                self.status.set_visible(True)
++
+         def clear_error(self) -> bool:
+             self.error = ""
+             self.update_status()
+@@ -258,13 +331,15 @@ def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+                             dismissed = set(self.dismissed)
+                         catalog = [item for item in catalog if item["id"] not in dismissed]
+                         self.last_catalog = catalog
+-                        GLib.idle_add(self.apply_catalog, catalog)
+                         monitors = hyprctl_json("monitors")
+                         output, _monitor = output_state(monitors)
+                         self.last_output = output
+                         layout_error = False
+                         try:
+                             clients = hyprctl_json("clients")
++                            if not isinstance(clients, list):
++                                raise LayoutError("Hyprland returned an invalid client list.")
++                            GLib.idle_add(self.apply_catalog, catalog, clients)
+                             locked = parse_locked(hyprctl_json("locked"))
+                             layout = compute_layout(catalog, clients, monitors, locked, os.getpid(),
+                                                     max_occlusions=self.max_occlusions)
+diff --git a/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py b/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
+index e093013966d30fef050408c1146f670bf7c40ccd..21e390122aae8b81d6bd42831f239d8f05c1485c 100644
+--- a/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
++++ b/guest/factory-overlay/usr/local/bin/omarchy_windows_native_layout.py
+@@ -25,6 +25,85 @@ def marker_for(ident: str) -> str:
+     return f" [Omarchy Native {hashlib.sha256(ident.encode('ascii')).hexdigest()[:16]}]"
+ 
+ 
++def proxy_location(ident: str, clients: object, pid: int) -> tuple[int, str] | None:
++    """Locate exactly one of our mapped proxies on an ordinary workspace."""
++    marker = marker_for(ident)
++    if not isinstance(clients, list) or not _integer(pid) or pid <= 0:
++        return None
++    matches = [client for client in clients if isinstance(client, dict)
++               and client.get("pid") == pid and isinstance(client.get("title"), str)
++               and client["title"].endswith(marker)]
++    if len(matches) != 1:
++        return None
++    client = matches[0]
++    address, workspace = client.get("address"), client.get("workspace")
++    if (client.get("mapped") is not True or not isinstance(address, str)
++            or not re.fullmatch(r"0x[0-9a-fA-F]+", address)
++            or not isinstance(workspace, dict) or not _integer(workspace.get("id"))
++            or workspace["id"] <= 0):
++        return None
++    return workspace["id"], address
++
++
++def inherited_workspace(group: str, known: dict[str, str], clients: object,
++                        pid: int, history: dict[str, int]) -> int | None:
++    """Prefer the one current group workspace, then its last verified workspace."""
++    observed = set()
++    if not isinstance(clients, list):
++        return None
++    for ident, existing_group in known.items():
++        if existing_group != group:
++            continue
++        marker = marker_for(ident)
++        matches = [client for client in clients if isinstance(client, dict)
++                   and client.get("pid") == pid and isinstance(client.get("title"), str)
++                   and client["title"].endswith(marker)]
++        if len(matches) > 1:
++            return None
++        if matches:
++            location = proxy_location(ident, clients, pid)
++            if location is None:
++                return None
++            observed.add(location[0])
++    if len(observed) > 1:
++        return None
++    if observed:
++        return observed.pop()
++    previous = history.get(group)
++    return previous if _integer(previous) and previous > 0 else None
++
++
++class WorkspaceMove:
++    """Track one bounded move and allow retirement to cancel its timer."""
++
++    def __init__(self, target: int | None):
++        self.target = target
++        self.attempts = 0
++        self.source_id = 0
++        self.failed = False
++
++    def retry(self) -> bool:
++        self.attempts += 1
++        return self.attempts < 12
++
++    def can_fullscreen(self) -> bool:
++        return self.target is None and not self.failed
++
++    def complete(self) -> None:
++        self.target = None
++        self.source_id = 0
++
++    def fail(self) -> None:
++        self.complete()
++        self.failed = True
++
++    def cancel(self, remove_source) -> None:
++        if self.source_id:
++            remove_source(self.source_id)
++        self.complete()
++        self.failed = False
++
++
+ def parse_presentation(document: object) -> None:
+     if not isinstance(document, dict) or type(document.get("protocol")) is not int or document["protocol"] != 1:
+         raise LayoutError("The host does not support native window protocol 1.")
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index 8eb1e0fb74df02c6027db40c0089626256e663e8..5519d4400dadce65737cdd719a75791f0c606161 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -186,7 +186,9 @@ tar -C / -cf /usr/share/try-omarchy/compat-overlay.tar "${compat_paths[@]}"
+ # Revision 30 adds Windows Apps and first-run Moonlight launchers.
+ # Revision 35 adds capability-negotiated native window clipping. Revision 36
+ # excludes package-owned VDSOs from the module overlay and repairs old copies.
+-compat_revision=36
++# Revision 37 keeps fullscreen Windows windows within their assigned Omarchy
++# workspace when the native projection follows a game transition.
++compat_revision=37
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Fail the build if DKMS or networking modules were not packaged for this kernel.
+diff --git a/guest/tests/test_windows_native_layout.py b/guest/tests/test_windows_native_layout.py
+index 38337014707e1d835c8a9978f575c2dd1ec33e3f..32ed882db639661851594493262c78bf2e11fc09 100755
+--- a/guest/tests/test_windows_native_layout.py
++++ b/guest/tests/test_windows_native_layout.py
+@@ -1,15 +1,19 @@
+ """Recorded Hyprland client shape and native projection safety cases."""
+ 
+ import copy
++import os
+ from pathlib import Path
++import runpy
+ import sys
++import types
+ import unittest
++from unittest import mock
+ 
+ script_dir = Path(__file__).resolve().parent
+ helper_dir = script_dir if (script_dir / "omarchy_windows_native_layout.py").exists() else script_dir.parent / "factory-overlay/usr/local/bin"
+ sys.path.insert(0, str(helper_dir))
+ 
+-from omarchy_windows_native_layout import LayoutError, compute_layout, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation
++from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, marker_for, occlusion_limit, parse_layout_ack, parse_locked, parse_presentation, proxy_location
+ 
+ WINDOW_ID = "a" * 32
+ PID = 4607
+@@ -35,6 +39,164 @@ def state():
+ 
+ 
+ class NativeLayoutTest(unittest.TestCase):
++    def test_gtk_proxy_waits_for_verified_workspace_before_fullscreen(self):
++        controllers = []
++        removed_sources = []
++
++        class FakeApplication:
++            def __init__(self, **_kwargs):
++                pass
++
++            def run(self, _args):
++                controllers.append(self)
++                return 0
++
++        class FakeWindow:
++            def __init__(self, **_kwargs):
++                self.fullscreen_calls = 0
++                self.present_calls = 0
++                self.visible = False
++
++            def set_title(self, _title):
++                pass
++
++            def set_default_size(self, _width, _height):
++                pass
++
++            def set_child(self, _child):
++                pass
++
++            def connect(self, *_args):
++                return 1
++
++            def disconnect(self, _handler):
++                pass
++
++            def set_visible(self, value):
++                self.visible = value
++
++            def present(self):
++                self.present_calls += 1
++
++            def fullscreen(self):
++                self.fullscreen_calls += 1
++
++            def unfullscreen(self):
++                pass
++
++            def close(self):
++                pass
++
++        class FakeLabel:
++            def __init__(self, **_kwargs):
++                pass
++
++            def set_wrap(self, _value):
++                pass
++
++        gi = types.ModuleType("gi")
++        gi.require_version = lambda *_args: None
++        repository = types.ModuleType("gi.repository")
++        repository.Gio = types.SimpleNamespace(ApplicationFlags=types.SimpleNamespace(NON_UNIQUE=1))
++        repository.GLib = types.SimpleNamespace(timeout_add=lambda _delay, _callback: 73,
++                                                source_remove=removed_sources.append)
++        repository.Gtk = types.SimpleNamespace(Application=FakeApplication,
++                                               ApplicationWindow=FakeWindow, Label=FakeLabel)
++        gi.repository = repository
++        fcntl = types.ModuleType("fcntl")
++        with mock.patch.dict(sys.modules, {"gi": gi, "gi.repository": repository, "fcntl": fcntl}):
++            script = runpy.run_path(str(helper_dir / "omarchy-windows-native"), run_name="native_test")
++            fd = os.open(os.devnull, os.O_RDONLY)
++            self.assertEqual(script["start_gtk"](object(), fd, 0), 0)
++            controller = controllers[0]
++            controller.workspace_history["league"] = 3
++            game_id = "b" * 32
++            game = {"id": game_id, "title": "League game", "process": "League.exe",
++                    "appGroup": "league", "width": 1280, "height": 720, "fullscreen": True}
++            controller.apply_catalog([game], [])
++            view = controller.views[game_id]
++            self.assertTrue(view.window.visible)
++            self.assertEqual(view.window.present_calls, 0)
++            self.assertEqual(view.window.fullscreen_calls, 0)
++            # A repeated catalog update must not bypass the pending move.
++            view.update(game)
++            self.assertEqual(view.window.fullscreen_calls, 0)
++            location = {"pid": os.getpid(), "title": "League game" + marker_for(game_id),
++                        "address": "0x1234", "mapped": True, "workspace": {"id": 1, "name": "1"}}
++            view.move_to_inherited_workspace.__func__.__globals__["hyprctl_json"] = lambda _command: [location]
++            with mock.patch.object(script["subprocess"], "run") as dispatch:
++                self.assertTrue(view.move_to_inherited_workspace())
++                self.assertEqual(dispatch.call_args.args[0], [
++                    "hyprctl", "dispatch", "movetoworkspacesilent", "3,address:0x1234"])
++            self.assertEqual(view.window.fullscreen_calls, 0)
++            location["workspace"] = {"id": 3, "name": "3"}
++            self.assertFalse(view.move_to_inherited_workspace())
++            self.assertEqual(view.window.fullscreen_calls, 1)
++
++            # If placement times out, later metadata updates must not fullscreen
++            # on the wrong workspace. Retiring another pending view removes its timer.
++            failed_id = "c" * 32
++            failed = {**game, "id": failed_id}
++            controller.apply_catalog([game, failed], [])
++            failed_view = controller.views[failed_id]
++            failed_view.move_to_inherited_workspace.__func__.__globals__["hyprctl_json"] = lambda _command: []
++            for _ in range(12):
++                failed_view.move_to_inherited_workspace()
++            failed_view.update(failed)
++            self.assertEqual(failed_view.window.fullscreen_calls, 0)
++            failed_view.update({**failed, "fullscreen": False})
++            self.assertTrue(failed_view.retry_on_fullscreen)
++            failed_view.update(failed)
++            self.assertIsNotNone(failed_view.move.target)
++            self.assertEqual(failed_view.window.fullscreen_calls, 0)
++            recovered = {**location, "title": "League game" + marker_for(failed_id)}
++            failed_view.move_to_inherited_workspace.__func__.__globals__["hyprctl_json"] = lambda _command: [recovered]
++            self.assertFalse(failed_view.move_to_inherited_workspace())
++            self.assertEqual(failed_view.window.fullscreen_calls, 1)
++            retiring_id = "d" * 32
++            controller.apply_catalog([game, failed, {**game, "id": retiring_id}], [])
++            controller.views[retiring_id].retire()
++            self.assertIn(73, removed_sources)
++
++    def test_new_fullscreen_game_inherits_client_workspace(self):
++        _, clients, _ = state()
++        clients[0]["address"] = "0x563190857090"
++        clients[0]["workspace"] = {"id": 4, "name": "4"}
++        known = {WINDOW_ID: "league"}
++        self.assertEqual(proxy_location(WINDOW_ID, clients, PID), (4, "0x563190857090"))
++        self.assertEqual(inherited_workspace("league", known, clients, PID, {}), 4)
++        self.assertIsNone(inherited_workspace("explorer", known, clients, PID, {}))
++
++    def test_gone_client_uses_history_but_ambiguous_proxy_is_rejected(self):
++        _, clients, _ = state()
++        clients[0]["address"] = "0x563190857090"
++        history = {"league": 3}
++        known = {WINDOW_ID: "league"}
++        self.assertEqual(inherited_workspace("league", known, [], PID, history), 3)
++        self.assertIsNone(inherited_workspace("league", known, clients, PID + 1, {}))
++        self.assertIsNone(inherited_workspace("league", known, clients * 2, PID, history))
++        clients[0]["mapped"] = False
++        self.assertIsNone(proxy_location(WINDOW_ID, clients, PID))
++        self.assertIsNone(inherited_workspace("league", known, clients, PID, history))
++
++    def test_workspace_move_blocks_fullscreen_until_verified_and_cancels_timer(self):
++        move = WorkspaceMove(3)
++        move.source_id = 72
++        self.assertFalse(move.can_fullscreen())
++        self.assertEqual([move.retry() for _ in range(12)], [True] * 11 + [False])
++        move.fail()
++        self.assertFalse(move.can_fullscreen())
++        self.assertIsNone(move.target)
++        retired = WorkspaceMove(3)
++        retired.source_id = 73
++        removed = []
++        retired.cancel(removed.append)
++        self.assertEqual(removed, [73])
++        self.assertIsNone(retired.target)
++        verified = WorkspaceMove(3)
++        verified.complete()
++        self.assertTrue(verified.can_fullscreen())
++
+     def test_mapped_client_uses_output_relative_rect(self):
+         windows, clients, monitors = state()
+         monitors[0]["x"] = 100
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index 6e35aac777122e088bd604e01f23edb02bf36c7f..b01bb0d38846397e9dd0db5448f41ed9305cf08b 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -266,7 +266,7 @@ def main() -> None:
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     compat_paths = finalize_rootfs.split("compat_paths=(", 1)[1].split(")", 1)[0]
+     check(
+-        "compat_revision=36" in finalize_rootfs
++        "compat_revision=37" in finalize_rootfs
+         and "usr/local/lib/try-omarchy/catch-up" in compat_paths
+         and "usr/share/try-omarchy/vdso-overlay.sha256" in compat_paths
+         and "usr/share/try-omarchy/skel-fragments/hypr-monitors-qemu.append.lua" in compat_paths
+-- 
+2.53.0.windows.3
+

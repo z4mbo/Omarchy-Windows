@@ -1,0 +1,11 @@
+[Unit]
+Description=Make the Omarchy Windows bridge token available to the desktop user
+After=local-fs.target systemd-modules-load.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/try-omarchy/export-seamless-token
+
+[Install]
+WantedBy=multi-user.target

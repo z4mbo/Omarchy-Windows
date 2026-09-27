@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Launch a native Windows app on the host, with an optional window preview.
+set -euo pipefail
+
+launch_verb=open
+[[ ${OMARCHY_WINDOW_PREVIEW:-} == 1 ]] && launch_verb=preview
+
+usage() {
+  printf 'Usage: omarchy-windows-app explorer|league|pick|list|open SHORTCUT_ID\n' >&2
+  exit 2
+}
+
+case "${1:-}" in
+  explorer|league) [[ $# == 1 ]] || usage; request="$launch_verb $1" ;;
+  list|pick) [[ $# == 1 ]] || usage; request=list ;;
+  open)
+    [[ $# == 2 && $2 =~ ^shortcut-[[:xdigit:]]{32}$ ]] || usage
+    request="$launch_verb $2"
+    ;;
+  *) usage ;;
+esac
+
+fail() {
+  printf 'Windows host app: %s\n' "$1" >&2
+  if [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]] && command -v notify-send >/dev/null 2>&1; then
+    notify-send 'Windows host app' "$1" || true
+  fi
+  exit 1
+}
+
+send_request() {
+  local request=$1 reply
+  # QEMU user networking exposes the Windows host loopback at 10.0.2.2.
+  exec 3<>/dev/tcp/10.0.2.2/4456 || fail 'The Try Omarchy host bridge is unavailable. Start the updated Windows launcher.'
+  printf '%s\n' "$request" >&3 || fail 'Could not send the request.'
+  IFS= read -r -t 8 reply <&3 || fail 'The Windows launcher did not answer.'
+  exec 3>&-
+  exec 3<&-
+  printf '%s\n' "$reply"
+}
+
+reply=$(send_request "$request")
+if [[ $request == list && $reply == \[* ]]; then
+  if [[ $1 == list ]]; then
+    jq -r '.[] | "\(.name)\t\(.id)"' <<<"$reply"
+    exit
+  fi
+  command -v zenity >/dev/null 2>&1 || fail 'The Windows app picker needs zenity.'
+  mapfile -t rows < <(jq -r '.[] | .name, .id' <<<"$reply")
+  [[ ${#rows[@]} -gt 0 ]] || fail 'No Windows apps were found.'
+  picker_title='Open on Windows host (Preview)'
+  [[ ${OMARCHY_WINDOW_PREVIEW:-} == 1 ]] && picker_title='Open as Omarchy window (Preview)'
+  selected=$(zenity --list --title="$picker_title" --width=480 --height=600 \
+    --column='Application' --column='ID' --hide-column=2 --print-column=2 \
+    "${rows[@]}") || {
+      [[ ${OMARCHY_WINDOW_PREVIEW:-} == 1 ]] && exit 3
+      exit 0
+    }
+  [[ $selected =~ ^(explorer|league|shortcut-[[:xdigit:]]{32})$ ]] || fail 'The picker returned an invalid app.'
+  reply=$(send_request "$launch_verb $selected")
+fi
+
+case "$reply" in
+  ok) exit 0 ;;
+  error\ *) fail "${reply#error }" ;;
+  *) fail 'The Windows launcher returned an unexpected response.' ;;
+esac

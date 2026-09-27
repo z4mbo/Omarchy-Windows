@@ -41,7 +41,7 @@ func writeShellLink(path, target, arguments, directory string) error {
 	description := "Run Omarchy on Windows"
 	for _, arg := range strings.Fields(arguments) {
 		if arg == "-settings" {
-			description = "Configure Try Omarchy"
+			description = "Configure Omarchy"
 		}
 	}
 	for _, property := range []struct {
@@ -126,7 +126,7 @@ func readShellLink(path string) (target, arguments string, err error) {
 	return
 }
 
-func launcherShortcutPaths() ([]string, error) {
+func launcherShortcutFolders() ([]string, error) {
 	folders := make([]string, 2)
 	for i, csidl := range []uintptr{2, 0x10} { // Current user's Programs and Desktop.
 		buffer := make([]uint16, 260)
@@ -139,7 +139,79 @@ func launcherShortcutPaths() ([]string, error) {
 			return nil, fmt.Errorf("Windows returned an empty shortcut folder")
 		}
 	}
-	return []string{filepath.Join(folders[0], "Try Omarchy.lnk"), filepath.Join(folders[0], "Try Omarchy Settings.lnk"), filepath.Join(folders[1], "Try Omarchy.lnk")}, nil
+	return folders, nil
+}
+
+func launcherShortcutPaths() ([]string, error) {
+	folders, err := launcherShortcutFolders()
+	if err != nil {
+		return nil, err
+	}
+	return shortcutPathsIn(folders[0], folders[1], "Omarchy", "Omarchy Settings"), nil
+}
+
+func legacyLauncherShortcutPaths() ([]string, error) {
+	folders, err := launcherShortcutFolders()
+	if err != nil {
+		return nil, err
+	}
+	return shortcutPathsIn(folders[0], folders[1], "Try Omarchy", "Try Omarchy Settings"), nil
+}
+
+func shortcutPathsIn(programs, desktop, name, settings string) []string {
+	return []string{filepath.Join(programs, name+".lnk"), filepath.Join(programs, settings+".lnk"), filepath.Join(desktop, name+".lnk")}
+}
+
+// Existing installations recorded their shortcut offer, so migrate the links
+// during normal launch. Only links targeting this installation may be renamed.
+// Write the new link before removing the old one so a failed write leaves a
+// working shortcut behind.
+func migrateOwnedLauncherShortcuts(legacy, current []string, target, dir string) error {
+	if len(legacy) != len(current) {
+		return fmt.Errorf("shortcut lists have different lengths")
+	}
+	for i, oldPath := range legacy {
+		if i == 1 { // Settings now lives inside the single Omarchy app.
+			continue
+		}
+		if _, err := os.Lstat(oldPath); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		oldTarget, args, err := readShellLink(oldPath)
+		if err != nil {
+			return err
+		}
+		if !sameShortcutTarget(oldTarget, target) {
+			continue
+		}
+		if _, err := os.Lstat(current[i]); err == nil {
+			newTarget, _, err := readShellLink(current[i])
+			if err != nil {
+				return err
+			}
+			if !sameShortcutTarget(newTarget, target) {
+				return fmt.Errorf("shortcut already belongs to another installation: %s", current[i])
+			}
+		} else if os.IsNotExist(err) {
+			if err := writeShellLink(current[i], target, args, dir); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+		if err := os.Remove(oldPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeOwnedSettingsShortcuts(paths []string, target string) error {
+	return changeOwnedShortcuts(paths, []string{target}, func(path, _ string) error {
+		return os.Remove(path)
+	})
 }
 
 // Read identity with the Unicode API before modifying a link. Never resolve or

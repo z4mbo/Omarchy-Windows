@@ -9,6 +9,8 @@ import (
 
 const maximumGuestDisplays = 16
 
+type guestDisplaySize struct{ Width, Height int }
+
 func guestDisplayCount(count int) int {
 	if count == 0 {
 		return 1
@@ -32,7 +34,13 @@ func displayDevice(cfg *config, hostmem uint64) string {
 	}
 	outputs := make([]map[string]any, guestDisplayCount(cfg.displays))
 	for i := range outputs {
-		outputs[i] = map[string]any{"name": fmt.Sprintf("Omarchy %d", i+1), "xres": width, "yres": height}
+		outputWidth, outputHeight := width, height
+		if i < len(cfg.displaySizes) {
+			if candidate := cfg.displaySizes[i]; candidate.Width >= 640 && candidate.Width <= 8192 && candidate.Height >= 480 && candidate.Height <= 8192 {
+				outputWidth, outputHeight = candidate.Width, candidate.Height
+			}
+		}
+		outputs[i] = map[string]any{"name": fmt.Sprintf("Omarchy %d", i+1), "xres": outputWidth, "yres": outputHeight}
 	}
 	device := map[string]any{"driver": "virtio-gpu-pci", "id": "gpu0", "max_outputs": len(outputs), "outputs": outputs}
 	if cfg.useGpu {

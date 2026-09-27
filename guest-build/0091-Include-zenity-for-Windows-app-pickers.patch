@@ -1,0 +1,55 @@
+From 6bc23dec670e79af0c67869908288836d4b942d1 Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 14:14:08 +0200
+Subject: [PATCH] Include zenity for Windows app pickers
+
+The isolated Arch package resolver adds zenity 4.2.2-1 and refreshes automake to 1.19-1 in the reviewed full transaction lock.
+---
+ guest/packages.lock.json | 5 +++--
+ guest/packages.txt       | 1 +
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/guest/packages.lock.json b/guest/packages.lock.json
+index 074fa5c..6ee7b48 100644
+--- a/guest/packages.lock.json
++++ b/guest/packages.lock.json
+@@ -19,7 +19,7 @@
+     "attr": "2.6.0-1",
+     "audit": "4.2.1-1",
+     "autoconf": "2.73-1",
+-    "automake": "1.18.1-1",
++    "automake": "1.19-1",
+     "avahi": "1:0.9rc5-1",
+     "base": "3-3",
+     "base-devel": "1-2",
+@@ -659,6 +659,7 @@
+     "yoga": "3.2.1-1",
+     "yyjson": "0.13.0-1",
+     "zbar": "0.23.93-7",
++    "zenity": "4.2.2-1",
+     "zeromq": "4.3.5-3",
+     "zimg": "3.0.6-2",
+     "zix": "0.8.2-1",
+@@ -668,6 +669,6 @@
+     "zram-generator": "1.2.1-1",
+     "zstd": "1.5.7-3"
+   },
+-  "requestedFileSha256": "e53bba7e09c010d9e4dbfdca9282b8912ac91637c22b68bceb7bb829e12c0160",
++  "requestedFileSha256": "6a71efb71a513ea6e94bbdbb8c221242f00a52c4fcba8b7c88f462d919bd323b",
+   "schemaVersion": 1
+ }
+diff --git a/guest/packages.txt b/guest/packages.txt
+index c21b655..105ab56 100644
+--- a/guest/packages.txt
++++ b/guest/packages.txt
+@@ -106,6 +106,7 @@ xdg-utils
+ xorg-xwayland
+ yay
+ zbar
++zenity
+ zoxide
+ zram-generator
+ zstd
+-- 
+2.53.0.windows.3
+

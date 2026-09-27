@@ -104,7 +104,7 @@ func prepareMovedLocation(dir string, recover bool) (string, error) {
 	}
 	if state.Pending != nil {
 		if !recover {
-			return "", fmt.Errorf("an installation move needs recovery; close Settings and open Try Omarchy normally")
+			return "", fmt.Errorf("an installation move needs recovery; close Settings and open Omarchy normally")
 		}
 		if err := s.recover(activateMovedInstallation); err != nil {
 			return "", err
@@ -148,6 +148,11 @@ func activateMovedInstallation(m *installationMove) error {
 	if err != nil {
 		return err
 	}
+	legacy, err := legacyLauncherShortcutPaths()
+	if err != nil {
+		return err
+	}
+	paths = append(paths, legacy...)
 	paths = append(paths, filepath.Join(m.Destination, "Start Omarchy.lnk"), filepath.Join(m.Destination, "Settings.lnk"))
 	if err := changeOwnedShortcuts(paths, []string{filepath.Join(m.Source, stableLauncherName), target}, func(path, args string) error {
 		newArgs := shortcutArguments(m.Destination)
@@ -249,10 +254,10 @@ func runMoveUI(dir string, cleanup bool) error {
 	getUI().finishOnly.Store(true)
 	getUI().setStatus("Finishing the installation move...")
 	if err := s.recover(activateMovedInstallation); err != nil {
-		return fmt.Errorf("the verified copy is safe; open Try Omarchy again to finish switching locations: %w", err)
+		return fmt.Errorf("the verified copy is safe; open Omarchy again to finish switching locations: %w", err)
 	}
 	uiDone()
-	infoBox("Try Omarchy moved to:\n\n" + m.Destination + "\n\nStart it normally to check your files. After a successful boot, Settings can remove the retained original at:\n" + m.Source)
+	infoBox("Omarchy moved to:\n\n" + m.Destination + "\n\nStart it normally to check your files. After a successful boot, Settings can remove the retained original at:\n" + m.Source)
 	return nil
 }
 

@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""Opt-in native Windows HWND projection controlled by Hyprland proxy tiles.
+
+No pixels or synthetic input cross this guest process. The authenticated host
+bridge positions its own granted HWNDs over the corresponding GTK tiles.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+
+from omarchy_windows_native_layout import LayoutError, WorkspaceMove, compute_layout, inherited_workspace, legacy_dispatch_needs_lua, marker_for, occlusion_limit, output_state, parse_layout_ack, parse_locked, proxy_location, workspace_move_command
+from omarchy_windows_protocol import Bridge, BridgeError, load_token
+
+POLL_SECONDS = 0.4
+HYPRCTL_TIMEOUT = 0.5
+EXCLUDED_PROCESSES = {"tryomarchy.exe", "qemu-system-x86_64.exe", "qemu-system-x86_64w.exe"}
+
+
+class AlreadyRunning(Exception):
+    """An existing controller already follows every newly granted window."""
+
+
+def hyprctl_json(command: str) -> object:
+    if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        raise LayoutError("Open native Windows apps from the Omarchy desktop.")
+    try:
+        result = subprocess.run(["hyprctl", "-j", command], capture_output=True,
+                                text=True, timeout=HYPRCTL_TIMEOUT, check=True)
+        return json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise LayoutError(f"Hyprland {command} state is unavailable.") from exc
+
+
+def dispatch_workspace_move(workspace: int, address: str, syntax: str | None) -> str | None:
+    """Cache the working syntax; only a Lua parser hint triggers fallback."""
+    primary = syntax or "legacy"
+    try:
+        result = subprocess.run(workspace_move_command(workspace, address, primary),
+                                capture_output=True, text=True,
+                                timeout=HYPRCTL_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return syntax
+    if result.returncode == 0:
+        return primary
+    if primary != "legacy" or not legacy_dispatch_needs_lua(result.stdout + result.stderr):
+        return syntax
+    try:
+        result = subprocess.run(workspace_move_command(workspace, address, "lua"),
+                                capture_output=True, text=True,
+                                timeout=HYPRCTL_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return syntax
+    return "lua" if result.returncode == 0 else syntax
+
+
+def presentation_probe(bridge: Bridge) -> int:
+    try:
+        return occlusion_limit(json.loads(bridge.request("/v1/presentation", timeout=1)))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LayoutError("The host returned an invalid native presentation response.") from exc
+
+
+def singleton_lock() -> int:
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", ""))
+    if not runtime.is_dir() or runtime == Path("."):
+        raise LayoutError("The Omarchy user runtime directory is unavailable.")
+    fd = os.open(runtime / "omarchy-windows-native.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(fd)
+        raise AlreadyRunning from exc
+    return fd
+
+
+def eligible(catalog: list[dict]) -> list[dict]:
+    allowed = []
+    for item in catalog:
+        process = item["process"].replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if process not in EXCLUDED_PROCESSES:
+            marker_for(item["id"])  # Reject invalid IDs before any layout is sent.
+            allowed.append(item)
+    if len(allowed) > 8:
+        raise LayoutError("More than eight native Windows windows are granted; close some on Windows.")
+    return allowed
+
+
+def hidden_layout(output: dict, catalog: list[dict]) -> dict:
+    return {"output": output, "windows": [
+        {"id": item["id"], "x": 0, "y": 0, "width": 1, "height": 1, "visible": False}
+        for item in catalog]}
+
+
+def layout_with_bootstrap(output: dict, catalog: list[dict], normal: dict, ready: bool) -> dict:
+    # The host handoff requires an already committed layout lease. Preserve
+    # every grant in a hidden full-state layout before the first visible tile.
+    return normal if ready else hidden_layout(output, catalog)
+
+
+def layout_conflict(error: Exception) -> bool:
+    """Only an HTTP 409 from the native layout endpoint gets recovery wording."""
+    cause = error.__cause__ if isinstance(error, BridgeError) else None
+    return (isinstance(cause, urllib.error.HTTPError) and cause.code == 409
+            and urllib.parse.urlsplit(cause.geturl()).path == "/v1/layout")
+
+
+def layout_error_message(error: Exception) -> str:
+    if layout_conflict(error):
+        return ("Omarchy couldn't show this Windows app in its workspace. "
+                "Reopen Windows Apps in Omarchy to retry. To restore it on Windows, "
+                "choose Stop showing Windows app from the Omarchy tray menu.")
+    return str(error)
+
+
+def start_gtk(bridge: Bridge, lock_fd: int, max_occlusions: int) -> int:
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        from gi.repository import Gio, GLib, Gtk
+    except (ImportError, ValueError) as exc:
+        print(f"Native Windows apps need GTK4 and python-gobject: {exc}", file=sys.stderr)
+        os.close(lock_fd)
+        return 1
+
+    class NativeWindow:
+        def __init__(self, controller: "Controller", metadata: dict, workspace: int | None):
+            self.controller = controller
+            self.ident = metadata["id"]
+            self.metadata = metadata
+            self.window = Gtk.ApplicationWindow(application=controller)
+            self.window.set_title((metadata["title"] or metadata["process"] or "Windows app") + marker_for(self.ident))
+            self.window.set_default_size(min(metadata["width"], 1100), min(metadata["height"], 750))
+            label = Gtk.Label(label="This Windows app is drawn directly by Windows in this Omarchy tile.")
+            label.set_wrap(True)
+            self.window.set_child(label)
+            self.close_handler = self.window.connect("close-request", self.close)
+            self.fullscreen = False
+            self.mapped = False
+            self.retiring = False
+            self.workspace_target = workspace
+            self.retry_on_fullscreen = False
+            self.move = WorkspaceMove(workspace)
+            if self.move.target is not None:
+                # Mapping is needed before Hyprland supplies an address. Do not
+                # explicitly activate the new proxy on the current workspace.
+                self.window.set_visible(True)
+            else:
+                self.window.present()
+            self.update(metadata)
+            if self.move.target is not None:
+                self.move.source_id = GLib.timeout_add(150, self.move_to_inherited_workspace)
+
+        def update(self, metadata: dict, mapped: bool | None = None) -> None:
+            self.metadata = metadata
+            self.window.set_title((metadata["title"] or metadata["process"] or "Windows app") + marker_for(self.ident))
+            if mapped is not None:
+                # GTK fullscreen is an asynchronous compositor request. A
+                # request before Hyprland maps the proxy can be lost; allow a
+                # fresh request after the mapped client is observed.
+                if self.mapped and not mapped:
+                    self.fullscreen = None  # Reconcile after a real unmap/remap.
+                self.mapped = mapped
+            wanted = metadata["fullscreen"] is True
+            if not wanted and (self.move.target is not None or self.move.failed):
+                self.move.cancel(GLib.source_remove)
+                self.retry_on_fullscreen = self.workspace_target is not None
+            if wanted and self.retry_on_fullscreen:
+                # A later app-driven fullscreen transition gets a fresh,
+                # bounded placement attempt after a canceled or failed move.
+                self.move = WorkspaceMove(self.workspace_target)
+                self.retry_on_fullscreen = False
+                self.move.source_id = GLib.timeout_add(150, self.move_to_inherited_workspace)
+            if not self.mapped or (wanted and not self.move.can_fullscreen()):
+                return  # Change fullscreen only after mapping and any verified move.
+            if wanted != self.fullscreen:
+                self.fullscreen = wanted
+                if wanted:
+                    self.window.fullscreen()
+                else:
+                    self.window.unfullscreen()
+
+        def move_to_inherited_workspace(self) -> bool:
+            if self.retiring or self.move.target is None:
+                return False
+            target = self.move.target
+            try:
+                location = proxy_location(self.ident, hyprctl_json("clients"), os.getpid())
+            except LayoutError:
+                location = None
+            if location is not None and location[0] == target:
+                self.move.complete()
+                self.update(self.metadata, mapped=True)
+                return False
+            if location is not None:
+                self.controller.move_syntax = dispatch_workspace_move(
+                    target, location[1], self.controller.move_syntax)
+            if self.move.retry():
+                return True
+            self.move.fail()
+            self.controller.warn_workspace(
+                "Could not move the Windows game to its client workspace. It remains windowed on the current workspace.")
+            return False
+
+        def close(self, *_args: object) -> bool:
+            self.retiring = True
+            self.move.cancel(GLib.source_remove)
+            self.controller.dismiss(self.ident)
+            return False
+
+        def retire(self) -> None:
+            self.retiring = True
+            self.move.cancel(GLib.source_remove)
+            self.window.disconnect(self.close_handler)
+            self.window.close()
+
+    class Controller(Gtk.Application):
+        def __init__(self):
+            super().__init__(application_id="dev.omarchy.WindowsNative", flags=Gio.ApplicationFlags.NON_UNIQUE)
+            self.bridge = bridge
+            self.max_occlusions = max_occlusions
+            self.stop = threading.Event()
+            self.state_lock = threading.Lock()
+            self.dismissed: set[str] = set()
+            self.pending_close: dict[str, tuple[int, float]] = {}
+            self.views: dict[str, NativeWindow] = {}
+            self.workspace_history: dict[str, int] = {}
+            self.last_output: dict | None = None
+            self.last_catalog: list[dict] = []
+            self.bootstrapped = False
+            self.sequence = 0
+            self.worker: threading.Thread | None = None
+            self.status = None
+            self.status_label = None
+            self.error = ""
+            self.workspace_warning = ""
+            self.move_syntax: str | None = None
+            self.last_layout_conflict_log = 0.0
+
+        def do_activate(self):
+            if self.worker is not None:
+                return
+            self.hold()
+            self.status = Gtk.ApplicationWindow(application=self)
+            self.status.set_title("Native Windows apps in Omarchy")
+            self.status.set_default_size(430, 110)
+            self.status_label = Gtk.Label(label="Connecting to the Windows app bridge…")
+            self.status_label.set_wrap(True)
+            self.status.set_child(self.status_label)
+            self.status.connect("close-request", lambda *_args: self.quit() or False)
+            self.status.present()
+            self.worker = threading.Thread(target=self.run_controller, name="omarchy-native-layout", daemon=True)
+            self.worker.start()
+
+        def do_shutdown(self):
+            self.stop.set()
+            if self.worker is not None:
+                self.worker.join(timeout=3)
+            super().do_shutdown()
+
+        def dismiss(self, ident: str) -> None:
+            with self.state_lock:
+                self.dismissed.add(ident)
+                self.pending_close[ident] = (0, 0.0)
+            self.views.pop(ident, None)
+
+        def update_status(self) -> None:
+            if self.status is None:
+                return
+            message = self.error or self.workspace_warning or ("No native Windows app windows are open. Close this controller or open an app on Windows."
+                                     if not self.views else "")
+            if message:
+                if self.status_label.get_text() != message:
+                    self.status_label.set_text(message)
+                # A repeated catalog/error poll must not steal the app's focus.
+                if not self.status.get_visible():
+                    self.status.present()
+            elif self.status.get_visible():
+                self.status.hide()
+
+        def apply_catalog(self, catalog: list[dict], clients: list[dict]) -> bool:
+            with self.state_lock:
+                dismissed = set(self.dismissed)
+            known = {ident: view.metadata["appGroup"] for ident, view in self.views.items()
+                     if view.move.can_fullscreen() and not view.retiring}
+            for group in set(known.values()):
+                observed = inherited_workspace(group, known, clients, os.getpid(), {})
+                if observed is not None:
+                    self.workspace_history[group] = observed
+            live = {item["id"] for item in catalog}
+            for ident in list(self.views):
+                if ident not in live:
+                    self.views.pop(ident).retire()
+            for metadata in catalog:
+                ident = metadata["id"]
+                if ident in dismissed:
+                    continue
+                if ident in self.views:
+                    self.views[ident].update(
+                        metadata, mapped=proxy_location(ident, clients, os.getpid()) is not None)
+                else:
+                    workspace = (inherited_workspace(metadata["appGroup"], known, clients,
+                                                     os.getpid(), self.workspace_history)
+                                 if metadata["fullscreen"] else None)
+                    self.views[ident] = NativeWindow(self, metadata, workspace)
+            self.update_status()
+            return False
+
+        def show_error(self, message: str) -> bool:
+            self.error = message
+            self.update_status()
+            return False
+
+        def warn_workspace(self, message: str) -> None:
+            self.workspace_warning = message
+            if self.status is not None:
+                self.status_label.set_text(message)
+                # Report the failed placement without an explicit focus request.
+                self.status.set_visible(True)
+
+        def clear_error(self) -> bool:
+            self.error = ""
+            self.update_status()
+            return False
+
+        def send(self, layout: dict) -> str:
+            self.sequence = max(self.sequence + 1, time.monotonic_ns())
+            body = {"sequence": self.sequence, **layout}
+            try:
+                response = json.loads(self.bridge.request("/v1/layout", payload=body, timeout=0.6))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise LayoutError("The host returned an invalid layout acknowledgement.") from exc
+            return parse_layout_ack(response)
+
+        def flush_pending_close(self) -> None:
+            now = time.monotonic()
+            with self.state_lock:
+                ready = next(((ident, attempts) for ident, (attempts, when) in self.pending_close.items()
+                              if when <= now), None)
+            if ready is None:
+                return
+            ident, attempts = ready
+            try:
+                # Reuse the authenticated close endpoint, with a short per-try
+                # timeout so one stalled close cannot starve layout renewal.
+                self.bridge.request(self.bridge.window_path(ident) + "/close", payload={}, timeout=0.5)
+            except BridgeError as exc:
+                if isinstance(exc.__cause__, urllib.error.HTTPError) and exc.__cause__.code == 404:
+                    with self.state_lock:
+                        self.pending_close.pop(ident, None)
+                    return  # Already closed on the host.
+                with self.state_lock:
+                    if ident in self.pending_close:
+                        self.pending_close[ident] = (min(attempts + 1, 4),
+                                                     now + min(5.0, 0.5 * (2 ** attempts)))
+                GLib.idle_add(self.show_error, "A Windows app could not be closed yet. Omarchy will retry.")
+                return
+            with self.state_lock:
+                self.pending_close.pop(ident, None)
+
+        def run_controller(self) -> None:
+            try:
+                while not self.stop.is_set():
+                    started = time.monotonic()
+                    try:
+                        catalog = eligible(self.bridge.windows(timeout=0.7))
+                        with self.state_lock:
+                            live = {item["id"] for item in catalog}
+                            # A temporarily hidden/minimized host window can
+                            # disappear from the catalog before /close succeeds.
+                            self.dismissed.intersection_update(live | self.pending_close.keys())
+                            dismissed = set(self.dismissed)
+                        catalog = [item for item in catalog if item["id"] not in dismissed]
+                        self.last_catalog = catalog
+                        monitors = hyprctl_json("monitors")
+                        output, _monitor = output_state(monitors)
+                        self.last_output = output
+                        layout_error = False
+                        try:
+                            clients = hyprctl_json("clients")
+                            if not isinstance(clients, list):
+                                raise LayoutError("Hyprland returned an invalid client list.")
+                            GLib.idle_add(self.apply_catalog, catalog, clients)
+                            locked = parse_locked(hyprctl_json("locked"))
+                            layout = compute_layout(catalog, clients, monitors, locked, os.getpid(),
+                                                    max_occlusions=self.max_occlusions)
+                        except LayoutError as exc:
+                            layout_error = True
+                            layout = hidden_layout(output, catalog)
+                            GLib.idle_add(self.show_error, f"Native windows are hidden: {exc}")
+                        suspension = self.send(layout_with_bootstrap(output, catalog, layout, self.bootstrapped))
+                        self.bootstrapped = True  # Only an acknowledged layout establishes the lease.
+                        if not layout_error:
+                            if suspension == "aspect_mismatch":
+                                GLib.idle_add(self.show_error, "Native Windows apps are hidden because the Omarchy and Windows display shapes do not match. Resize the Omarchy window or use matching display settings.")
+                            elif suspension == "display_unavailable":
+                                GLib.idle_add(self.show_error, "Native Windows apps are hidden because the Omarchy display window is unavailable. Restore the Omarchy window.")
+                            else:
+                                # host_inactive is expected while another host
+                                # window has focus; it must not raise a popup.
+                                GLib.idle_add(self.clear_error)
+                    except (BridgeError, LayoutError) as exc:
+                        if layout_conflict(exc):
+                            now = time.monotonic()
+                            if not self.last_layout_conflict_log or now - self.last_layout_conflict_log >= 30:
+                                print(f"Native Windows layout rejected at /v1/layout: {exc}", file=sys.stderr)
+                                self.last_layout_conflict_log = now
+                        GLib.idle_add(self.show_error, layout_error_message(exc))
+                        # Keep native content hidden through transient Hyprland
+                        # failures when an authenticated session remains reachable.
+                        if self.last_output is not None:
+                            try:
+                                self.send(hidden_layout(self.last_output, self.last_catalog))
+                                self.bootstrapped = True
+                            except (BridgeError, LayoutError):
+                                pass
+                    finally:
+                        # A layout or monitor failure cannot discard a user's
+                        # close request. One bounded retry runs each cycle.
+                        self.flush_pending_close()
+                    self.stop.wait(max(0, POLL_SECONDS - (time.monotonic() - started)))
+            finally:
+                # Omission releases every host HWND immediately. The host lease
+                # is the fallback if this process or transport dies first.
+                if self.last_output is not None:
+                    try:
+                        self.send({"output": self.last_output, "windows": []})
+                    except (BridgeError, LayoutError):
+                        pass
+
+    try:
+        return Controller().run([])
+    finally:
+        os.close(lock_fd)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Show native Windows apps in Omarchy-managed tiles")
+    parser.add_argument("--probe", action="store_true", help="check native host mode and grants without opening windows")
+    parser.add_argument("--id", help="granted Windows window selected by the app picker")
+    parser.add_argument("--group", help="Windows application group selected by the app picker")
+    args = parser.parse_args()
+    try:
+        bridge = Bridge(load_token())
+        max_occlusions = presentation_probe(bridge)
+        catalog = eligible(bridge.windows())
+        if args.id is not None and args.id not in {item["id"] for item in catalog}:
+            raise LayoutError("The selected Windows window is no longer granted by the host.")
+        if args.probe:
+            return 0
+        if not os.environ.get("WAYLAND_DISPLAY") or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+            raise LayoutError("Open native Windows apps from the Omarchy desktop.")
+        lock_fd = singleton_lock()
+    except AlreadyRunning:
+        return 0
+    except (BridgeError, LayoutError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return start_gtk(bridge, lock_fd, max_occlusions)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

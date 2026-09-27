@@ -1,0 +1,23 @@
+{
+  "cpu": "host",
+  "display": "none",
+  "connect": "after-ssh",
+  "qemu_sha256": "43160f86cbf28a67df6f529b104dd03f63a37ca5d3d2a9148f11358fbc559b0a",
+  "snapshot": true,
+  "pid": 34544,
+  "ssh_ready_s": 6.25,
+  "qmp_tcp_connected_s": 6.25,
+  "qmp_greeting_s": 6.25,
+  "qmp_capabilities_s": 6.25,
+  "qmp_status": {
+    "status": "running",
+    "running": true
+  },
+  "qemu_running_after_probe": true,
+  "acpi_powerdown_requested": true,
+  "clean_shutdown": true,
+  "qemu_exit_code": 0,
+  "duration_s": 7.74,
+  "serial_bytes": 23654,
+  "qemu_stderr_bytes": 188
+}

@@ -1,0 +1,24 @@
+diff --git a/hw/virtio/virtio-balloon.c b/hw/virtio/virtio-balloon.c
+--- a/hw/virtio/virtio-balloon.c
++++ b/hw/virtio/virtio-balloon.c
+@@ -148,5 +148,15 @@ static void balloon_deflate_page(VirtIOBalloon *balloon,
+                                  MemoryRegion *mr, hwaddr mr_offset)
+ {
++#ifdef _WIN32
++    /* QEMU_MADV_WILLNEED is unsupported on Windows.  Anonymous RAM has
++     * already been recommitted at the same address after inflation and
++     * faults in on demand.  Calling the unsupported hint for every 4 KiB
++     * deflate page produces hundreds of thousands of warnings and stalls
++     * recovery of the guest's logical RAM target. */
++    (void)balloon;
++    (void)mr;
++    (void)mr_offset;
++#else
+     void *addr = memory_region_get_ram_ptr(mr) + mr_offset;
+     ram_addr_t rb_offset;
+     RAMBlock *rb;
+@@ -171,3 +181,4 @@ static void balloon_deflate_page(VirtIOBalloon *balloon,
+         /* Otherwise ignore, failing to page hint shouldn't be fatal */
+     }
++#endif
+ }

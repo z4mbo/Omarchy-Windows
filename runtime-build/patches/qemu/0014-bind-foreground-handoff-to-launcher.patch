@@ -1,0 +1,218 @@
+diff --git a/qapi/ui.json b/qapi/ui.json
+index 945a80e..42f84e6 100644
+--- a/qapi/ui.json
++++ b/qapi/ui.json
+@@ -1742,7 +1742,7 @@
+   'data': { 'display': 'int', 'files': [ 'str' ] } }
+ 
+ ##
+-# @__omarchy_native-foreground-handoff:
++# @__omarchy_native-foreground-handoff-v2:
+ #
+ # Experimental Windows SDL-only foreground permission handoff.
+ # QEMU verifies the native grant, process creation time, short uptime
+@@ -1763,9 +1763,17 @@
+ # @expires: Absolute GetTickCount64 deadline, in milliseconds; must be
+ #     in the future and at most 250 milliseconds ahead when executed.
+ #
++# @launcher-pid: Launcher PID bound at SDL display registration.
++#
++# @launcher-created: Expected launcher creation FILETIME.
++#
++# @launcher-hwnd: Exact launcher tray HWND on the input desktop.
++#
+ # Since: 11.0 (downstream)
+ ##
+-{ 'command': '__omarchy_native-foreground-handoff',
++{ 'command': '__omarchy_native-foreground-handoff-v2',
+   'data': { 'hwnd': 'uint64', 'pid': 'uint32', 'created': 'uint64',
+-            'property': 'str', 'incarnation': 'uint64', 'expires': 'uint64' },
++            'property': 'str', 'incarnation': 'uint64', 'expires': 'uint64',
++            'launcher-pid': 'uint32', 'launcher-created': 'uint64',
++            'launcher-hwnd': 'uint64' },
+   'if': 'CONFIG_WIN32' }
+diff --git a/ui/omarchy-foreground-win32.c b/ui/omarchy-foreground-win32.c
+index 5f92889..cf4a8d9 100644
+--- a/ui/omarchy-foreground-win32.c
++++ b/ui/omarchy-foreground-win32.c
+@@ -13,14 +13,103 @@
+ #include "ui/console.h"
+ 
+ #include <windows.h>
++#include <tlhelp32.h>
+ 
+ static uintptr_t omarchy_sdl_window;
++static HANDLE omarchy_launcher_process;
++static DWORD omarchy_launcher_pid;
++static uint64_t omarchy_launcher_created;
++static bool omarchy_launcher_attempted;
++static bool omarchy_on_input_desktop(HWND display);
++
++static uint64_t omarchy_filetime(FILETIME created)
++{
++    return ((uint64_t)created.dwHighDateTime << 32) | created.dwLowDateTime;
++}
++
++/* Bind the actual process parent only once. Keep its handle so PID reuse cannot
++ * turn a later QMP request into permission for a different process. */
++static void omarchy_bind_launcher(void)
++{
++    PROCESSENTRY32W entry = { .dwSize = sizeof(entry) };
++    FILETIME created, exited, kernel, user, qemu_created;
++    HANDLE snapshot, parent = NULL;
++    DWORD pid = 0, current_session, parent_session;
++
++    if (omarchy_launcher_attempted) {
++        return;
++    }
++    omarchy_launcher_attempted = true;
++    snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
++    if (snapshot == INVALID_HANDLE_VALUE) {
++        return;
++    }
++    if (Process32FirstW(snapshot, &entry)) {
++        do {
++            if (entry.th32ProcessID == GetCurrentProcessId()) {
++                pid = entry.th32ParentProcessID;
++                break;
++            }
++        } while (Process32NextW(snapshot, &entry));
++    }
++    CloseHandle(snapshot);
++    if (!pid || pid == GetCurrentProcessId() || pid == UINT32_MAX) {
++        return;
++    }
++    parent = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
++                         FALSE, pid);
++    if (!parent || WaitForSingleObject(parent, 0) != WAIT_TIMEOUT ||
++        GetProcessId(parent) != pid ||
++        !GetProcessTimes(parent, &created, &exited, &kernel, &user) ||
++        !GetProcessTimes(GetCurrentProcess(), &qemu_created, &exited,
++                         &kernel, &user) ||
++        omarchy_filetime(created) >= omarchy_filetime(qemu_created) ||
++        !ProcessIdToSessionId(GetCurrentProcessId(), &current_session) ||
++        !ProcessIdToSessionId(pid, &parent_session) ||
++        current_session != parent_session) {
++        if (parent) {
++            CloseHandle(parent);
++        }
++        return;
++    }
++    omarchy_launcher_pid = pid;
++    omarchy_launcher_created = omarchy_filetime(created);
++    omarchy_launcher_process = parent;
++}
+ 
+ void qemu_omarchy_set_sdl_window(uintptr_t hwnd)
+ {
++    if (hwnd) {
++        omarchy_bind_launcher();
++    }
+     qatomic_set(&omarchy_sdl_window, hwnd);
+ }
+ 
++static bool omarchy_launcher_matches(uint32_t pid, uint64_t created,
++                                     HWND tray)
++{
++    DWORD window_pid = 0, qemu_session, parent_session;
++    WCHAR klass[64];
++    FILETIME actual, exited, kernel, user;
++
++    return omarchy_launcher_process && pid == omarchy_launcher_pid &&
++           created == omarchy_launcher_created &&
++           WaitForSingleObject(omarchy_launcher_process, 0) == WAIT_TIMEOUT &&
++           GetProcessId(omarchy_launcher_process) == pid &&
++           GetProcessTimes(omarchy_launcher_process, &actual, &exited,
++                           &kernel, &user) &&
++           omarchy_filetime(actual) == created &&
++           ProcessIdToSessionId(GetCurrentProcessId(), &qemu_session) &&
++           ProcessIdToSessionId(pid, &parent_session) &&
++           qemu_session == parent_session &&
++           tray && IsWindow(tray) && GetAncestor(tray, GA_ROOT) == tray &&
++           GetWindowThreadProcessId(tray, &window_pid) != 0 &&
++           window_pid == pid &&
++           GetClassNameW(tray, klass, G_N_ELEMENTS(klass)) != 0 &&
++           lstrcmpW(klass, L"TryOmarchyTray") == 0 &&
++           omarchy_on_input_desktop(tray);
++}
++
+ static bool omarchy_property_name(const char *name, WCHAR wide[64])
+ {
+     static const char prefix[] = "Omarchy.Windows.Grant.";
+@@ -121,12 +210,15 @@ static bool omarchy_deadline_valid(uint64_t expires)
+     return expires > now && expires - now <= 250;
+ }
+ 
+-void qmp___omarchy_native_foreground_handoff(uint64_t hwnd, uint32_t pid,
+-                                               uint64_t created,
+-                                               const char *property,
+-                                               uint64_t incarnation,
+-                                               uint64_t expires,
+-                                               Error **errp)
++void qmp___omarchy_native_foreground_handoff_v2(uint64_t hwnd, uint32_t pid,
++                                                  uint64_t created,
++                                                  const char *property,
++                                                  uint64_t incarnation,
++                                                  uint64_t expires,
++                                                  uint32_t launcher_pid,
++                                                  uint64_t launcher_created,
++                                                  uint64_t launcher_hwnd,
++                                                  Error **errp)
+ {
+     HWND display = (HWND)qatomic_read(&omarchy_sdl_window);
+     HWND native = (HWND)(uintptr_t)hwnd;
+@@ -140,6 +232,8 @@ void qmp___omarchy_native_foreground_handoff(uint64_t hwnd, uint32_t pid,
+         !created || !hwnd ||
+         (uint64_t)(uintptr_t)hwnd != hwnd || !incarnation ||
+         (uint64_t)(uintptr_t)incarnation != incarnation ||
++        !launcher_pid || launcher_pid == UINT32_MAX || !launcher_created ||
++        !launcher_hwnd || (uint64_t)(uintptr_t)launcher_hwnd != launcher_hwnd ||
+         !omarchy_property_name(property, property_wide)) {
+         error_setg(errp, "invalid native foreground handoff identity");
+         return;
+@@ -152,6 +246,11 @@ void qmp___omarchy_native_foreground_handoff(uint64_t hwnd, uint32_t pid,
+         error_setg(errp, "native foreground handoff expired");
+         return;
+     }
++    if (!omarchy_launcher_matches(launcher_pid, launcher_created,
++                                  (HWND)(uintptr_t)launcher_hwnd)) {
++        error_setg(errp, "bound launcher identity changed");
++        return;
++    }
+     process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                           FALSE, pid);
+     if (!process || WaitForSingleObject(process, 0) != WAIT_TIMEOUT ||
+@@ -172,25 +271,27 @@ void qmp___omarchy_native_foreground_handoff(uint64_t hwnd, uint32_t pid,
+         goto done;
+     }
+ 
+-    /* Do not call SetWindowPos from the QMP main loop: a target GUI thread
+-     * can hang after IsHungAppWindow, and async placement could surface a
+-     * stale window after the layout lease expires. Only delegate the exact
+-     * process permission. The launcher makes one placement attempt and
+-     * verifies the result immediately after this reply. */
++    /* Delegate to the bound launcher, which owns the authenticated grant and
++     * performs the single bounded foreground attempt. Never call into the
++     * target GUI thread from QEMU's QMP main loop. */
+     if (qatomic_read(&omarchy_sdl_window) != (uintptr_t)display ||
+         !omarchy_deadline_valid(expires) ||
+         !omarchy_display_is_foreground(display) ||
++        !omarchy_launcher_matches(launcher_pid, launcher_created,
++                                  (HWND)(uintptr_t)launcher_hwnd) ||
+         !omarchy_native_window_matches(native, pid, property_wide,
+                                         (uintptr_t)incarnation)) {
+         error_setg(errp, "native foreground handoff state changed");
+         goto done;
+     }
+-    if (!AllowSetForegroundWindow(pid)) {
++    if (!AllowSetForegroundWindow(launcher_pid)) {
+         error_setg(errp, "Windows denied native foreground permission");
+         goto done;
+     }
+     if (qatomic_read(&omarchy_sdl_window) != (uintptr_t)display ||
+         !omarchy_display_is_foreground(display) ||
++        !omarchy_launcher_matches(launcher_pid, launcher_created,
++                                  (HWND)(uintptr_t)launcher_hwnd) ||
+         !omarchy_native_window_matches(native, pid, property_wide,
+                                         (uintptr_t)incarnation)) {
+         error_setg(errp, "native foreground handoff postcondition failed");

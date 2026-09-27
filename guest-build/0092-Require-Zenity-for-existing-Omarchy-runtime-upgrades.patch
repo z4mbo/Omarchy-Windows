@@ -1,0 +1,96 @@
+From 8ffab48633b12718f1624e3c8060d916059a91d9 Mon Sep 17 00:00:00 2001
+From: Omarchy Development <actions@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 14:16:50 +0200
+Subject: [PATCH] Require Zenity when upgrading the Omarchy runtime
+
+---
+ guest/scripts/register-omarchy-runtime.sh | 1 +
+ guest/spec.json                           | 2 +-
+ guest/tests/test_runtime_package.py       | 9 ++++++---
+ guest/tests/verify.py                     | 3 +++
+ 4 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/guest/scripts/register-omarchy-runtime.sh b/guest/scripts/register-omarchy-runtime.sh
+index b82a514d6cbcff413d6ab702837417e4673ecf8b..bac832f5430854aa458316058980a640815ccce3 100755
+--- a/guest/scripts/register-omarchy-runtime.sh
++++ b/guest/scripts/register-omarchy-runtime.sh
+@@ -152,6 +152,7 @@ license = MIT
+ provides = omarchy=$version
+ depend = pamixer
+ depend = playerctl
++depend = zenity
+ EOF
+ 
+ while IFS= read -r relative; do
+diff --git a/guest/spec.json b/guest/spec.json
+index 0a267035aea47608e5677f4d74643afeaa33dbbb..d97772e61d266722b1cd5f1b4b0ed632879edbf3 100644
+--- a/guest/spec.json
++++ b/guest/spec.json
+@@ -30,7 +30,7 @@
+     "versionFile": "4.0.0.alpha",
+     "channel": "quattro",
+     "license": "MIT",
+-    "packageRelease": 4
++    "packageRelease": 5
+   },
+   "supplyChain": {
+     "omarchyPackagesRepository": "https://github.com/omacom-io/omarchy-pkgs",
+diff --git a/guest/tests/test_runtime_package.py b/guest/tests/test_runtime_package.py
+index cbb88ba945ee2af3ff8924c49f15c8598f38a744..69c017eb486f332f305b3c35611034ec898def08 100644
+--- a/guest/tests/test_runtime_package.py
++++ b/guest/tests/test_runtime_package.py
+@@ -31,7 +31,7 @@ class RuntimePackageTests(unittest.TestCase):
+         for name in ('omarchy', 'omarchy-version'):
+             (self.root / 'usr/share/omarchy/bin' / name).symlink_to('/usr/bin/' + name)
+         self.spec = self.base / 'spec.json'
+-        self.spec.write_text(json.dumps({'upstream': {'version': '4.0.3', 'packageRelease': 4,
++        self.spec.write_text(json.dumps({'upstream': {'version': '4.0.3', 'packageRelease': 5,
+             'repository': 'https://example.invalid/omarchy', 'commit': 'a' * 40},
+             'image': {'sourceDateEpoch': 1789344000}}))
+         self.config = self.base / 'pacman.conf'
+@@ -43,7 +43,7 @@ class RuntimePackageTests(unittest.TestCase):
+         self.fake('zstd', 'cat > "${@: -1}"')
+         self.fake('pacman', '''for arg in "$@"; do
+   if [[ $arg == -U ]]; then cp "${@: -1}" "$CAPTURE"; fi
+-  if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-4'; fi
++  if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-5'; fi
+ done
+ exit 0''')
+         self.capture = self.base / 'package.tar'
+@@ -64,7 +64,10 @@ exit 0''')
+         self.assertEqual(result.returncode, 0, result.stderr)
+         with tarfile.open(self.capture) as archive:
+             names = set(archive.getnames())
++            metadata = archive.extractfile('.PKGINFO').read().decode()
+             self.assertIn('.INSTALL', names)
++            self.assertIn('pkgver = 4.0.3-5', metadata)
++            self.assertIn('depend = zenity', metadata)
+             self.assertIn('usr/bin/omarchy', names)
+             self.assertIn('usr/bin/omarchy-version', names)
+             self.assertNotIn('usr/bin/omarchy-nvim-setup', names)
+@@ -90,7 +93,7 @@ exit 0''')
+     def test_database_failure_rejects_package(self):
+         self.fake('pacman', '''for arg in "$@"; do
+   if [[ $arg == -Dk ]]; then exit 1; fi
+-  if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-4'; fi
++  if [[ $arg == -Q ]]; then echo 'try-omarchy-runtime 4.0.3-5'; fi
+ done
+ exit 0''')
+         result = self.run_builder()
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index 36566077d499b8852fdbca848431068dbf9ee395..bdf618942425a163ebab1e58aae09646035e6769 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -47,6 +47,9 @@ def main() -> None:
+     check(spec["runtime"]["virtualMachineMonitor"] == "qemu-system-x86_64", "runtime uses native x86 QEMU")
+     check(spec["runtime"]["hypervisor"] == "whpx", "runtime uses Windows Hypervisor Platform")
+     check(spec["runtime"]["storage"]["expandedSizeMiB"] == 24576, "working disk expands to 24 GiB")
++    check(spec["upstream"].get("packageRelease") == 5
++          and "depend = zenity" in read(GUEST / "scripts/register-omarchy-runtime.sh"),
++          "the updated Omarchy runtime requires Zenity on existing guest disks")
+     check(set(spec["inputs"]) == {"packages", "packageLock", "pacmanConfig"}, "spec has a minimal input set")
+     for path in spec["inputs"].values():
+         check((GUEST / path).is_file(), f"spec input exists: {path}")
+-- 
+2.53.0.windows.3
+

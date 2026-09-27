@@ -1,0 +1,45 @@
+diff --git a/hw/virtio/virtio-balloon.c b/hw/virtio/virtio-balloon.c
+index 4c5f486ba2..06d634342d 100644
+--- a/hw/virtio/virtio-balloon.c
++++ b/hw/virtio/virtio-balloon.c
+@@ -24,6 +24,9 @@
+ #include "hw/core/boards.h"
+ #include "system/balloon.h"
+ #include "system/ramblock.h"
++#ifdef _WIN32
++#include "system/whpx.h"
++#endif
+ #include "hw/virtio/virtio-balloon.h"
+ #include "system/address-spaces.h"
+ #include "qapi/error.h"
+@@ -1010,6 +1013,19 @@ static void virtio_balloon_reset_enter(Object *obj, ResetType type)
+     s->stats_last_update = 0;
+ }
+ 
++#ifdef _WIN32
++static bool virtio_balloon_omarchy_reclaim_active(Object *obj, Error **errp)
++{
++    (void)obj;
++    (void)errp;
++    /* This property exists only in the experimental Windows build.  It
++     * reports the live process opt-in and selected accelerator, rather than
++     * the presence of a balloon device alone. */
++    return whpx_enabled() &&
++           g_strcmp0(getenv("OMARCHY_QEMU_BALLOON_DECOMMIT"), "1") == 0;
++}
++#endif
++
+ static void virtio_balloon_instance_init(Object *obj)
+ {
+     VirtIOBalloon *s = VIRTIO_BALLOON(obj);
+@@ -1026,6 +1042,10 @@ static void virtio_balloon_instance_init(Object *obj)
+                         balloon_stats_get_poll_interval,
+                         balloon_stats_set_poll_interval,
+                         NULL, NULL);
++#ifdef _WIN32
++    object_property_add_bool(obj, "x-omarchy-balloon-reclaim-active",
++                             virtio_balloon_omarchy_reclaim_active, NULL);
++#endif
+ }
+ 
+ static const VMStateDescription vmstate_virtio_balloon = {
