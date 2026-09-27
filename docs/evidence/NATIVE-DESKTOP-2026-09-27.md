@@ -359,3 +359,18 @@ This candidate fails workspace-return acceptance. No fullscreen toggle was
 performed before this failure; the delayed Blender fullscreen regression tests
 passed locally, but physical validation remains pending. Games, performance
 parity and a replacement install are not validated by this run.
+
+Graceful guest shutdown at 17:36 restored Blender on Windows with its Right
+Orthographic view intact. Computer Use closed that unchanged default scene and
+confirmed both the VM and Blender had exited. The personalized installation was
+not changed.
+
+The follow-up diagnostic launcher from source `4295dd4` distinguishes expired
+layout leases, exhausted Apply budgets, identity/geometry checks, QMP rejection,
+and accepted permission followed by failed placement. The full local Windows
+Go suite passed before the final reason-code split (app 29.052 seconds);
+focused handoff and fullscreen tests passed after it. Its executable SHA256 is
+`2d4f079134bdc09491962f9fa084c289463b35c4451192a6e0fb315038b2d88d`.
+It was staged beside the stopped disposable disk. Automatic approval review
+rejected its launch with `blocked by policy`, without a further reason; it has
+not yet supplied a physical diagnostic result.
